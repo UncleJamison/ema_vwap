@@ -1,0 +1,1749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EMA + VWAP Crypto Trading Suite</title>
+  <!-- Google Fonts & Plotly JS -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon">⚡</div>
+        <div class="brand-text">
+          <h1>EMA + VWAP <span>Trading Suite</span></h1>
+          <p>Institutional Bias & Momentum Timing Strategy Engine</p>
+        </div>
+      </div>
+      <div class="header-status">
+        <div class="navbar-nav-pill" id="global-nav-pill" style="display: flex; align-items: center; gap: 6px; background: rgba(0, 242, 254, 0.08); border: 1px solid rgba(0, 242, 254, 0.25); padding: 4px 10px; border-radius: 20px; font-size: 0.78rem; cursor: pointer;" title="Click to view Multi-Asset Portfolio">
+          <span style="color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase;">PORTFOLIO NAV:</span>
+          <strong id="global-nav-val" style="color: #00f2fe; font-size: 0.85rem;">$100,000.00</strong>
+        </div>
+        <div class="status-indicator live"></div>
+        <span id="exchange-badge">KUCOIN REST API</span>
+        <span id="nyse-status-badge" class="badge badge-outline" style="font-size:0.75rem; border-color: rgba(0, 242, 254, 0.4); color: var(--accent-cyan);">NYSE: CHECKING...</span>
+        <button id="open-settings-btn" class="settings-btn" title="Strategy, Fee & Optuna Settings">⚙️ Settings</button>
+      </div>
+    </header>
+
+    <!-- Main Layout -->
+    <div class="main-layout">
+      <!-- Control Sidebar -->
+      <aside class="sidebar">
+        <!-- 1. Market Data & Exchange Section -->
+        <div class="sidebar-section">
+          <h2 class="collapsible-header" onclick="toggleSidebarSection(this)">
+            <span>Market Data & Exchange</span>
+            <span class="toggle-arrow">▼</span>
+          </h2>
+          <div class="sidebar-section-content">
+            <div class="form-group">
+              <label for="exchange-select">Exchange Data Source</label>
+              <select id="exchange-select" class="form-control">
+                <option value="gemini">Gemini (Crypto Spot)</option>
+                <option value="kucoin" selected>KuCoin (Crypto Spot/Futures)</option>
+                <option value="alpaca">Alpaca Markets (US Equities)</option>
+                <option value="polygon">Polygon.io (US Equities)</option>
+                <option value="synthetic_stock">Synthetic US Stock (Gaps & Splits)</option>
+                <option value="synthetic">Synthetic Crypto Generator</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="symbol-input">Symbol</label>
+                <input type="text" id="symbol-input" value="BTC/USD" class="form-control">
+              </div>
+              <div class="form-group">
+                <label for="timeframe-select">Timeframe</label>
+                <select id="timeframe-select" class="form-control">
+                  <option value="1m">1m</option>
+                  <option value="3m">3m</option>
+                  <option value="5m" selected>5m</option>
+                  <option value="15m">15m</option>
+                  <option value="30m">30m</option>
+                  <option value="1h">1h</option>
+                  <option value="2h">2h</option>
+                  <option value="4h">4h</option>
+                  <option value="6h">6h</option>
+                  <option value="1d">1d</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="data-range-select">Historical Data Range</label>
+              <select id="data-range-select" class="form-control">
+                <option value="500">Latest 500 Candles (~2 Days)</option>
+                <option value="1500">Latest 1,500 Candles (~5 Days)</option>
+                <option value="30_days">30 Days Historical (Cached DB)</option>
+                <option value="90_days">90 Days Historical (Cached DB)</option>
+                <option value="180_days" selected>180 Days Full History (Cached DB)</option>
+              </select>
+            </div>
+            <div class="form-row" style="margin-top: 10px;">
+              <button id="sync-db-btn" class="btn-secondary" style="flex: 1;">
+                <span class="btn-icon">📥</span> Sync 180-Day DB
+              </button>
+              <button id="clear-db-btn" class="btn-secondary" style="flex: 1; border-color: rgba(255, 0, 122, 0.4); color: #ff007a;">
+                <span class="btn-icon">🗑️</span> Clear DB Cache
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Strategy Configuration Section -->
+        <div class="sidebar-section">
+          <h2 class="collapsible-header" onclick="toggleSidebarSection(this)">
+            <span>Strategy Configuration</span>
+            <span class="toggle-arrow">▼</span>
+          </h2>
+          <div class="sidebar-section-content">
+            <div class="form-group">
+              <label for="strategy-mode-select">Setup Type</label>
+              <select id="strategy-mode-select" class="form-control">
+                <option value="crossover" selected>Setup 1: EMA 9 x VWAP Crossover</option>
+                <option value="multi_ema">Setup 2: Multi-EMA Confirmation (8/21 x 50 VWAP)</option>
+                <option value="pullback">Setup 3: VWAP Pullback Entry</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="trade-direction-select">Trade Direction (Account Mode)</label>
+              <select id="trade-direction-select" class="form-control">
+                <option value="long_only" selected>Long Only (Spot / Futures Account)</option>
+                <option value="long_short">Long & Short (Margin / Futures)</option>
+                <option value="short_only">Short Only</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="fast-ema-input">Fast EMA</label>
+                <input type="number" id="fast-ema-input" value="9" min="2" max="50" class="form-control">
+              </div>
+              <div class="form-group">
+                <label for="slow-ema-input">Slow EMA</label>
+                <input type="number" id="slow-ema-input" value="21" min="5" max="100" class="form-control">
+              </div>
+              <div class="form-group">
+                <label for="trend-ema-input">Trend EMA</label>
+                <input type="number" id="trend-ema-input" value="50" min="20" max="200" class="form-control">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Multi-Asset & Execution Rules Section -->
+        <div class="sidebar-section">
+          <h2 class="collapsible-header" onclick="toggleSidebarSection(this)">
+            <span>Multi-Asset & Rules</span>
+            <span class="toggle-arrow">▼</span>
+          </h2>
+          <div class="sidebar-section-content">
+            <div class="form-row">
+              <div class="form-group">
+                <label for="asset-type-select">Asset Class</label>
+                <select id="asset-type-select" class="form-control">
+                  <option value="crypto" selected>Crypto (24/7)</option>
+                  <option value="stock">US Equity / Stock</option>
+                  <option value="synthetic">Synthetic</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="session-mode-select">Market Session</label>
+                <select id="session-mode-select" class="form-control">
+                  <option value="all" selected>All Hours (24/7)</option>
+                  <option value="rth">RTH (09:30-16:00 ET)</option>
+                  <option value="extended">Extended (04:00-20:00 ET)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="vwap-anchor-select">VWAP Anchor</label>
+                <select id="vwap-anchor-select" class="form-control">
+                  <option value="D" selected>Daily Session (Auto)</option>
+                  <option value="US_EQUITY">09:30 ET (NYSE)</option>
+                  <option value="UTC">00:00 UTC (Crypto)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="fractional-shares-select">Share Sizing</label>
+                <select id="fractional-shares-select" class="form-control">
+                  <option value="true" selected>Fractional Shares</option>
+                  <option value="false">Whole Integer Only</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group" style="display: flex; align-items: center; gap: 8px; margin-top: 6px;">
+              <input type="checkbox" id="margin-calls-checkbox" style="width: 16px; height: 16px; cursor: pointer;">
+              <label for="margin-calls-checkbox" style="margin-bottom: 0; font-size: 0.85rem; cursor: pointer;">Real-time Intraday Margin Monitoring (4:1 longs, 2:1 shorts)</label>
+            </div>
+            <div class="form-group" style="margin-top: 6px;">
+              <label for="min-margin-input" style="font-size: 0.85rem;">Minimum Margin Equity ($):</label>
+              <input type="number" id="min-margin-input" class="form-control" value="2000" min="2000" step="100" style="font-size: 0.85rem;">
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. Filters & Risk Management Section -->
+        <div class="sidebar-section">
+          <h2 class="collapsible-header" onclick="toggleSidebarSection(this)">
+            <span>Filters & Risk Management</span>
+            <span class="toggle-arrow">▼</span>
+          </h2>
+          <div class="sidebar-section-content">
+            <div class="form-row">
+              <div class="form-group">
+                <label for="vwap-slope-input">Min VWAP Slope</label>
+                <input type="number" id="vwap-slope-input" value="0.0001" step="0.0001" class="form-control">
+              </div>
+              <div class="form-group">
+                <label for="vwap-lookback-input">Slope Lookback</label>
+                <input type="number" id="vwap-lookback-input" value="5" min="1" max="50" class="form-control">
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="volume-filter-toggle">Volume Gate</label>
+                <select id="volume-filter-toggle" class="form-control">
+                  <option value="true" selected>Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="vol-mult-input">Vol Multiplier</label>
+                <input type="number" id="vol-mult-input" value="1.2" step="0.1" min="0.5" max="5.0" class="form-control">
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="pullback-tol-input">Pullback Tol %</label>
+                <input type="number" id="pullback-tol-input" value="0.3" step="0.05" min="0.05" max="5.0" class="form-control">
+              </div>
+              <div class="form-group">
+                <label for="vwap-stop-input">VWAP Stop %</label>
+                <input type="number" id="vwap-stop-input" value="0.1" step="0.05" min="0.01" max="5.0" class="form-control">
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="stop-loss-type-select">Stop Loss Mode</label>
+                <select id="stop-loss-type-select" class="form-control">
+                  <option value="vwap" selected>VWAP Level</option>
+                  <option value="atr">ATR Trailing</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="atr-mult-input">ATR Multiplier</label>
+                <input type="number" id="atr-mult-input" value="2.0" step="0.1" min="0.5" max="10.0" class="form-control">
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="risk-per-trade-input">Risk % / Trade</label>
+                <input type="number" id="risk-per-trade-input" value="1.0" step="0.1" min="0.1" max="5.0" class="form-control">
+              </div>
+              <div class="form-group">
+                <label for="max-holding-bars-input">Max Hold Bars</label>
+                <input type="number" id="max-holding-bars-input" placeholder="None" min="1" max="500" class="form-control">
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="rr-ratio-input">Target R:R Ratio</label>
+                <input type="number" id="rr-ratio-input" value="2.0" step="0.1" min="0.5" max="10.0" class="form-control">
+              </div>
+              <div class="form-group">
+                <label for="capital-input">Capital ($)</label>
+                <input type="number" id="capital-input" value="10000" step="1000" class="form-control">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Optuna & Robustness Controls Section -->
+        <div class="sidebar-section">
+          <h2 class="collapsible-header" onclick="toggleSidebarSection(this)">
+            <span>Optuna & Robustness</span>
+            <span class="toggle-arrow">▼</span>
+          </h2>
+          <div class="sidebar-section-content">
+            <div class="form-group">
+              <label for="optuna-scope-select">Optuna Setup Scope</label>
+              <select id="optuna-scope-select" class="form-control">
+                <option value="auto" selected>Auto (Compare All 3 Setups)</option>
+                <option value="current">Current Setup Only</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="optuna-objective-mode-select">Optimization Objective Mode</label>
+              <select id="optuna-objective-mode-select" class="form-control">
+                <option value="single" selected>Single Metric</option>
+                <option value="multi">Multi-Metric (Pareto / Balanced)</option>
+              </select>
+            </div>
+            <div class="form-group" id="optuna-target-group">
+              <label for="optuna-target-select">Optuna Target Metric</label>
+              <select id="optuna-target-select" class="form-control">
+                <option value="sharpe_ratio" selected>Sharpe Ratio (Risk-Adjusted)</option>
+                <option value="drawdown_penalized_sharpe">Drawdown-Penalized Sharpe (Max Robustness)</option>
+                <option value="calmar_ratio">Calmar Ratio (Return / Max DD)</option>
+                <option value="sortino_ratio">Sortino Ratio (Downside Volatility)</option>
+                <option value="drawdown_penalized_sortino">Drawdown-Penalized Sortino (DD-Robust Downside)</option>
+                <option value="ulcer_index">Ulcer Index (Recovery Duration)</option>
+                <option value="profit_factor">Profit Factor</option>
+                <option value="net_profit">Net Profit ($)</option>
+                <option value="total_return_pct">Total Return (%)</option>
+                <option value="win_rate">Win Rate (%)</option>
+              </select>
+            </div>
+            <div class="form-group" id="optuna-multi-metric-group" style="display:none;">
+              <label for="optuna-multi-metric-select">Multi-Metric Objective Set</label>
+              <select id="optuna-multi-metric-select" class="form-control">
+                <option value="sharpe_ratio|max_drawdown_pct" selected>Sharpe + Max Drawdown</option>
+                <option value="sharpe_ratio|total_return_pct">Sharpe + Total Return</option>
+                <option value="sortino_ratio|max_drawdown_pct">Sortino + Max Drawdown</option>
+                <option value="profit_factor|total_return_pct">Profit Factor + Total Return</option>
+                <option value="calmar_ratio|max_drawdown_pct">Calmar + Max Drawdown</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>
+                <input type="checkbox" id="optuna-enable-dd-constraint" class="form-check">
+                Enable Hard Drawdown Constraint (Prune Bad Trials)
+              </label>
+            </div>
+            <div class="form-group" id="optuna-dd-constraint-group" style="display:none;">
+              <label for="optuna-dd-constraint-input">Max Drawdown Threshold (%)</label>
+              <input type="number" id="optuna-dd-constraint-input" value="25" min="5" max="50" step="0.5" class="form-control">
+              <small style="opacity:0.7; margin-top:4px;">Trials exceeding this drawdown will be rejected during optimization</small>
+            </div>
+            <div class="form-group">
+              <label>
+                <input type="checkbox" id="optuna-enable-max-hold" class="form-check">
+                Enable Max Holding Bars (Time-Based Stop)
+              </label>
+            </div>
+            <div class="form-group" id="optuna-max-hold-group" style="display:none;">
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="optuna-max-hold-min">Min Bars</label>
+                  <input type="number" id="optuna-max-hold-min" value="4" min="1" max="500" class="form-control">
+                </div>
+                <div class="form-group">
+                  <label for="optuna-max-hold-max">Max Bars</label>
+                  <input type="number" id="optuna-max-hold-max" value="96" min="2" max="1000" class="form-control">
+                </div>
+              </div>
+              <small style="opacity:0.7; margin-top:4px;">Optuna will sweep the number of bars before forcing a time-based exit (e.g. 96 = 2 days on 30m)</small>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="optuna-trials-input">Optuna Trials</label>
+                <input type="number" id="optuna-trials-input" value="50" min="5" max="1000" class="form-control">
+              </div>
+              <div class="form-group">
+                <label for="wfo-windows-input">WFO Windows <span style="opacity:0.6;font-size:0.8em">(0 = auto)</span></label>
+                <input type="number" id="wfo-windows-input" value="0" min="0" max="20" class="form-control">
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="mc-sims-input">Monte Carlo Sims</label>
+              <input type="number" id="mc-sims-input" value="500" min="50" max="2000" class="form-control">
+            </div>
+          </div>
+        </div>
+
+        <button id="run-backtest-btn" class="btn-primary">
+          <span class="btn-icon">▶</span> Run Strategy Backtest
+        </button>
+        <button id="run-optuna-btn" class="btn-secondary" style="margin-top: 8px; border-color: rgba(0, 242, 254, 0.4); color: var(--accent-cyan);">
+          <span class="btn-icon">🎯</span> Run Optuna Optimization
+        </button>
+        <button id="run-wfo-btn" class="btn-secondary" style="margin-top: 8px; border-color: rgba(121, 40, 202, 0.4); color: #b87cf8;">
+          <span class="btn-icon">🔄</span> Run Walk-Forward Analysis
+        </button>
+        <button id="run-mc-btn" class="btn-secondary" style="margin-top: 8px; border-color: rgba(255, 170, 0, 0.4); color: var(--accent-amber);">
+          <span class="btn-icon">🎲</span> Run Monte Carlo Simulator
+        </button>
+        <button id="run-batch-btn" class="btn-secondary" style="margin-top: 8px; border-color: rgba(16, 185, 129, 0.4); color: #34d399;">
+          <span class="btn-icon">🏆</span> Run Batch Sweep
+        </button>
+        <button id="reset-main-defaults-btn" class="btn-secondary" style="margin-top: 14px; border-color: rgba(255, 255, 255, 0.15); color: var(--text-muted);" title="Reset all sidebar inputs to default values">
+          <span class="btn-icon">↺</span> Reset Strategy to Defaults
+        </button>
+
+        <!-- Keyboard Shortcut Helper Badge -->
+        <div style="margin-top: 16px; padding: 10px; background: rgba(0,0,0,0.25); border: 1px dashed rgba(255,255,255,0.1); border-radius: var(--radius-md); font-size: 0.72rem; color: var(--text-muted); line-height: 1.5;">
+          <div style="color: var(--accent-cyan); font-weight: 600; margin-bottom: 4px;">⌨️ Keyboard Shortcuts</div>
+          <div><kbd style="background:rgba(255,255,255,0.1); padding:2px 4px; border-radius:3px; color:#fff;">Ctrl+Enter</kbd> Run Backtest</div>
+          <div><kbd style="background:rgba(255,255,255,0.1); padding:2px 4px; border-radius:3px; color:#fff;">Ctrl+1..7</kbd> Switch Tabs</div>
+          <div><kbd style="background:rgba(255,255,255,0.1); padding:2px 4px; border-radius:3px; color:#fff;">Ctrl+,</kbd> Open Settings</div>
+          <div><kbd style="background:rgba(255,255,255,0.1); padding:2px 4px; border-radius:3px; color:#fff;">Esc</kbd> Close Dialogs</div>
+        </div>
+      </aside>
+
+      <!-- Main Dashboard View -->
+      <main class="dashboard-content">
+        <!-- Navigation Tabs -->
+        <nav class="nav-tabs">
+          <button class="tab-btn active" data-tab="tab-backtest">📊 Backtest Dashboard</button>
+          <button class="tab-btn" data-tab="tab-optuna">🎯 Optuna Optimization</button>
+          <button class="tab-btn" data-tab="tab-wfo">🔄 Walk-Forward Analysis</button>
+          <button class="tab-btn" data-tab="tab-mc">🎲 Monte Carlo Risk</button>
+          <button class="tab-btn" data-tab="tab-batch">🏆 Batch Sweep</button>
+          <button class="tab-btn" data-tab="tab-paper">💼 Paper Trading</button>
+          <button class="tab-btn" data-tab="tab-portfolio" id="tab-btn-portfolio">🌐 Multi-Asset Portfolio</button>
+        </nav>
+
+        <!-- Tab 1: Standard Backtest Dashboard -->
+        <div id="tab-backtest" class="tab-content active">
+          <!-- Backtest Action Bar -->
+          <div class="optuna-action-bar glass-panel" style="margin-bottom: 12px;">
+            <div class="optuna-action-info">
+              <span class="badge badge-cyan" id="backtest-status-badge">Active Strategy Configuration</span>
+              <span id="backtest-summary-desc" class="opt-desc-text">Deploy current backtested parameters directly into active Paper Trading Profile.</span>
+            </div>
+            <button id="deploy-backtest-paper-btn" class="btn-success btn-sm glow-green">
+              🚀 Deploy to Paper Profile
+            </button>
+          </div>
+
+          <!-- Strategy Quick-Tweak Bar -->
+          <div class="glass-panel" style="margin-bottom: 16px; padding: 10px 16px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; border-left: 3px solid var(--accent-cyan);">
+            <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px;">
+              <span style="font-size: 0.82rem; font-weight: 700; color: #00f2fe; text-transform: uppercase; letter-spacing: 0.5px;">⚡ Quick Tweak:</span>
+              <div style="display: flex; align-items: center; gap: 4px;">
+                <span style="font-size: 0.78rem; color: var(--text-muted);">Fast:</span>
+                <button class="btn-micro" id="tweak-fast-dec">-</button>
+                <input type="number" id="tweak-fast-val" value="9" min="2" max="50" style="width: 44px; text-align: center; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;">
+                <button class="btn-micro" id="tweak-fast-inc">+</button>
+              </div>
+              <div style="display: flex; align-items: center; gap: 4px;">
+                <span style="font-size: 0.78rem; color: var(--text-muted);">Slow:</span>
+                <button class="btn-micro" id="tweak-slow-dec">-</button>
+                <input type="number" id="tweak-slow-val" value="21" min="5" max="150" style="width: 44px; text-align: center; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;">
+                <button class="btn-micro" id="tweak-slow-inc">+</button>
+              </div>
+              <div style="display: flex; align-items: center; gap: 4px;">
+                <span style="font-size: 0.78rem; color: var(--text-muted);">Trend:</span>
+                <button class="btn-micro" id="tweak-trend-dec">-</button>
+                <input type="number" id="tweak-trend-val" value="50" min="20" max="300" style="width: 48px; text-align: center; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;">
+                <button class="btn-micro" id="tweak-trend-inc">+</button>
+              </div>
+              <div style="display: flex; align-items: center; gap: 4px;">
+                <span style="font-size: 0.78rem; color: var(--text-muted);">R:R:</span>
+                <button class="btn-micro" id="tweak-rr-dec">-</button>
+                <input type="number" id="tweak-rr-val" value="2.0" step="0.2" min="0.5" max="10.0" style="width: 48px; text-align: center; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;">
+                <button class="btn-micro" id="tweak-rr-inc">+</button>
+              </div>
+            </div>
+            <button id="tweak-rerun-btn" class="btn-primary btn-sm glow-cyan" style="padding: 5px 14px; font-size: 0.8rem;">
+              <span class="btn-icon">▶</span> Re-Simulate (Ctrl+Enter)
+            </button>
+          </div>
+
+          <!-- Performance Metrics Grid -->
+          <section class="kpi-grid">
+            <div class="kpi-card glow-cyan">
+              <div class="kpi-label">Total Return</div>
+              <div class="kpi-value" id="kpi-return">0.00%</div>
+              <div class="kpi-sub" id="kpi-profit">$0.00 Net</div>
+            </div>
+            <div class="kpi-card glow-green">
+              <div class="kpi-label">Win Rate</div>
+              <div class="kpi-value" id="kpi-winrate">0.0%</div>
+              <div class="kpi-sub" id="kpi-trades-count">0 Trades</div>
+            </div>
+            <div class="kpi-card glow-purple">
+              <div class="kpi-label">Profit Factor</div>
+              <div class="kpi-value" id="kpi-pf">0.00</div>
+              <div class="kpi-sub" id="kpi-payoff">Payoff: 0.00</div>
+            </div>
+            <div class="kpi-card glow-red">
+              <div class="kpi-label">Max Drawdown</div>
+              <div class="kpi-value" id="kpi-drawdown">0.00%</div>
+              <div class="kpi-sub">Peak-to-Trough</div>
+            </div>
+            <div class="kpi-card glow-blue">
+              <div class="kpi-label">Expectancy / Trade</div>
+              <div class="kpi-value" id="kpi-expectancy">$0.00</div>
+              <div class="kpi-sub" id="kpi-sharpe">Sharpe: 0.00</div>
+            </div>
+          </section>
+
+          <!-- Charts Section -->
+          <section class="chart-section glass-panel">
+            <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+              <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                <h3>Intraday Price Chart</h3>
+                <div class="chart-legend">
+                  <span class="legend-item"><span class="color-dot" style="background:#00f2fe;"></span> VWAP</span>
+                  <span class="legend-item"><span class="color-dot" style="background:#ffaa00;"></span> EMA 9</span>
+                  <span class="legend-item"><span class="color-dot" style="background:#7928ca;"></span> EMA 21</span>
+                  <span class="legend-item"><span class="color-dot" style="background:#ff007a;"></span> EMA 50</span>
+                </div>
+              </div>
+              <div style="display: flex; gap: 4px; align-items: center;">
+                <span style="font-size: 0.75rem; color: var(--text-muted); margin-right: 4px;">Zoom:</span>
+                <button class="btn-pill" id="zoom-1d-btn">1D</button>
+                <button class="btn-pill" id="zoom-5d-btn">5D</button>
+                <button class="btn-pill" id="zoom-1m-btn">1M</button>
+                <button class="btn-pill" id="zoom-3m-btn">3M</button>
+                <button class="btn-pill active" id="zoom-all-btn">All</button>
+                <button class="btn-pill" id="zoom-reset-btn" title="Reset Zoom">↺</button>
+              </div>
+            </div>
+            <div id="price-chart" class="plotly-container"></div>
+          </section>
+
+          <!-- Dual Performance Charts: Equity Curve & Underwater Drawdown -->
+          <div class="charts-grid" style="margin-top: 16px;">
+            <section class="chart-card glass-panel">
+              <div class="panel-header">
+                <h3>Equity Curve Progression</h3>
+                <span class="chart-tag" style="color: #00f5a0; border-color: rgba(0, 245, 160, 0.3);">Mark-to-Market</span>
+              </div>
+              <div id="equity-chart" style="width: 100%; height: 260px;"></div>
+            </section>
+
+            <section class="chart-card glass-panel">
+              <div class="panel-header">
+                <h3>Underwater Equity Drawdown (%)</h3>
+                <span class="chart-tag" style="color: #ff007a; border-color: rgba(255, 0, 122, 0.3);">Peak-to-Trough Recovery</span>
+              </div>
+              <div id="drawdown-chart" style="width: 100%; height: 260px;"></div>
+            </section>
+          </div>
+
+          <!-- Monthly Breakdown & Trade Log -->
+          <div class="form-row margin-top">
+            <section class="glass-panel" style="flex: 1;">
+              <div class="panel-header">
+                <h3>Monthly Performance Breakdown</h3>
+              </div>
+              <div class="table-responsive">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Month</th>
+                      <th>Net Profit ($)</th>
+                      <th>Return (%)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="monthly-table-body">
+                    <tr><td colspan="3" class="empty-msg">No monthly data available.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <section class="table-section glass-panel margin-top">
+            <div class="panel-header" style="flex-wrap: wrap; gap: 10px;">
+              <div style="display: flex; align-items: center; gap: 10px;">
+                <h3>Executed Trade Log</h3>
+                <span class="badge" id="trade-log-count">0 trades</span>
+              </div>
+              <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                <div style="display: flex; gap: 4px;">
+                  <button class="btn-filter active" data-filter="all">All</button>
+                  <button class="btn-filter" data-filter="wins">🟢 Wins</button>
+                  <button class="btn-filter" data-filter="losses">🔴 Losses</button>
+                  <button class="btn-filter" data-filter="gaps">⚡ Gaps</button>
+                  <button class="btn-filter" data-filter="longs">Longs</button>
+                  <button class="btn-filter" data-filter="shorts">Shorts</button>
+                </div>
+                <input type="text" id="trade-search-input" placeholder="Filter trades..." style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; padding: 4px 8px; font-size: 0.8rem; width: 120px;">
+                <button id="export-csv-btn" class="btn-sm">Export CSV</button>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Side</th>
+                    <th>Entry Time</th>
+                    <th>Entry Price</th>
+                    <th>Units</th>
+                    <th>Stop Loss</th>
+                    <th>Take Profit</th>
+                    <th>Exit Time</th>
+                    <th>Exit Price</th>
+                    <th>Exit Reason</th>
+                    <th>PnL ($)</th>
+                    <th>PnL (%)</th>
+                  </tr>
+                </thead>
+                <tbody id="trade-table-body">
+                  <tr><td colspan="12" class="empty-msg">No trades executed yet. Click "Run Strategy Backtest" to begin.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <!-- Pagination Controls -->
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: rgba(0,0,0,0.15); border-top: 1px solid rgba(255,255,255,0.05); font-size: 0.8rem; color: var(--text-muted);">
+              <div id="trade-pagination-info">Showing 0 of 0 trades</div>
+              <div style="display: flex; gap: 6px; align-items: center;">
+                <label for="trades-per-page">Per page:</label>
+                <select id="trades-per-page" style="background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; padding: 2px 6px; font-size: 0.78rem;">
+                  <option value="25">25</option>
+                  <option value="50" selected>50</option>
+                  <option value="100">100</option>
+                  <option value="all">All</option>
+                </select>
+                <button class="btn-micro" id="trade-prev-page-btn" disabled>&lt;</button>
+                <span id="trade-page-num" style="color: #fff; font-weight: 600; padding: 0 4px;">1</span>
+                <button class="btn-micro" id="trade-next-page-btn">&gt;</button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab 2: Optuna Optimization -->
+        <div id="tab-optuna" class="tab-content">
+          <!-- Optuna Action Bar -->
+          <div class="optuna-action-bar glass-panel">
+            <div class="optuna-action-info">
+              <span class="badge badge-cyan" id="opt-status-badge">Hyperparameter Discovery</span>
+              <span id="opt-summary-desc" class="opt-desc-text">Run Optuna to discover mathematical optimums for the active strategy mode.</span>
+            </div>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+              <label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;color:var(--text-muted);cursor:pointer;">
+                <input type="checkbox" id="opt-auto-validate" checked> Auto-Validate Best
+              </label>
+              <button id="validate-opt-params-btn" class="btn-secondary btn-sm" style="display: none; border-color: rgba(0, 242, 254, 0.4); color: var(--accent-cyan);">
+                🔬 Validate Best
+              </button>
+              <button id="apply-opt-params-btn" class="btn-primary btn-sm glow-cyan" style="display: none;">
+                ⚡ Apply to Strategy
+              </button>
+              <button id="deploy-opt-paper-btn" class="btn-success btn-sm glow-green" style="display: none;">
+                🚀 Deploy to Paper Profile
+              </button>
+            </div>
+          </div>
+
+          <section class="kpi-grid margin-top">
+            <div class="kpi-card glow-cyan">
+              <div class="kpi-label">Optimal Target Score</div>
+              <div class="kpi-value" id="opt-best-val">--</div>
+              <div class="kpi-sub" id="opt-target-sub">Sharpe Ratio</div>
+            </div>
+            <div class="kpi-card glow-green">
+              <div class="kpi-label" id="opt-kpi-core-label">Best Core Parameters</div>
+              <div class="kpi-value" id="opt-best-emas">-- / --</div>
+              <div class="kpi-sub" id="opt-trend-ema-sub">Trend EMA: --</div>
+            </div>
+            <div class="kpi-card glow-purple">
+              <div class="kpi-label" id="opt-kpi-risk-label">Optimal Stop & Risk Sizing</div>
+              <div class="kpi-value" id="opt-best-risk">-- / --</div>
+              <div class="kpi-sub" id="opt-risk-sub">Dynamic Risk Sizing</div>
+            </div>
+            <div class="kpi-card glow-amber">
+              <div class="kpi-label" id="opt-kpi-filters-label">Filters & Gate Thresholds</div>
+              <div class="kpi-value" id="opt-best-filters">-- / --</div>
+              <div class="kpi-sub" id="opt-filters-sub">Gate Thresholds</div>
+            </div>
+          </section>
+
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Optuna Hyperparameter Importance Breakdown</h3>
+            </div>
+            <div id="optuna-importance-chart" class="plotly-container-small"></div>
+          </section>
+
+          <section class="table-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Top Optuna Optimization Trials</h3>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead id="optuna-trials-head">
+                  <tr>
+                    <th>Trial #</th>
+                    <th>Target Score</th>
+                    <th>Fast EMA</th>
+                    <th>Slow EMA</th>
+                    <th>Trend EMA</th>
+                    <th>Vol Mult</th>
+                    <th>ATR Mult</th>
+                    <th>R:R Ratio</th>
+                  </tr>
+                </thead>
+                <tbody id="optuna-trials-body">
+                  <tr><td colspan="8" class="empty-msg">No Optuna optimization study executed yet. Click "Run Optuna Optimization".</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab 3: Walk-Forward Analysis -->
+        <div id="tab-wfo" class="tab-content">
+          <section class="kpi-grid">
+            <div class="kpi-card glow-cyan">
+              <div class="kpi-label">Walk-Forward Efficiency (WFE)</div>
+              <div class="kpi-value" id="wfo-wfe-val">--%</div>
+              <div class="kpi-sub">OOS Return / IS Return Ratio</div>
+            </div>
+            <div class="kpi-card glow-green">
+              <div class="kpi-label">Avg In-Sample Return</div>
+              <div class="kpi-value" id="wfo-is-ret">--%</div>
+              <div class="kpi-sub">Training Performance</div>
+            </div>
+            <div class="kpi-card glow-purple">
+              <div class="kpi-label">Avg Out-Of-Sample Return</div>
+              <div class="kpi-value" id="wfo-oos-ret">--%</div>
+              <div class="kpi-sub">Validation Performance</div>
+            </div>
+            <div class="kpi-card glow-blue">
+              <div class="kpi-label">Rolling Windows</div>
+              <div class="kpi-value" id="wfo-windows-count">--</div>
+              <div id="wfo-config-subtitle" style="font-size:0.72em;opacity:0.6;margin-top:2px;text-align:center"></div>
+              <div class="kpi-sub">70% IS / 30% OOS</div>
+            </div>
+          </section>
+
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>In-Sample vs Out-of-Sample Return per Window</h3>
+            </div>
+            <div id="wfo-chart" class="plotly-container-small"></div>
+          </section>
+
+          <section class="table-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Walk-Forward Window Breakdown</h3>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Win #</th>
+                    <th>In-Sample Period</th>
+                    <th>Out-of-Sample Period</th>
+                    <th>IS Return (%)</th>
+                    <th>OOS Return (%)</th>
+                    <th>OOS Win Rate (%)</th>
+                    <th>OOS Drawdown (%)</th>
+                    <th>OOS Sharpe</th>
+                  </tr>
+                </thead>
+                <tbody id="wfo-windows-body">
+                  <tr><td colspan="8" class="empty-msg">No Walk-Forward analysis run yet. Click "Run Walk-Forward Analysis".</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab 4: Monte Carlo Risk Simulator -->
+        <div id="tab-mc" class="tab-content">
+          <section class="kpi-grid">
+            <div class="kpi-card glow-red">
+              <div class="kpi-label">Risk of Ruin</div>
+              <div class="kpi-value" id="mc-ruin-val">--%</div>
+              <div class="kpi-sub">>50% DD Probability</div>
+            </div>
+            <div class="kpi-card glow-cyan">
+              <div class="kpi-label">50th Percentile (Median Net Profit)</div>
+              <div class="kpi-value" id="mc-p50-profit">$--</div>
+              <div class="kpi-sub" id="mc-p50-equity">Equity: $--</div>
+            </div>
+            <div class="kpi-card glow-purple">
+              <div class="kpi-label">5th Percentile (Worst 5% Drawdown)</div>
+              <div class="kpi-value" id="mc-p5-dd">--%</div>
+              <div class="kpi-sub">Conservative Risk Floor</div>
+            </div>
+            <div class="kpi-card glow-green">
+              <div class="kpi-label">95th Percentile (Best 5% Profit)</div>
+              <div class="kpi-value" id="mc-p95-profit">$--</div>
+              <div class="kpi-sub">Upside Potential</div>
+            </div>
+          </section>
+
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Monte Carlo Simulated Equity Confidence Bands (5th, 50th, 95th Percentiles)</h3>
+            </div>
+            <div id="mc-fan-chart" class="plotly-container-small"></div>
+          </section>
+
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Maximum Drawdown Distribution Histogram</h3>
+            </div>
+            <div id="mc-histogram-chart" class="plotly-container-small"></div>
+          </section>
+        </div>
+
+        <!-- Tab 5: Batch Sweep Leaderboard -->
+        <div id="tab-batch" class="tab-content">
+
+          <!-- Controls row -->
+          <section class="glass-panel" style="padding: 20px 24px 16px;">
+            <div class="panel-header" style="margin-bottom:14px;">
+              <h3>&#x1f3c6; Multi-Coin / Multi-Timeframe Batch Sweep</h3>
+              <p style="color:var(--text-muted);font-size:0.85em;margin-top:4px;">
+                Run Optuna across every symbol &times; timeframe combination and rank results by metric.
+              </p>
+            </div>
+
+            <div class="settings-grid" style="grid-template-columns:1fr 1fr 1fr;gap:16px;">
+              <div class="form-group" style="grid-column:1/3;">
+                <label for="batch-symbols-input">Symbols (comma-separated)</label>
+                <input type="text" id="batch-symbols-input"
+                       value="BTC/USD, ETH/USD, SOL/USD, BONK/USD"
+                       class="form-control"
+                       placeholder="BTC/USD, ETH/USD, SOL/USD">
+              </div>
+
+              <div class="form-group">
+                <label for="batch-trials-input">Trials per Combo</label>
+                <input type="number" id="batch-trials-input" value="100" min="10" max="1000" class="form-control">
+              </div>
+
+              <div class="form-group" style="grid-column:1/4;">
+                <label>Timeframes</label>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;padding-top:4px;">
+                  <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer;"><input type="checkbox" class="batch-tf-check" value="1m"> 1m</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer;"><input type="checkbox" class="batch-tf-check" value="3m"> 3m</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer;"><input type="checkbox" class="batch-tf-check" value="5m" checked> 5m</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer;"><input type="checkbox" class="batch-tf-check" value="15m" checked> 15m</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer;"><input type="checkbox" class="batch-tf-check" value="30m"> 30m</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer;"><input type="checkbox" class="batch-tf-check" value="1h" checked> 1h</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer;"><input type="checkbox" class="batch-tf-check" value="2h"> 2h</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer;"><input type="checkbox" class="batch-tf-check" value="4h"> 4h</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer;"><input type="checkbox" class="batch-tf-check" value="6h"> 6h</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer;"><input type="checkbox" class="batch-tf-check" value="1d"> 1d</label>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="batch-trade-direction-select">Trade Direction (Account Mode)</label>
+                <select id="batch-trade-direction-select" class="form-control">
+                  <option value="long_only" selected>Long Only (Spot Account)</option>
+                  <option value="long_short">Long & Short (Margin / Futures)</option>
+                  <option value="short_only">Short Only</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="batch-objective-mode-select">Batch Optimization Objective</label>
+                <select id="batch-objective-mode-select" class="form-control">
+                  <option value="single" selected>Single Metric</option>
+                  <option value="multi">Multi-Metric (Balanced)</option>
+                </select>
+              </div>
+              <div class="form-group" id="batch-target-group">
+                <label for="batch-metric-select">Batch Rank Metric</label>
+                <select id="batch-metric-select" class="form-control">
+                  <option value="sharpe_ratio" selected>Sharpe Ratio (Risk-Adjusted)</option>
+                  <option value="drawdown_penalized_sharpe">Drawdown-Penalized Sharpe (Max Robustness)</option>
+                  <option value="calmar_ratio">Calmar Ratio (Return / Max DD)</option>
+                  <option value="sortino_ratio">Sortino Ratio (Downside Volatility)</option>
+                  <option value="drawdown_penalized_sortino">Drawdown-Penalized Sortino (DD-Robust Downside)</option>
+                  <option value="ulcer_index">Ulcer Index (Recovery Duration)</option>
+                  <option value="profit_factor">Profit Factor</option>
+                  <option value="net_profit">Net Profit ($)</option>
+                  <option value="total_return_pct">Total Return (%)</option>
+                  <option value="win_rate">Win Rate (%)</option>
+                </select>
+              </div>
+              <div class="form-group" id="batch-multi-metric-group" style="display:none;">
+                <label for="batch-multi-metric-select">Multi-Metric Objective Set</label>
+                <select id="batch-multi-metric-select" class="form-control">
+                  <option value="sharpe_ratio|max_drawdown_pct" selected>Sharpe + Max Drawdown</option>
+                  <option value="sharpe_ratio|total_return_pct">Sharpe + Total Return</option>
+                  <option value="sortino_ratio|max_drawdown_pct">Sortino + Max Drawdown</option>
+                  <option value="profit_factor|total_return_pct">Profit Factor + Total Return</option>
+                  <option value="calmar_ratio|max_drawdown_pct">Calmar + Max Drawdown</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>
+                  <input type="checkbox" id="batch-enable-dd-constraint" class="form-check">
+                  Enable Hard Drawdown Constraint (Prune Bad Trials)
+                </label>
+              </div>
+              <div class="form-group" id="batch-dd-constraint-group" style="display:none;">
+                <label for="batch-dd-constraint-input">Max Drawdown Threshold (%)</label>
+                <input type="number" id="batch-dd-constraint-input" value="25" min="5" max="50" step="0.5" class="form-control">
+                <small style="opacity:0.7; margin-top:4px;">Trials exceeding this drawdown will be rejected during optimization</small>
+              </div>
+              <div class="form-group">
+                <label>
+                  <input type="checkbox" id="batch-enable-max-hold" class="form-check">
+                  Enable Max Holding Bars (Time-Based Stop)
+                </label>
+              </div>
+              <div class="form-group" id="batch-max-hold-group" style="display:none;">
+                <div class="form-row">
+                  <div class="form-group">
+                    <label for="batch-max-hold-min">Min Bars</label>
+                    <input type="number" id="batch-max-hold-min" value="4" min="1" max="500" class="form-control">
+                  </div>
+                  <div class="form-group">
+                    <label for="batch-max-hold-max">Max Bars</label>
+                    <input type="number" id="batch-max-hold-max" value="96" min="2" max="1000" class="form-control">
+                  </div>
+                </div>
+                <small style="opacity:0.7; margin-top:4px;">Optuna will sweep the number of bars before forcing a time-based exit (e.g. 96 = 2 days on 30m)</small>
+              </div>
+            </div>
+
+            <!-- Progress bar -->
+            <div id="batch-progress-wrap" style="display:none;margin-top:14px;">
+              <div style="display:flex;justify-content:space-between;font-size:0.82em;color:var(--text-muted);margin-bottom:6px;">
+                <span id="batch-progress-label">Starting...</span>
+                <span id="batch-progress-pct">0%</span>
+              </div>
+              <div style="background:rgba(255,255,255,0.08);border-radius:6px;height:8px;overflow:hidden;">
+                <div id="batch-progress-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#10b981,#34d399);border-radius:6px;transition:width 0.4s ease;"></div>
+              </div>
+            </div>
+
+            <div style="display:flex;gap:10px;margin-top:16px;align-items:center;flex-wrap:wrap;">
+              <button id="batch-run-btn" class="btn-primary" style="background:linear-gradient(135deg,#059669,#10b981);">
+                <span class="btn-icon">&#x1f3c6;</span> Start Batch Sweep
+              </button>
+              <label style="display:flex;align-items:center;gap:6px;font-size:0.85em;color:var(--text-muted);cursor:pointer;">
+                <input type="checkbox" id="batch-auto-validate" checked> Auto-Validate
+              </label>
+              <button id="batch-load-btn" class="btn-secondary">
+                <span class="btn-icon">&#x1f504;</span> Load Saved Results
+              </button>
+              <button id="batch-delete-btn" class="btn-secondary" disabled>
+                <span class="btn-icon">&#x1f5d1;</span> Delete Selected
+              </button>
+              <label style="display:flex;align-items:center;gap:6px;margin-left:auto;font-size:0.85em;color:var(--text-muted);">
+                Purge older than
+                <input id="batch-purge-days" type="number" value="30" min="1" class="form-control" style="width:70px;padding:6px 8px;">
+                days
+              </label>
+              <button id="batch-purge-btn" class="btn-secondary">
+                <span class="btn-icon">&#x1f5d1;</span> Purge Old
+              </button>
+            </div>
+          </section>
+
+          <!-- Leaderboard table -->
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Leaderboard</h3>
+              <span id="batch-result-count" style="font-size:0.82em;color:var(--text-muted);"></span>
+            </div>
+            <div style="overflow-x:auto;">
+              <table id="batch-leaderboard-table" style="width:100%;border-collapse:collapse;font-size:0.85em;">
+                <thead>
+                  <tr style="border-bottom:1px solid rgba(255,255,255,0.1);color:var(--text-muted);text-align:left;">
+                    <th style="padding:8px 10px;"><input id="batch-select-all" type="checkbox" aria-label="Select all visible results"></th>
+                    <th style="padding:8px 10px;">&#9733;</th>
+                    <th style="padding:8px 10px;">#</th>
+                    <th style="padding:8px 10px;">Symbol</th>
+                    <th style="padding:8px 10px;">TF</th>
+                    <th style="padding:8px 10px;">Metric</th>
+                    <th style="padding:8px 10px;">Value</th>
+                    <th style="padding:8px 10px;">Trades</th>
+                    <th style="padding:8px 10px;">Sharpe</th>
+                    <th style="padding:8px 10px;">Return %</th>
+                    <th style="padding:8px 10px;">Win %</th>
+                    <th style="padding:8px 10px;">Max DD %</th>
+                    <th style="padding:8px 10px;">Run At</th>
+                    <th style="padding:8px 10px; text-align: center;">Validation</th>
+                    <th style="padding:8px 10px; text-align: center;">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="batch-leaderboard-body">
+                  <tr>
+                    <td colspan="15" style="padding:24px;text-align:center;color:var(--text-muted);">
+                      No results yet — run a Batch Sweep or click Load Saved Results.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+        </div><!-- /tab-batch -->
+
+        <!-- Tab 6: Paper Trading Dashboard -->
+        <div id="tab-paper" class="tab-content">
+          <!-- Paper Control & Status Action Bar -->
+          <div class="optuna-action-bar glass-panel">
+            <div class="optuna-action-info" style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+              <span class="badge badge-amber" id="paper-runner-badge">Polling Runner: STOPPED</span>
+              <span id="paper-summary-desc" class="opt-desc-text">Virtual live execution engine with real-time mark-to-market and SL/TP management.</span>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+              <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 4px 8px;">
+                <span style="font-size: 0.78rem; color: var(--text-muted);">Auto-Refresh:</span>
+                <select id="paper-auto-refresh-select" style="background: transparent; border: none; color: #00f2fe; font-size: 0.78rem; font-weight: 600; cursor: pointer;">
+                  <option value="5" selected>5s</option>
+                  <option value="10">10s</option>
+                  <option value="30">30s</option>
+                  <option value="off">OFF</option>
+                </select>
+                <span class="badge badge-pulse-green" id="paper-refresh-countdown" style="font-size: 0.72rem; padding: 2px 6px;">⏱ 5s</span>
+              </div>
+              <button id="paper-toggle-runner-btn" class="btn-primary btn-sm glow-green">
+                ▶ Start Live Polling
+              </button>
+              <button id="paper-step-btn" class="btn-secondary btn-sm" style="border-color: rgba(0, 242, 254, 0.4); color: var(--accent-cyan);">
+                ⚡ Step Engine Once
+              </button>
+              <button id="paper-refresh-btn" class="btn-secondary btn-sm" style="border-color: rgba(255, 255, 255, 0.15);">
+                🔄 Refresh
+              </button>
+              <button id="paper-deposit-btn" class="btn-secondary btn-sm" style="border-color: rgba(255, 170, 0, 0.4); color: var(--accent-amber);">
+                💵 Deposit Cash
+              </button>
+            </div>
+          </div>
+
+          <!-- Paper Portfolio KPI Grid -->
+          <section class="kpi-grid margin-top">
+            <div class="kpi-card glow-cyan">
+              <div class="kpi-label">Total Account Equity</div>
+              <div class="kpi-value" id="paper-kpi-equity">$10,000.00</div>
+              <div class="kpi-sub" id="paper-kpi-equity-sub">Cash + Unrealized PnL</div>
+            </div>
+            <div class="kpi-card glow-blue">
+              <div class="kpi-label">Available Cash</div>
+              <div class="kpi-value" id="paper-kpi-cash">$10,000.00</div>
+              <div class="kpi-sub">Liquid Capital</div>
+            </div>
+            <div class="kpi-card glow-green">
+              <div class="kpi-label">Unrealized PnL</div>
+              <div class="kpi-value" id="paper-kpi-unrealized">$0.00</div>
+              <div class="kpi-sub" id="paper-kpi-unrealized-pct">0.00% Mark-to-Market</div>
+            </div>
+            <div class="kpi-card glow-purple">
+              <div class="kpi-label">Realized Net Profit</div>
+              <div class="kpi-value" id="paper-kpi-realized">$0.00</div>
+              <div class="kpi-sub" id="paper-kpi-winrate">Win Rate: 0.0% (0 Trades)</div>
+            </div>
+            <div class="kpi-card glow-amber">
+              <div class="kpi-label">Active Portfolio</div>
+              <div class="kpi-value" id="paper-kpi-positions">0 Open</div>
+              <div class="kpi-sub" id="paper-kpi-profiles-count">0 Deployed Profiles</div>
+            </div>
+          </section>
+
+          <!-- Active Positions Section -->
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Active Open Positions</h3>
+              <span id="paper-positions-count-tag" style="font-size: 0.85em; color: var(--text-muted);">0 open</span>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Exchange</th>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Entry Price</th>
+                    <th>Mark Price</th>
+                    <th>Quantity</th>
+                    <th>Cost Basis</th>
+                    <th>Stop Loss</th>
+                    <th>Take Profit</th>
+                    <th>Unrealized PnL</th>
+                    <th>Entry Time</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="paper-positions-body">
+                  <tr><td colspan="12" class="empty-msg">No active paper positions. Click "Step Engine" or deploy an Optuna profile to enter.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Deployed Optuna Profiles Section -->
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Deployed Optuna Strategy Profiles</h3>
+              <span id="paper-profiles-count-tag" style="font-size: 0.85em; color: var(--text-muted);">0 active</span>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Exchange</th>
+                    <th>Symbol</th>
+                    <th>Timeframe</th>
+                    <th>Setup Mode</th>
+                    <th>Account Mode</th>
+                    <th>Target Metric</th>
+                    <th>Optuna Score</th>
+                    <th>Parameters</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="paper-profiles-body">
+                  <tr><td colspan="10" class="empty-msg">No deployed Optuna profiles. Run Optuna Optimization and click "🚀 Deploy to Paper Profile" to add.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Equity Chart -->
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Paper Trading Equity Curve</h3>
+            </div>
+            <div id="paper-equity-chart" class="plotly-container-small"></div>
+          </section>
+
+          <!-- Completed Trade History Ledger -->
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Completed Trade History</h3>
+              <span id="paper-trades-count-tag" style="font-size: 0.85em; color: var(--text-muted);">0 trades</span>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Trade ID</th>
+                    <th>Exchange</th>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Entry Price</th>
+                    <th>Exit Price</th>
+                    <th>Quantity</th>
+                    <th>Realized PnL</th>
+                    <th>PnL %</th>
+                    <th>Fees</th>
+                    <th>Exit Reason</th>
+                    <th>Exit Time</th>
+                  </tr>
+                </thead>
+                <tbody id="paper-trades-body">
+                  <tr><td colspan="12" class="empty-msg">No completed paper trades yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Double-Entry Audit Ledger Transactions -->
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header">
+              <h3>Double-Entry Ledger Audit Trail</h3>
+              <span id="paper-transactions-count-tag" style="font-size: 0.85em; color: var(--text-muted);">0 transactions</span>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Tx ID</th>
+                    <th>Type</th>
+                    <th>Exchange</th>
+                    <th>Symbol</th>
+                    <th>Amount ($)</th>
+                    <th>Asset Qty</th>
+                    <th>Price</th>
+                    <th>Fee</th>
+                    <th>Balance After</th>
+                    <th>Timestamp</th>
+                    <th>Notes</th>
+                  </tr>
+                </thead>
+                <tbody id="paper-transactions-body">
+                  <tr><td colspan="11" class="empty-msg">No ledger transactions recorded yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div><!-- /tab-paper -->
+
+        <!-- Tab 7: Multi-Asset Portfolio Dashboard & Analytics Suite -->
+        <div id="tab-portfolio" class="tab-content">
+          <!-- Portfolio Top Action Bar -->
+          <div class="optuna-action-bar glass-panel" style="margin-bottom: 16px;">
+            <div class="optuna-action-info">
+              <span class="badge badge-cyan" id="portfolio-status-badge">🌐 Unified Multi-Asset Portfolio</span>
+              <span id="portfolio-timestamp-text" class="opt-desc-text">Real-time NAV aggregation across Gemini, KuCoin, Alpaca, Robinhood & Synthetic Wallets.</span>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center;">
+              <button id="refresh-portfolio-btn" class="btn-secondary btn-sm glow-cyan" style="color: var(--accent-cyan); border-color: rgba(0, 242, 254, 0.4);">
+                🔄 Refresh Venues & Risk
+              </button>
+            </div>
+          </div>
+
+          <!-- Portfolio KPI Grid -->
+          <section class="kpi-grid">
+            <div class="kpi-card glow-cyan">
+              <div class="kpi-label">Total Portfolio NAV</div>
+              <div class="kpi-value" id="kpi-port-nav">$0.00</div>
+              <div class="kpi-sub" id="kpi-port-buying-power">$0.00 Purchasing Power</div>
+            </div>
+            <div class="kpi-card glow-purple">
+              <div class="kpi-label">Crypto Allocation</div>
+              <div class="kpi-value" id="kpi-port-crypto-val">$0.00</div>
+              <div class="kpi-sub" id="kpi-port-crypto-pct">0.0% Weight</div>
+            </div>
+            <div class="kpi-card glow-green">
+              <div class="kpi-label">US Equities Allocation</div>
+              <div class="kpi-value" id="kpi-port-stock-val">$0.00</div>
+              <div class="kpi-sub" id="kpi-port-stock-pct">0.0% Weight</div>
+            </div>
+            <div class="kpi-card glow-amber">
+              <div class="kpi-label">Cash & Stablecoins</div>
+              <div class="kpi-value" id="kpi-port-cash-val">$0.00</div>
+              <div class="kpi-sub" id="kpi-port-cash-pct">0.0% Weight</div>
+            </div>
+            <div class="kpi-card glow-red">
+              <div class="kpi-label">1-Day 95% Parametric VaR</div>
+              <div class="kpi-value" id="kpi-port-var-val">$0.00</div>
+              <div class="kpi-sub" id="kpi-port-var-pct">0.00% Risk at 95% Conf</div>
+            </div>
+            <div class="kpi-card glow-cyan">
+              <div class="kpi-label">Risk Circuit Breaker</div>
+              <div class="kpi-value" id="kpi-port-circuit-status" style="font-size: 1.25rem;">NORMAL</div>
+              <div class="kpi-sub" id="kpi-port-drawdown">0.00% Unrealized DD</div>
+            </div>
+          </section>
+
+          <!-- Interactive Analytics Charts Grid -->
+          <div class="charts-grid" style="margin-top: 16px;">
+            <!-- Allocation Breakdown Donut -->
+            <div class="chart-card glass-panel" style="min-height: 380px;">
+              <div class="chart-header">
+                <h3>Asset Allocation Breakdown</h3>
+                <span class="chart-tag" style="color: #00f2fe; border-color: rgba(0, 242, 254, 0.3);">Weight %</span>
+              </div>
+              <div id="portfolio-allocation-chart" style="width: 100%; height: 320px;"></div>
+            </div>
+
+            <!-- Cross-Asset Correlation Heatmap -->
+            <div class="chart-card glass-panel" style="min-height: 380px;">
+              <div class="chart-header">
+                <h3>Cross-Asset Return Correlation Heatmap</h3>
+                <span class="chart-tag" id="diversification-score-badge" style="color: #00f5a0; border-color: rgba(0, 245, 160, 0.3);">Div Ratio: 1.00</span>
+              </div>
+              <div id="portfolio-correlation-chart" style="width: 100%; height: 320px;"></div>
+            </div>
+          </div>
+
+          <!-- Risk Decomposition & Marginal VaR -->
+          <div class="chart-card glass-panel" style="margin-top: 16px; min-height: 340px;">
+            <div class="chart-header">
+              <h3>Marginal Risk Decomposition (Component VaR % Contribution)</h3>
+              <span class="chart-tag" style="color: #ff007a; border-color: rgba(255, 0, 122, 0.3);">Risk Parity</span>
+            </div>
+            <div id="portfolio-risk-decomp-chart" style="width: 100%; height: 280px;"></div>
+          </div>
+
+          <!-- Historical Aggregate Portfolio NAV Chart -->
+          <section class="chart-section glass-panel margin-top">
+            <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+              <div style="display: flex; align-items: center; gap: 10px;">
+                <h3>📈 Aggregate Portfolio NAV History</h3>
+                <span class="badge badge-cyan" id="port-history-gain-badge">+0.00%</span>
+              </div>
+              <div style="display: flex; gap: 4px; align-items: center;">
+                <span style="font-size: 0.75rem; color: var(--text-muted); margin-right: 4px;">Lookback:</span>
+                <button class="btn-pill active" id="port-lookback-30d">30D</button>
+                <button class="btn-pill" id="port-lookback-90d">90D</button>
+                <button class="btn-pill" id="port-lookback-180d">180D</button>
+              </div>
+            </div>
+            <div id="portfolio-history-chart" style="width: 100%; height: 300px;"></div>
+          </section>
+
+          <!-- Connected Venues Breakdown Cards -->
+          <section class="glass-panel" style="margin-top: 16px; padding: 18px;">
+            <div class="section-title-row" style="margin-bottom: 14px;">
+              <h3 style="margin: 0; font-size: 1.05rem; color: #fff;">🏛️ Venue Balances & Connectivity</h3>
+              <span class="badge badge-purple">Multi-Exchange Ledger</span>
+            </div>
+            <div id="portfolio-venues-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+              <!-- Hydrated dynamically -->
+            </div>
+          </section>
+
+          <!-- Consolidated Active Holdings Table -->
+          <section class="table-section glass-panel" style="margin-top: 16px;">
+            <div class="table-header">
+              <h3>💼 Active Cross-Asset Positions</h3>
+              <span class="badge" id="portfolio-positions-count">0 Holdings</span>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Venue</th>
+                    <th>Asset Type</th>
+                    <th>Side</th>
+                    <th>Quantity</th>
+                    <th>Entry Price</th>
+                    <th>Current Price</th>
+                    <th>Market Value ($)</th>
+                    <th>Unrealized PnL ($)</th>
+                    <th>Return (%)</th>
+                    <th>Weight (%)</th>
+                  </tr>
+                </thead>
+                <tbody id="portfolio-positions-body">
+                  <tr><td colspan="11" class="empty-msg">No active cross-asset holdings.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Interactive Portfolio Rebalancer Panel -->
+          <section class="glass-panel" style="margin-top: 16px; padding: 20px;">
+            <div class="section-title-row" style="margin-bottom: 14px;">
+              <div>
+                <h3 style="margin: 0; font-size: 1.1rem; color: #00f2fe;">⚖️ Automated Multi-Asset Rebalancer</h3>
+                <p style="margin: 4px 0 0 0; font-size: 0.85rem; color: var(--text-muted);">
+                  Select an allocation preset or enter custom target weights. The engine calculates drift deltas and dispatches rebalancing orders.
+                </p>
+              </div>
+              <span class="badge badge-amber" id="rebalance-status-badge">Drift Check: Ready</span>
+            </div>
+
+            <!-- Allocation Strategy Presets -->
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px;">
+              <span style="font-size: 0.8rem; font-weight: 700; color: #00f2fe; text-transform: uppercase;">Presets:</span>
+              <button class="btn-pill" id="preset-60-40-btn">⚖️ 60/40 Equity/Crypto</button>
+              <button class="btn-pill" id="preset-risk-parity-btn">🛡️ Risk Parity</button>
+              <button class="btn-pill" id="preset-equal-weight-btn">🟰 Equal Weight</button>
+              <button class="btn-pill" id="preset-crypto-heavy-btn">🪙 Crypto Heavy (70/30)</button>
+              <button class="btn-pill" id="preset-equities-core-btn">📈 Equities Core (80/20)</button>
+            </div>
+
+            <!-- Target Allocation Dynamic Container -->
+            <div id="rebalance-targets-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 14px; background: rgba(0,0,0,0.2); padding: 14px; border-radius: 8px;">
+              <!-- Rendered dynamically -->
+            </div>
+
+            <!-- Add Custom Asset Bar & Drift Threshold -->
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px;">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <input type="text" id="add-target-asset-input" placeholder="e.g. SOL/USD or NVDA" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; padding: 5px 8px; font-size: 0.82rem; width: 160px; text-transform: uppercase;">
+                <button id="add-target-asset-btn" class="btn-secondary btn-sm" style="border-color: rgba(0, 242, 254, 0.4); color: var(--accent-cyan);">
+                  ➕ Add Asset
+                </button>
+              </div>
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <label for="rebalance-drift-thresh" style="font-size: 0.8rem; color: var(--text-muted);">Drift Trigger (%):</label>
+                <input type="number" id="rebalance-drift-thresh" value="2.0" step="0.5" min="0.5" max="10.0" style="width: 54px; text-align: center; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; padding: 4px 6px; font-size: 0.82rem;">
+              </div>
+            </div>
+
+            <!-- Rebalance Action Buttons -->
+            <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;">
+              <button id="calc-rebalance-plan-btn" class="btn-primary btn-sm">
+                <span class="btn-icon">📊</span> Calculate Rebalance Plan
+              </button>
+              <button id="exec-rebalance-dryrun-btn" class="btn-secondary btn-sm" style="color: var(--accent-amber); border-color: rgba(255, 170, 0, 0.4);">
+                <span class="btn-icon">⚡</span> Execute Rebalance (Dry-Run)
+              </button>
+              <button id="exec-rebalance-live-btn" class="btn-success btn-sm glow-green">
+                <span class="btn-icon">🚀</span> Execute Live Rebalance
+              </button>
+            </div>
+
+            <!-- Rebalancing Plan Table -->
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Venue</th>
+                    <th>Current %</th>
+                    <th>Target %</th>
+                    <th>Drift %</th>
+                    <th>Current Value ($)</th>
+                    <th>Target Value ($)</th>
+                    <th>Trade Delta ($)</th>
+                    <th>Action</th>
+                    <th>Units</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="rebalance-plan-body">
+                  <tr><td colspan="11" class="empty-msg">Click "Calculate Rebalance Plan" to inspect required trades.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div><!-- /tab-portfolio -->
+
+      </main>
+
+    </div>
+  </div>
+
+  <!-- Settings & Custom Boundaries Modal -->
+  <div id="settings-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-card glass-panel">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <h2>⚙️ System & Strategy Settings</h2>
+          <p>Configure fee models, dynamic Optuna search spaces, and risk parameters.</p>
+        </div>
+        <button id="close-settings-btn" class="modal-close-btn" aria-label="Close Settings">&times;</button>
+      </div>
+      
+      <div class="modal-tabs">
+        <button class="modal-tab-btn active" data-modal-tab="settings-tab-fees">Execution & Fees</button>
+        <button class="modal-tab-btn" data-modal-tab="settings-tab-optuna">Optuna Search Ranges</button>
+        <button class="modal-tab-btn" data-modal-tab="settings-tab-risk">Risk & Capital</button>
+        <button class="modal-tab-btn" data-modal-tab="settings-tab-crypto">🪙 Crypto Exchanges</button>
+        <button class="modal-tab-btn" data-modal-tab="settings-tab-stocks">🦙 US Equities & Providers</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Tab 1: Execution & Fees -->
+        <div id="settings-tab-fees" class="modal-tab-content active">
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="setting-maker-fee">Maker Fee (%)</label>
+              <input type="number" id="setting-maker-fee" value="0.05" step="0.01" min="0" max="1.0" class="form-control">
+              <span class="field-hint">Exchange maker execution fee (Gemini/KuCoin)</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-taker-fee">Taker Fee (%)</label>
+              <input type="number" id="setting-taker-fee" value="0.075" step="0.005" min="0" max="1.0" class="form-control">
+              <span class="field-hint">Exchange taker market order fee</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-slippage">Slippage Tolerance (%)</label>
+              <input type="number" id="setting-slippage" value="0.05" step="0.01" min="0" max="1.0" class="form-control">
+              <span class="field-hint">Estimated market impact & spread slippage per fill</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2: Optuna Search Ranges -->
+        <div id="settings-tab-optuna" class="modal-tab-content">
+          <div class="settings-grid">
+            <div class="form-group">
+              <label>Fast EMA Range (Min - Max)</label>
+              <div class="range-inputs">
+                <input type="number" id="setting-opt-fast-min" value="3" min="2" max="50" class="form-control">
+                <span class="range-sep">to</span>
+                <input type="number" id="setting-opt-fast-max" value="30" min="5" max="100" class="form-control">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Slow EMA Range (Min - Max)</label>
+              <div class="range-inputs">
+                <input type="number" id="setting-opt-slow-min" value="10" min="5" max="100" class="form-control">
+                <span class="range-sep">to</span>
+                <input type="number" id="setting-opt-slow-max" value="100" min="15" max="200" class="form-control">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Trend EMA Range (Min - Max)</label>
+              <div class="range-inputs">
+                <input type="number" id="setting-opt-trend-min" value="50" min="20" max="200" class="form-control">
+                <span class="range-sep">to</span>
+                <input type="number" id="setting-opt-trend-max" value="250" min="50" max="400" class="form-control">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Volume Multiplier (Min - Max)</label>
+              <div class="range-inputs">
+                <input type="number" id="setting-opt-vol-min" value="0.8" step="0.1" min="0.5" max="3.0" class="form-control">
+                <span class="range-sep">to</span>
+                <input type="number" id="setting-opt-vol-max" value="3.5" step="0.1" min="1.0" max="6.0" class="form-control">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>ATR Multiplier (Min - Max)</label>
+              <div class="range-inputs">
+                <input type="number" id="setting-opt-atr-min" value="1.0" step="0.5" min="0.5" max="4.0" class="form-control">
+                <span class="range-sep">to</span>
+                <input type="number" id="setting-opt-atr-max" value="6.0" step="0.5" min="2.0" max="10.0" class="form-control">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Risk:Reward Ratio (Min - Max)</label>
+              <div class="range-inputs">
+                <input type="number" id="setting-opt-rr-min" value="1.0" step="0.5" min="0.5" max="5.0" class="form-control">
+                <span class="range-sep">to</span>
+                <input type="number" id="setting-opt-rr-max" value="6.0" step="0.5" min="1.5" max="10.0" class="form-control">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>VWAP Slope Max Bound</label>
+              <input type="number" id="setting-opt-slope-max" value="0.003" step="0.0005" min="0.0005" max="0.01" class="form-control">
+            </div>
+            <div class="form-group">
+              <label>Min Trades Regularization Floor</label>
+              <input type="number" id="setting-opt-min-trades" value="3" min="1" max="20" class="form-control">
+              <span class="field-hint">Penalizes overfitting on single-trade anomalies</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-opt-n-jobs">Parallel CPU Workers</label>
+              <select id="setting-opt-n-jobs" class="form-control">
+                <option value="1" selected>1 Core (Sequential)</option>
+                <option value="2">2 CPU Cores</option>
+                <option value="4">4 CPU Cores</option>
+                <option value="-1">All Available CPU Cores (-1)</option>
+              </select>
+              <span class="field-hint">Multiprocessing acceleration for 100-1000+ trial studies</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-opt-startup-trials">Startup (Warmup) Trials Override</label>
+              <input type="number" id="setting-opt-startup-trials" placeholder="Auto (10% capped at 25)" min="3" max="100" class="form-control">
+              <span class="field-hint">Leave blank for automatic adaptive warmup (recommended)</span>
+            </div>
+            <div class="form-group" style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+              <input type="checkbox" id="setting-opt-seed-base" checked style="width: 18px; height: 18px; cursor: pointer;">
+              <label for="setting-opt-seed-base" style="margin-bottom: 0; cursor: pointer;">Seed Baseline Strategy as Trial #0</label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 3: Risk & Capital -->
+        <div id="settings-tab-risk" class="modal-tab-content">
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="setting-default-capital">Default Account Capital ($)</label>
+              <input type="number" id="setting-default-capital" value="10000" step="1000" class="form-control">
+            </div>
+            <div class="form-group">
+              <label for="setting-default-risk">Default Risk % per Trade</label>
+              <input type="number" id="setting-default-risk" value="1.0" step="0.1" min="0.1" max="5.0" class="form-control">
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 4: Crypto Exchange API Keys -->
+        <div id="settings-tab-crypto" class="modal-tab-content">
+          <div class="settings-grid">
+            <div class="form-group" style="grid-column: 1 / -1;">
+              <h4 style="margin: 0 0 8px 0; color: #00f2fe; font-size: 0.95rem;">♊ Gemini Exchange (Spot API)</h4>
+            </div>
+            <div class="form-group">
+              <label for="setting-gemini-api-key">Gemini API Key</label>
+              <input type="text" id="setting-gemini-api-key" placeholder="account-..." class="form-control">
+              <span class="field-hint">Primary API Master or Auditor Key</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-gemini-secret-key">Gemini API Secret</label>
+              <input type="password" id="setting-gemini-secret-key" placeholder="••••••••••••••••" class="form-control">
+              <span class="field-hint">Secret signing key for Gemini private endpoints</span>
+            </div>
+            <div class="form-group" style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+              <input type="checkbox" id="setting-gemini-sandbox" checked style="width: 18px; height: 18px; cursor: pointer;">
+              <label for="setting-gemini-sandbox" style="margin-bottom: 0; cursor: pointer;">Use Gemini Sandbox Endpoint</label>
+            </div>
+
+            <div class="form-group" style="grid-column: 1 / -1; margin-top: 12px;">
+              <h4 style="margin: 0 0 8px 0; color: #00f5a0; font-size: 0.95rem;">🟢 KuCoin Exchange (Spot &amp; Futures)</h4>
+            </div>
+            <div class="form-group">
+              <label for="setting-kucoin-api-key">KuCoin API Key</label>
+              <input type="text" id="setting-kucoin-api-key" placeholder="64a..." class="form-control">
+            </div>
+            <div class="form-group">
+              <label for="setting-kucoin-secret-key">KuCoin API Secret</label>
+              <input type="password" id="setting-kucoin-secret-key" placeholder="••••••••••••••••" class="form-control">
+            </div>
+            <div class="form-group">
+              <label for="setting-kucoin-passphrase">KuCoin API Passphrase</label>
+              <input type="password" id="setting-kucoin-passphrase" placeholder="••••••••" class="form-control">
+            </div>
+            <div class="form-group" style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+              <input type="checkbox" id="setting-kucoin-sandbox" style="width: 18px; height: 18px; cursor: pointer;">
+              <label for="setting-kucoin-sandbox" style="margin-bottom: 0; cursor: pointer;">Use KuCoin Sandbox / Testnet</label>
+            </div>
+
+            <div class="form-group" style="grid-column: 1 / -1; margin-top: 12px;">
+              <h4 style="margin: 0 0 8px 0; color: #ffaa00; font-size: 0.95rem;">🏹 Robinhood Crypto Trading API</h4>
+            </div>
+            <div class="form-group">
+              <label for="setting-robinhood-api-key">Robinhood API Key</label>
+              <input type="text" id="setting-robinhood-api-key" placeholder="rh-api-..." class="form-control">
+              <span class="field-hint">Robinhood Crypto Trading API Key</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-robinhood-private-key">Robinhood Ed25519 Private Key</label>
+              <input type="password" id="setting-robinhood-private-key" placeholder="Base64 Encoded Private Key" class="form-control">
+              <span class="field-hint">Base64-encoded Ed25519 seed for HMAC/Signature auth</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-robinhood-account-number">Robinhood Account Number</label>
+              <input type="text" id="setting-robinhood-account-number" placeholder="Optional Account ID" class="form-control">
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 5: US Equities & Stock Data Providers -->
+        <div id="settings-tab-stocks" class="modal-tab-content">
+          <div class="settings-grid">
+            <div class="form-group" style="grid-column: 1 / -1;">
+              <h4 style="margin: 0 0 8px 0; color: #00f2fe; font-size: 0.95rem;">🦙 Alpaca Markets (Data & Broker)</h4>
+            </div>
+            <div class="form-group">
+              <label for="setting-alpaca-key-id">Alpaca API Key ID</label>
+              <input type="text" id="setting-alpaca-key-id" placeholder="PK..." class="form-control">
+              <span class="field-hint">Your Alpaca Paper or Live Key ID</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-alpaca-secret-key">Alpaca Secret Key</label>
+              <input type="password" id="setting-alpaca-secret-key" placeholder="••••••••••••••••" class="form-control">
+              <span class="field-hint">Your Alpaca API Secret Key</span>
+            </div>
+            <div class="form-group" style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+              <input type="checkbox" id="setting-alpaca-paper" checked style="width: 18px; height: 18px; cursor: pointer;">
+              <label for="setting-alpaca-paper" style="margin-bottom: 0; cursor: pointer;">Use Alpaca Paper / Sandbox Endpoint</label>
+            </div>
+            <div class="form-group" style="grid-column: 1 / -1; margin-top: 10px;">
+              <h4 style="margin: 0 0 8px 0; color: #7928ca; font-size: 0.95rem;">🟣 Polygon.io Data API</h4>
+            </div>
+            <div class="form-group">
+              <label for="setting-polygon-api-key">Polygon.io API Key</label>
+              <input type="password" id="setting-polygon-api-key" placeholder="••••••••••••••••" class="form-control">
+              <span class="field-hint">Used for high-resolution stock tick & aggregate candles</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-tiingo-api-token">Tiingo API Token</label>
+              <input type="password" id="setting-tiingo-api-token" placeholder="••••••••••••••••" class="form-control">
+              <span class="field-hint">Optional fallback for EOD and IEX intraday stock feeds</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="reset-settings-btn" class="btn-secondary">Reset to Defaults</button>
+        <button id="save-settings-btn" class="btn-primary">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Validation Details Modal -->
+  <div id="validation-details-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog" style="max-width: 800px;">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <h2 style="margin: 0; font-size: 1.25rem;">🔬 Strategy Robustness Audit</h2>
+          <span id="val-modal-status-badge" class="badge">--</span>
+        </div>
+        <button id="close-val-modal-btn" class="modal-close">&times;</button>
+      </div>
+
+      <div class="modal-body" style="padding: 20px;">
+        <!-- Overview Banner -->
+        <div id="val-modal-summary-box" class="glass-panel" style="padding: 14px 18px; margin-bottom: 16px; border-left: 4px solid var(--accent-cyan);">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div id="val-modal-summary-text" style="font-weight: 600; font-size: 0.95rem;">Validation Summary</div>
+              <div id="val-modal-rec-action" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 4px;">Recommended Action: --</div>
+            </div>
+            <div style="text-align: right;">
+              <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">Composite Score</div>
+              <div id="val-modal-score" style="font-size: 1.5rem; font-weight: 800; color: #00f5a0;">--/100</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3-Gate Cards Grid -->
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+          <!-- Gate 1: In-Sample Backtest -->
+          <div class="glass-panel" style="padding: 14px 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+              <h4 style="margin: 0; font-size: 0.95rem;">Gate 1: In-Sample Backtest Viability</h4>
+              <span id="g1-status-pill" class="badge">--</span>
+            </div>
+            <div id="g1-metrics-grid" class="kpi-grid" style="grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 10px;"></div>
+            <div id="g1-details-text" style="font-size: 0.82rem; color: var(--text-muted);"></div>
+            <div id="g1-warnings-list" style="margin-top: 6px; font-size: 0.8rem; color: #ff007a;"></div>
+          </div>
+
+          <!-- Gate 2: Walk-Forward Analysis -->
+          <div class="glass-panel" style="padding: 14px 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+              <h4 style="margin: 0; font-size: 0.95rem;">Gate 2: Walk-Forward Out-of-Sample Robustness</h4>
+              <span id="g2-status-pill" class="badge">--</span>
+            </div>
+            <div id="g2-metrics-grid" class="kpi-grid" style="grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 10px;"></div>
+            <div id="g2-details-text" style="font-size: 0.82rem; color: var(--text-muted);"></div>
+            <div id="g2-warnings-list" style="margin-top: 6px; font-size: 0.8rem; color: #ff007a;"></div>
+          </div>
+
+          <!-- Gate 3: Monte Carlo Stress -->
+          <div class="glass-panel" style="padding: 14px 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+              <h4 style="margin: 0; font-size: 0.95rem;">Gate 3: Monte Carlo Sequence Stress & Tail Risk</h4>
+              <span id="g3-status-pill" class="badge">--</span>
+            </div>
+            <div id="g3-metrics-grid" class="kpi-grid" style="grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 10px;"></div>
+            <div id="g3-details-text" style="font-size: 0.82rem; color: var(--text-muted);"></div>
+            <div id="g3-warnings-list" style="margin-top: 6px; font-size: 0.8rem; color: #ff007a;"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <button id="close-val-modal-bottom-btn" class="btn-secondary">Close</button>
+          <button id="val-modal-revalidate-btn" class="btn-secondary" style="margin-left: 8px; border-color: rgba(0, 242, 254, 0.4); color: var(--accent-cyan);">
+            🔄 Re-Run Validation
+          </button>
+        </div>
+        <button id="val-modal-deploy-btn" class="btn-success glow-green" style="display: none;">
+          🚀 Deploy to Paper Profile
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit SL/TP Modal -->
+  <div id="paper-sltp-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-container glass-panel" style="max-width: 440px;">
+      <div class="modal-header">
+        <h3 style="margin: 0; font-size: 1.1rem; color: #fff;">✏️ Edit Position Risk (SL / TP)</h3>
+        <button id="close-sltp-modal-btn" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body" style="padding: 16px;">
+        <div style="margin-bottom: 14px; font-size: 0.88rem; color: var(--text-muted);">
+          Position: <strong id="modal-sltp-pos-title" style="color: #00f2fe;">-</strong>
+        </div>
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px; display: block;">Stop Loss Price ($):</label>
+          <input type="number" id="modal-sltp-sl-input" step="any" placeholder="e.g. 91000.00" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; padding: 7px 10px; font-size: 0.9rem;">
+        </div>
+        <div class="form-group">
+          <label style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px; display: block;">Take Profit Price ($):</label>
+          <input type="number" id="modal-sltp-tp-input" step="any" placeholder="e.g. 96000.00" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; padding: 7px 10px; font-size: 0.9rem;">
+        </div>
+        <input type="hidden" id="modal-sltp-exchange">
+        <input type="hidden" id="modal-sltp-symbol">
+      </div>
+      <div class="modal-footer" style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px;">
+        <button id="cancel-sltp-modal-btn" class="btn-secondary btn-sm">Cancel</button>
+        <button id="save-sltp-modal-btn" class="btn-primary btn-sm glow-cyan">💾 Save Levels</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

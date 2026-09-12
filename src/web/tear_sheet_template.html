@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EMA+VWAP Strategy Tear Sheet - {{ symbol }} {{ timeframe }}</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            margin: 0; padding: 20px;
+            background: #fff; color: #1a1a2e;
+            font-size: 11px; line-height: 1.4;
+        }
+        .page { max-width: 800px; margin: 0 auto; }
+        .header {
+            border-bottom: 3px solid #00f2fe;
+            padding-bottom: 16px; margin-bottom: 20px;
+        }
+        .header h1 { margin: 0; font-size: 24px; color: #1a1a2e; }
+        .header .meta { color: #666; font-size: 12px; margin-top: 4px; }
+        .status-badge {
+            display: inline-block; padding: 4px 12px; border-radius: 20px;
+            font-weight: 700; font-size: 11px; text-transform: uppercase;
+        }
+        .status-robust { background: #e8fff0; color: #00a854; border: 1px solid #00a854; }
+        .status-caution { background: #fff8e1; color: #e6a600; border: 1px solid #e6a600; }
+        .status-fail { background: #ffe8e8; color: #d00; border: 1px solid #d00; }
+        .section { margin-bottom: 24px; page-break-inside: avoid; }
+        .section h2 {
+            font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px;
+            color: #00f2fe; border-bottom: 1px solid #eee; padding-bottom: 6px;
+            margin-bottom: 12px;
+        }
+        .kpi-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+        .kpi-card {
+            background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+            padding: 12px; text-align: center;
+        }
+        .kpi-label { font-size: 10px; color: #64748b; text-transform: uppercase; margin-bottom: 4px; }
+        .kpi-value { font-size: 18px; font-weight: 700; color: #1a1a2e; }
+        .kpi-sub { font-size: 9px; color: #94a3b8; margin-top: 2px; }
+        .positive { color: #00a854; } .negative { color: #d00; }
+        .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .chart-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; }
+        .chart-card h3 { margin: 0 0 8px; font-size: 12px; color: #334155; }
+        .chart-placeholder { height: 200px; background: #fff; border: 1px dashed #cbd5e1; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: #94a3b8; font-size: 11px; }
+        .gate-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+        .gate-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; }
+        .gate-card h3 { margin: 0 0 8px; font-size: 11px; color: #334155; }
+        .gate-metric { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #e2e8f0; font-size: 10px; }
+        .gate-metric:last-child { border-bottom: none; }
+        .gate-metric .label { color: #64748b; }
+        .gate-metric .value { font-weight: 600; color: #1a1a2e; }
+        .param-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+        .param-table th, .param-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #e2e8f0; }
+        .param-table th { background: #f1f5f9; font-weight: 600; color: #334155; }
+        .trade-table { width: 100%; border-collapse: collapse; font-size: 9px; }
+        .trade-table th, .trade-table td { padding: 4px 6px; text-align: right; border-bottom: 1px solid #e2e8f0; }
+        .trade-table th { background: #f1f5f9; font-weight: 600; color: #334155; }
+        .trade-table td:first-child { text-align: left; }
+        .footer { margin-top: 30px; padding-top: 12px; border-top: 1px solid #eee; font-size: 9px; color: #94a3b8; text-align: center; }
+        @media print { body { padding: 0; } .page { max-width: 100%; } }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <!-- Header -->
+        <div class="header">
+            <h1>📊 EMA+VWAP Strategy Tear Sheet</h1>
+            <div class="meta">
+                {{ symbol }} • {{ timeframe }} • {{ exchange }} • Generated: {{ timestamp }}
+                <span style="margin-left: 16px;">
+                    <span class="status-badge status-{{ status_lower }}">{{ status }}</span>
+                </span>
+            </div>
+        </div>
+
+        <!-- Summary KPIs -->
+        <div class="section">
+            <h2>Performance Summary</h2>
+            <div class="kpi-grid">
+                <div class="kpi-card">
+                    <div class="kpi-label">Total Return</div>
+                    <div class="kpi-value {{ 'positive' if g1_metrics.total_return_pct >= 0 else 'negative' }}">
+                        {{ '+' if g1_metrics.total_return_pct >= 0 else '' }}{{ g1_metrics.total_return_pct }}%
+                    </div>
+                    <div class="kpi-sub">{{ g1_metrics.net_profit if g1_metrics.net_profit is defined else '$0.00' }} Net</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Sharpe Ratio</div>
+                    <div class="kpi-value">{{ g1_metrics.sharpe_ratio }}</div>
+                    <div class="kpi-sub">Sortino: {{ g1_metrics.sortino_ratio if g1_metrics.sortino_ratio is defined else 'N/A' }}</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Win Rate</div>
+                    <div class="kpi-value">{{ g1_metrics.win_rate }}%</div>
+                    <div class="kpi-sub">{{ g1_metrics.trade_count }} Trades</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Max Drawdown</div>
+                    <div class="kpi-value negative">{{ g1_metrics.max_drawdown_pct }}%</div>
+                    <div class="kpi-sub">Peak-to-Trough</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Profit Factor</div>
+                    <div class="kpi-value">{{ g1_metrics.profit_factor }}</div>
+                    <div class="kpi-sub">Expectancy: {{ g1_metrics.expectancy if g1_metrics.expectancy is defined else 'N/A' }}</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Gate Results -->
+        <div class="section">
+            <h2>Robustness Gates</h2>
+            <div class="gate-grid">
+                {% for gate_key, gate in gate_results.items() %}
+                <div class="gate-card">
+                    <h3>{{ gate.gate_name }}</h3>
+                    <div class="gate-metric">
+                        <span class="label">Status</span>
+                        <span class="value status-{{ gate.status.lower() }}">{{ gate.status }}</span>
+                    </div>
+                    {% if gate.metrics %}
+                        {% for key, value in gate.metrics.items() %}
+                        <div class="gate-metric">
+                            <span class="label">{{ key.replace('_', ' ').title() }}</span>
+                            <span class="value">{{ value }}</span>
+                        </div>
+                        {% endfor %}
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Monte Carlo Details -->
+        {% if gate_results.get('gate3_monte_carlo') and gate_results.gate3_monte_carlo.metrics %}
+        <div class="section">
+            <h2>Monte Carlo Stress Test ({{ gate_results.gate3_monte_carlo.metrics.simulations_count }} simulations)</h2>
+            <div class="gate-grid">
+                <div class="gate-card">
+                    <h3>Risk of Ruin</h3>
+                    <div class="gate-metric"><span class="label">Risk of Ruin</span><span class="value negative">{{ gate_results.gate3_monte_carlo.metrics.risk_of_ruin_pct }}%</span></div>
+                    <div class="gate-metric"><span class="label">Median Return</span><span class="value">{{ gate_results.gate3_monte_carlo.metrics.median_return }}%</span></div>
+                </div>
+                <div class="gate-card">
+                    <h3>Drawdown Percentiles</h3>
+                    <div class="gate-metric"><span class="label">5th Percentile</span><span class="value">{{ gate_results.gate3_monte_carlo.metrics.p5_max_drawdown_pct if gate_results.gate3_monte_carlo.metrics.p5_max_drawdown_pct is defined else 'N/A' }}%</span></div>
+                    <div class="gate-metric"><span class="label">50th Percentile</span><span class="value">{{ gate_results.gate3_monte_carlo.metrics.p50_max_drawdown_pct if gate_results.gate3_monte_carlo.metrics.p50_max_drawdown_pct is defined else 'N/A' }}%</span></div>
+                    <div class="gate-metric"><span class="label">95th Percentile</span><span class="value negative">{{ gate_results.gate3_monte_carlo.metrics.p95_max_drawdown_pct }}%</span></div>
+                </div>
+                <div class="gate-card">
+                    <h3>Equity Percentiles</h3>
+                    <div class="gate-metric"><span class="label">5th (Worst)</span><span class="value negative">${{ gate_results.gate3_monte_carlo.metrics.final_equity_p5 if gate_results.gate3_monte_carlo.metrics.final_equity_p5 is defined else 'N/A' }}</span></div>
+                    <div class="gate-metric"><span class="label">50th (Median)</span><span class="value">${{ gate_results.gate3_monte_carlo.metrics.final_equity_p50 if gate_results.gate3_monte_carlo.metrics.final_equity_p50 is defined else 'N/A' }}</span></div>
+                    <div class="gate-metric"><span class="label">95th (Best)</span><span class="value positive">${{ gate_results.gate3_monte_carlo.metrics.final_equity_p95 if gate_results.gate3_monte_carlo.metrics.final_equity_p95 is defined else 'N/A' }}</span></div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Strategy Parameters -->
+        <div class="section">
+            <h2>Strategy Parameters</h2>
+            <table class="param-table">
+                <thead><tr><th>Parameter</th><th>Value</th></tr></thead>
+                <tbody>
+                    {% for key, value in strategy_params.items() %}
+                    <tr><td>{{ key.replace('_', ' ').title() }}</td><td>{{ value }}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Trade Distribution (if available) -->
+        {% if trade_distribution %}
+        <div class="section">
+            <h2>Trade P&L Distribution</h2>
+            <table class="trade-table">
+                <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+                <tbody>
+                    {% for key, value in trade_distribution.items() %}
+                    <tr><td>{{ key.replace('_', ' ').title() }}</td><td>{{ value }}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+
+        <!-- Footer -->
+        <div class="footer">
+            Generated by EMA+VWAP Trading Suite • {{ timestamp }} • Report ID: {{ report_id }}
+        </div>
+    </div>
+</body>
+</html>
