@@ -14,12 +14,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from src.db_connection_manager import get_database
 from src.config import OptunaConfig, StrategyParams
 from src.data_loader import DataLoader
-from src.database import CandleDatabase
 from src.optimizer import OptunaOptimizer
 
-db = CandleDatabase()
+db = get_database("batch_results")
 
 # -------------------------------------------------------------------
 # Shared progress state (read by the /api/batch_status endpoint)
@@ -52,7 +52,7 @@ class BatchOptimizerConfig:
     symbols: list[str] = field(default_factory=lambda: ["BTC/USD", "ETH/USD"])
     timeframes: list[str] = field(default_factory=lambda: ["5m", "15m", "1h"])
     exchange: str = "kucoin"
-    days: int = 180
+    days: int = 360
     n_trials: int = 100
     target_metric: str = "sharpe_ratio"
     strategy_mode: str = "auto"
@@ -132,6 +132,11 @@ class BatchOptimizer:
             timeframe=timeframe,
             days=cfg.days,
         )
+        if df.empty:
+            print(
+                f"[BatchOptimizer] {symbol}/{timeframe}: no candles fetched — possibly invalid symbol"
+            )
+            return
 
         if df.empty or len(df) < cfg.min_candles:
             print(
@@ -203,11 +208,14 @@ class BatchOptimizer:
 
         best_value_value = result.get("best_value")
         if best_value_value is None and cfg.enable_multi_objective:
-            best_value_value = float(
-                result.get("pareto_frontier", [{}])[0]
-                .get("objectives", {})
-                .get(cfg.multi_objective_metrics[0], 0.0)
+            frontier = result.get("pareto_frontier") or []
+            metric = (
+                cfg.multi_objective_metrics[0] if cfg.multi_objective_metrics else None
             )
+            if frontier and metric:
+                best_value_value = float(
+                    frontier[0].get("objectives", {}).get(metric, 0.0)
+                )
         best_value = float(
             best_value_value if best_value_value is not None else float("-inf")
         )

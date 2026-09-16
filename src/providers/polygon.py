@@ -68,7 +68,7 @@ class PolygonStockAdapter(BaseDataProvider):
         self,
         symbol: str = "AAPL",
         timeframe: str = "5m",
-        days: int = 180,
+        days: int = 360,
         limit: int | None = None,
         adjusted: bool = True,
     ) -> pd.DataFrame:

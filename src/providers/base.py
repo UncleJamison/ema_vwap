@@ -92,7 +92,7 @@ class BaseDataProvider(ABC):
         self,
         symbol: str = "BTC/USD",
         timeframe: str = "5m",
-        days: int = 180,
+        days: int = 360,
         limit: int | None = None,
     ) -> pd.DataFrame:
         """

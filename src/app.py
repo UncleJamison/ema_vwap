@@ -14,6 +14,7 @@ from typing import Any, ClassVar, Literal
 import pandas as pd
 from fastapi import (
     BackgroundTasks,
+    Depends,
     FastAPI,
     HTTPException,
     Query,
@@ -21,11 +22,15 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+
+from src.auth import get_api_key, get_configured_api_key
 from src.backtester import BacktestEngine
 from src.batch_optimizer import BatchOptimizer, BatchOptimizerConfig, get_batch_state
 from src.config import (
@@ -35,10 +40,11 @@ from src.config import (
     WFOConfig,
 )
 from src.data_loader import DataLoader
-from src.database import CandleDatabase
+from src.db_connection_manager import get_database
 from src.logger import logger, setup_logging
 from src.monte_carlo import MonteCarloSimulator
 from src.optimizer import OptunaOptimizer
+from src.ws_server import ws_manager as _ws_manager
 from src.paper import PaperLedger, PaperProfileRegistry, PaperTradingEngine
 from src.portfolio import portfolio_aggregator
 from src.regime import (
@@ -47,22 +53,22 @@ from src.regime import (
     get_current_regime,
 )
 from src.settings import SettingsManager
+
 from src.strategy import EmaVwapStrategy
-from src.tasks import global_task_manager
+from src.tasks import TaskManager, global_task_manager
 from src.validator import StrategyValidator, ValidationCriteria
 from src.wfo import WalkForwardEngine
-from src.ws_server import WebSocketManager
 
 # Initialize Rotating File & Console Logging
 setup_logging()
-_batch_db = CandleDatabase()
-_settings_mgr = SettingsManager(_batch_db)
-_paper_profiles = PaperProfileRegistry(_batch_db)
-_paper_ledger = PaperLedger(_batch_db)
-_paper_engine = PaperTradingEngine(db=_batch_db)
-
-# WebSocket manager for real-time dashboard
-_ws_manager = WebSocketManager()
+_batch_db = get_database("batch_results")
+_candles_db = get_database("candles")
+_system_db = get_database("system")
+_paper_db = get_database("paper_trading")
+_settings_mgr = SettingsManager(_system_db)
+_paper_profiles = PaperProfileRegistry(_paper_db)
+_paper_ledger = PaperLedger(_paper_db)
+_paper_engine = PaperTradingEngine(db=_paper_db)
 
 
 class _PollFilter(logging.Filter):
@@ -85,7 +91,11 @@ async def lifespan(app: FastAPI):
     logger.info(
         "[Lifespan] Initializing database and evaluating paper runner auto-start..."
     )
+    # Initialize all domain databases
+    _candles_db.init_db()
     _batch_db.init_db()
+    _system_db.init_db()
+    _paper_db.init_db()
 
     # Check if live paper polling was active prior to restart
     runner_enabled = _settings_mgr.get("paper_runner_enabled", "false")
@@ -116,6 +126,338 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# API Key authentication (delegates to centralized src.auth module)
+API_KEY = get_configured_api_key()
+
+
+# -------------------------------------------------------------------------
+# Tear Sheet Export Endpoints
+# -------------------------------------------------------------------------
+
+
+class TearSheetRequest(BaseModel):
+    """Request to generate a tear sheet for a validated strategy."""
+
+    exchange: str
+    symbol: str
+    timeframe: str
+    params: dict[str, Any]
+    # Optional: use cached validation report from a previous validation run
+    validation_report: dict[str, Any] | None = None
+    # Optional: override default Monte Carlo simulations for fresh run
+    mc_simulations: int = 500
+    target_metric: str = "sharpe_ratio"
+    enable_multi_objective: bool = False
+    multi_objective_metrics: list[str] | None = None
+
+
+@app.post("/api/tear-sheet/pdf")
+async def generate_tear_sheet_pdf(req: TearSheetRequest) -> Response:
+    """Generate and return a PDF tear sheet for the given strategy configuration."""
+    try:
+        from src.web.pdf_renderer import (
+            generate_tear_sheet_pdf,
+        )
+
+        # Load candles for backtest and validation
+        df_candles = DataLoader.load_candles(
+            exchange=req.exchange,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            limit=1000,
+            days=None,
+        )
+
+        # If no validation report provided, run validation
+        if req.validation_report is None:
+            strat_params = StrategyParams.from_dict(req.params)
+            validator = StrategyValidator()
+            report = validator.validate(
+                df_candles=df_candles,
+                params=strat_params,
+                n_trials=30,
+                target_metric=req.target_metric,
+                enable_multi_objective=req.enable_multi_objective,
+                multi_objective_metrics=req.multi_objective_metrics,
+            )
+            validation_report = report.to_dict()
+        else:
+            validation_report = req.validation_report
+            strat_params = StrategyParams.from_dict(req.params)
+
+        # Run Monte Carlo for equity curves and percentiles
+
+        engine = BacktestEngine(strat_params)
+        bt_res = engine.run(df_candles)
+
+        mc_cfg = MonteCarloConfig(
+            num_simulations=req.mc_simulations, sample_with_replacement=True
+        )
+        mc_sim = MonteCarloSimulator(
+            initial_capital=strat_params.initial_capital or 10000.0,
+            trades=bt_res.trades,
+            config=mc_cfg,
+        )
+        mc_report = mc_sim.run()
+
+        # Build trade distribution
+        pnls = [t.get("pnl", 0.0) for t in bt_res.trades]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        trade_distribution = {
+            "total_trades": len(pnls),
+            "winning_trades": len(wins),
+            "losing_trades": len(losses),
+            "win_rate_pct": (round(len(wins) / len(pnls) * 100, 1) if pnls else 0),
+            "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
+            "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
+            "largest_win": round(max(wins), 2) if wins else 0,
+            "largest_loss": round(min(losses), 2) if losses else 0,
+            "profit_factor": (
+                round(sum(wins) / abs(sum(losses)), 2) if losses else float("inf")
+            ),
+        }
+
+        # Build equity curves for template
+        equity_curves = mc_report.get(
+            "equity_curves_percentiles", {"p5": [], "p50": [], "p95": []}
+        )
+
+        # Build Monte Carlo percentiles
+        mc_percentiles = {
+            "final_equity": mc_report.get("final_equity_percentiles", {}),
+            "net_profit": mc_report.get("net_profit_percentiles", {}),
+            "max_drawdown": mc_report.get("max_drawdown_percentiles", {}),
+            "sharpe_ratio": mc_report.get("sharpe_ratio_percentiles", {}),
+            "risk_of_ruin_pct": mc_report.get("risk_of_ruin_pct", 0),
+            "simulations_count": mc_report.get("num_simulations", 0),
+        }
+
+        # Build context and generate PDF
+        pdf_bytes = generate_tear_sheet_pdf(
+            report=validation_report,
+            strategy_params=req.params,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            exchange=req.exchange,
+            trade_distribution=trade_distribution,
+            equity_curves=equity_curves,
+            monte_carlo_percentiles=mc_percentiles,
+        )
+
+        filename = f"ema_vwap_tear_sheet_{req.symbol.replace('/', '_')}_{req.timeframe}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.…"
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    except Exception as e:
+        logger.error(f"[API] generate_tear_sheet_pdf error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/tear-sheet/html")
+async def generate_tear_sheet_html(req: TearSheetRequest) -> Response:
+    """Generate and return an interactive HTML tear sheet for the given strategy configuration."""
+    try:
+        from src.web.pdf_renderer import (
+            generate_tear_sheet_html,
+        )
+
+        # Load candles for backtest and validation
+        df_candles = DataLoader.load_candles(
+            exchange=req.exchange,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            limit=1000,
+            days=None,
+        )
+
+        # If no validation report provided, run validation
+        if req.validation_report is None:
+            strat_params = StrategyParams.from_dict(req.params)
+            validator = StrategyValidator()
+            report = validator.validate(
+                df_candles=df_candles,
+                params=strat_params,
+                n_trials=30,
+                target_metric=req.target_metric,
+                enable_multi_objective=req.enable_multi_objective,
+                multi_objective_metrics=req.multi_objective_metrics,
+            )
+            validation_report = report.to_dict()
+        else:
+            validation_report = req.validation_report
+            strat_params = StrategyParams.from_dict(req.params)
+
+        # Run Monte Carlo for equity curves and percentiles
+
+        engine = BacktestEngine(strat_params)
+        bt_res = engine.run(df_candles)
+
+        mc_cfg = MonteCarloConfig(
+            num_simulations=req.mc_simulations, sample_with_replacement=True
+        )
+        mc_sim = MonteCarloSimulator(
+            initial_capital=strat_params.initial_capital or 10000.0,
+            trades=bt_res.trades,
+            config=mc_cfg,
+        )
+        mc_report = mc_sim.run()
+
+        # Build trade distribution
+        pnls = [t.get("pnl", 0.0) for t in bt_res.trades]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        trade_distribution = {
+            "total_trades": len(pnls),
+            "winning_trades": len(wins),
+            "losing_trades": len(losses),
+            "win_rate_pct": (round(len(wins) / len(pnls) * 100, 1) if pnls else 0),
+            "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
+            "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
+            "largest_win": round(max(wins), 2) if wins else 0,
+            "largest_loss": round(min(losses), 2) if losses else 0,
+            "profit_factor": (
+                round(sum(wins) / abs(sum(losses)), 2) if losses else float("inf")
+            ),
+        }
+
+        # Build equity curves for template
+        equity_curves = mc_report.get(
+            "equity_curves_percentiles", {"p5": [], "p50": [], "p95": []}
+        )
+
+        # Build Monte Carlo percentiles
+        mc_percentiles = {
+            "final_equity": mc_report.get("final_equity_percentiles", {}),
+            "net_profit": mc_report.get("net_profit_percentiles", {}),
+            "max_drawdown": mc_report.get("max_drawdown_percentiles", {}),
+            "sharpe_ratio": mc_report.get("sharpe_ratio_percentiles", {}),
+            "risk_of_ruin_pct": mc_report.get("risk_of_ruin_pct", 0),
+            "simulations_count": mc_report.get("num_simulations", 0),
+        }
+
+        # Generate HTML
+        html_content = generate_tear_sheet_html(
+            report=validation_report,
+            strategy_params=req.params,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            exchange=req.exchange,
+            trade_distribution=trade_distribution,
+            equity_curves=equity_curves,
+            monte_carlo_percentiles=mc_percentiles,
+        )
+
+        return HTMLResponse(content=html_content)
+
+    except Exception as e:
+        logger.error(f"[API] generate_tear_sheet_html error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/tear-sheet/json")
+async def generate_tear_sheet_json(req: TearSheetRequest) -> dict[str, Any]:
+    """Generate and return a JSON tear sheet bundle for the given strategy configuration."""
+    try:
+        # Load candles for backtest and validation
+        df_candles = DataLoader.load_candles(
+            exchange=req.exchange,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            limit=1000,
+            days=None,
+        )
+
+        # If no validation report provided, run validation
+        if req.validation_report is None:
+            strat_params = StrategyParams.from_dict(req.params)
+            validator = StrategyValidator()
+            report = validator.validate(
+                df_candles=df_candles,
+                params=strat_params,
+                n_trials=30,
+                target_metric=req.target_metric,
+                enable_multi_objective=req.enable_multi_objective,
+                multi_objective_metrics=req.multi_objective_metrics,
+            )
+            validation_report = report.to_dict()
+        else:
+            validation_report = req.validation_report
+            strat_params = StrategyParams.from_dict(req.params)
+
+        # Run Monte Carlo for equity curves and percentiles
+
+        engine = BacktestEngine(strat_params)
+        bt_res = engine.run(df_candles)
+
+        mc_cfg = MonteCarloConfig(
+            num_simulations=req.mc_simulations, sample_with_replacement=True
+        )
+        mc_sim = MonteCarloSimulator(
+            initial_capital=strat_params.initial_capital or 10000.0,
+            trades=bt_res.trades,
+            config=mc_cfg,
+        )
+        mc_report = mc_sim.run()
+
+        # Build trade distribution
+        pnls = [t.get("pnl", 0.0) for t in bt_res.trades]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        trade_distribution = {
+            "total_trades": len(pnls),
+            "winning_trades": len(wins),
+            "losing_trades": len(losses),
+            "win_rate_pct": (round(len(wins) / len(pnls) * 100, 1) if pnls else 0),
+            "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
+            "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
+            "largest_win": round(max(wins), 2) if wins else 0,
+            "largest_loss": round(min(losses), 2) if losses else 0,
+            "profit_factor": (
+                round(sum(wins) / abs(sum(losses)), 2) if losses else float("inf")
+            ),
+        }
+
+        # Build equity curves (downsampled)
+        equity_curves = mc_report.get(
+            "equity_curves_percentiles", {"p5": [], "p50": [], "p95": []}
+        )
+
+        # Build Monte Carlo percentiles
+        mc_percentiles = {
+            "final_equity": mc_report.get("final_equity_percentiles", {}),
+            "net_profit": mc_report.get("net_profit_percentiles", {}),
+            "max_drawdown": mc_report.get("max_drawdown_percentiles", {}),
+            "sharpe_ratio": mc_report.get("sharpe_ratio_percentiles", {}),
+            "risk_of_ruin_pct": mc_report.get("risk_of_ruin_pct", 0),
+            "simulations_count": mc_report.get("num_simulations", 0),
+        }
+
+        # Return JSON bundle
+        return {
+            "status": "success",
+            "symbol": req.symbol,
+            "timeframe": req.timeframe,
+            "exchange": req.exchange,
+            "generated_at": datetime.now(timezone.utc).isoformat() + "Z",
+            "report": validation_report,
+            "strategy_params": req.params,
+            "trade_distribution": trade_distribution,
+            "equity_curves": equity_curves,
+            "monte_carlo_percentiles": mc_percentiles,
+        }
+
+    except Exception as e:
+        logger.error(f"[API] generate_tear_sheet_json error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# -------------------------------------------------------------------------
+# Paper Trading Profiles Endpoints
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -190,7 +532,7 @@ class SyncHistoryRequest(BaseModel):
     exchange: str = "kucoin"
     symbol: str = "BTC/USDT"
     timeframe: str = "5m"
-    days: int = 180
+    days: int = 360
 
 
 @app.post("/api/sync_history")
@@ -216,16 +558,121 @@ def sync_history(req: SyncHistoryRequest) -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[API] sync_history error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.post("/api/clear_cache")
+@app.post("/api/clear_cache", dependencies=[Depends(get_api_key)])
 def clear_cache() -> dict[str, Any]:
-    deleted = _batch_db.clear_cache()
-    return {
-        "status": "success",
-        "message": f"Successfully cleared {deleted} cached candles from database.",
-    }
+    try:
+        deleted = _batch_db.clear_cache()
+        return {
+            "status": "success",
+            "message": f"Successfully cleared {deleted} cached candles from database.",
+        }
+    except Exception as e:
+        logger.error(f"[API] clear_cache error: {e}")
+        return {
+            "status": "error",
+            "message": "Failed to clear cache due to internal error.",
+        }
+
+
+@app.get("/api/db/info", dependencies=[Depends(get_api_key)])
+def db_info() -> dict[str, Any]:
+    """Return database file information for maintenance UI (multi-DB)."""
+    try:
+        from src.db_maintenance_multi import get_db_info_all
+
+        info = get_db_info_all()
+        return {"status": "success", "data": info}
+    except Exception as e:
+        logger.error(f"[API] db/info error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/db/repair", dependencies=[Depends(get_api_key)])
+def db_repair() -> dict[str, Any]:
+    """Quarantine corrupt database files and initialize a clean database (multi-DB)."""
+    try:
+        from src.db_maintenance_multi import repair_database_all
+
+        result = repair_database_all()
+        return {"status": result["status"], "data": result}
+    except Exception as e:
+        logger.error(f"[API] db/repair error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/db/vacuum", dependencies=[Depends(get_api_key)])
+def db_vacuum() -> dict[str, Any]:
+    """Reclaim unused database disk space across all domain databases (multi-DB)."""
+    try:
+        from src.db_maintenance_multi import vacuum_database_all
+
+        result = vacuum_database_all()
+        return {"status": result["status"], "data": result}
+    except Exception as e:
+        logger.error(f"[API] db/vacuum error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.api_route(
+    "/api/db/export/csv",
+    methods=["GET", "POST"],
+    dependencies=[Depends(get_api_key)],
+)
+def db_export_csv(
+    exchange: str | None = None,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    limit: int | None = Query(default=500, ge=1, le=5000),
+) -> Response:
+    """Export candle data as CSV download."""
+    try:
+        csv_data = _batch_db.export_candles_csv(exchange, symbol, timeframe, limit)
+        return Response(
+            content=csv_data,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=candles_{exchange or 'all'}_{symbol or 'all'}_{timeframe or 'all'}.csv"
+            },
+        )
+    except Exception as e:
+        logger.error(f"[API] db/export/csv error: {e}")
+        raise HTTPException(status_code=500, detail="Internal error during CSV export")
+
+
+@app.api_route(
+    "/api/db/export/json",
+    methods=["GET", "POST"],
+    dependencies=[Depends(get_api_key)],
+)
+def db_export_json(
+    exchange: str | None = None,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    limit: int | None = Query(default=500, ge=1, le=5000),
+) -> Response:
+    """Export candle data as JSON download."""
+    try:
+        json_data = _batch_db.export_candles_json(exchange, symbol, timeframe, limit)
+        return Response(
+            content=json_data,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f"attachment; filename=candles_{exchange or 'all'}_{symbol or 'all'}_{timeframe or 'all'}.json"
+            },
+        )
+    except Exception as e:
+        logger.error(f"[API] db/export/json error: {e}")
+        raise HTTPException(status_code=500, detail="Internal error during JSON export")
+
+
+@app.get("/api/settings")
+def get_settings() -> dict[str, Any]:
+    """Retrieve all system settings and credentials with secrets safely masked."""
+    settings = _settings_mgr.get_all_masked()
+    return {"status": "success", "settings": settings}
 
 
 @app.get("/api/exchanges")
@@ -328,7 +775,7 @@ def run_backtest(req: BacktestRequest) -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[API] run_backtest error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class OptimizeRequest(BaseStrategyRequest):
@@ -383,18 +830,15 @@ class MonteCarloRequest(BaseStrategyRequest):
 
 
 @app.post("/api/optimize")
-def run_optimization(req: OptimizeRequest) -> dict[str, Any]:
+def run_optimization(
+    req: OptimizeRequest, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
+    """Run Optuna optimization in the background; returns task_id immediately."""
     try:
-        df_candles = DataLoader.load_candles(
-            exchange=req.exchange,
-            symbol=req.symbol,
-            timeframe=req.timeframe,
-            limit=req.limit,
-            days=req.days,
-        )
+        # Build config so we can validate synchronously before dispatching
         base_params = build_strategy_params(req)
         opt_config = OptunaConfig(
-            target_metric=req.target_metric,  # type: ignore
+            target_metric=req.target_metric,
             n_trials=req.n_trials,
             timeout_seconds=req.timeout_seconds,
             min_trades=req.min_trades,
@@ -472,18 +916,42 @@ def run_optimization(req: OptimizeRequest) -> dict[str, Any]:
             max_holding_bars_min=req.max_holding_bars_min,
             max_holding_bars_max=req.max_holding_bars_max,
         )
-        optimizer = OptunaOptimizer(base_params=base_params, config=opt_config)
-        res = optimizer.optimize(df_candles)
-        return {
-            "status": "success",
-            "symbol": req.symbol,
-            "exchange": req.exchange,
-            "timeframe": req.timeframe,
-            "results": res,
-        }
     except Exception as e:
-        logger.error(f"[API] run_optimization error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"[API] run_optimization config error: {e}")
+        raise HTTPException(status_code=400, detail="Internal server error")
+
+    def _optimize_worker(task_id: str, tm: TaskManager) -> dict[str, Any]:
+        try:
+            df_candles = DataLoader.load_candles(
+                exchange=req.exchange,
+                symbol=req.symbol,
+                timeframe=req.timeframe,
+                limit=req.limit,
+                days=req.days,
+            )
+            tm.update_progress(task_id, 0.1, "Loaded candles")
+            optimizer = OptunaOptimizer(base_params=base_params, config=opt_config)
+            tm.update_progress(task_id, 0.2, "Optimizing")
+            res = optimizer.optimize(df_candles)
+            tm.update_progress(task_id, 1.0, "Complete")
+            return {"status": "success", **res}
+        except Exception as e:
+            logger.error(f"[API] run_optimization worker error: {e}")
+            raise
+
+    task_id = global_task_manager.run_in_background("optimize", _optimize_worker)
+    return {"status": "started", "task_id": task_id}
+
+
+@app.post(
+    "/api/optimizer/optimize",
+    include_in_schema=False,
+)
+def run_optimization_alias(
+    req: OptimizeRequest, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
+    """Compatibility alias for /api/optimize."""
+    return run_optimization(req, background_tasks)
 
 
 @app.post("/api/walk_forward")
@@ -540,7 +1008,7 @@ def run_walk_forward(req: WFORequest) -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[API] run_walk_forward error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/monte_carlo")
@@ -574,7 +1042,10 @@ def run_monte_carlo(req: MonteCarloRequest) -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[API] run_monte_carlo error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error during Monte Carlo simulation",
+        )
 
 
 class ValidateStrategyRequest(BaseModel):
@@ -633,7 +1104,7 @@ def validate_strategy_endpoint(req: ValidateStrategyRequest) -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[API] validate_strategy error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ---------------------------------------------------------------------------
@@ -660,7 +1131,7 @@ def get_task_status(task_id: str) -> dict[str, Any]:
     return {"status": "success", "task": task}
 
 
-@app.post("/api/tasks/{task_id}/cancel")
+@app.post("/api/tasks/{task_id}/cancel", dependencies=[Depends(get_api_key)])
 def cancel_task(task_id: str) -> dict[str, Any]:
     """Cancel a running background task."""
     success = global_task_manager.cancel_task(task_id)
@@ -679,13 +1150,6 @@ def cancel_task(task_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Settings & Credentials Store Endpoints
 # ---------------------------------------------------------------------------
-
-
-@app.get("/api/settings")
-def get_settings() -> dict[str, Any]:
-    """Retrieve all system settings and credentials with secrets safely masked."""
-    settings = _settings_mgr.get_all_masked()
-    return {"status": "success", "settings": settings}
 
 
 @app.post("/api/settings")
@@ -730,6 +1194,7 @@ def get_regime_current() -> dict[str, Any]:
         "regime_map": dict(REGIME_MAP),
     }
 
+
 # ---------------------------------------------------------------------------
 # Batch Sweep Endpoints
 # ---------------------------------------------------------------------------
@@ -739,7 +1204,7 @@ class BatchOptimizeRequest(BaseModel):
     exchange: str = "kucoin"
     symbols: list[str] = ["BTC/USD", "ETH/USD", "SOL/USD"]
     timeframes: list[str] = ["5m", "15m", "1h"]
-    days: int = 180
+    days: int = 360
     n_trials: int = 100
     target_metric: str = "sharpe_ratio"
     strategy_mode: str = "auto"
@@ -839,10 +1304,27 @@ def start_batch_optimize(
     return {"status": "started", "total_combos": total}
 
 
+@app.post(
+    "/api/optimizer/batch_optimize",
+    include_in_schema=False,
+)
+def start_batch_optimize_alias(
+    req: BatchOptimizeRequest, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
+    """Compatibility alias for /api/batch_optimize."""
+    return start_batch_optimize(req, background_tasks)
+
+
 @app.get("/api/batch_status")
 def get_batch_status() -> dict[str, Any]:
     """Poll the current batch sweep progress."""
     return get_batch_state()
+
+
+@app.get("/api/optimizer/status", include_in_schema=False)
+def get_optimizer_status_alias() -> dict[str, Any]:
+    """Compatibility alias for /api/batch_status."""
+    return get_batch_status()
 
 
 @app.get("/api/batch_results")
@@ -883,6 +1365,23 @@ def set_batch_result_favorite(
     return {"status": "success", "id": result_id, "favorite": req.favorite}
 
 
+class BatchResultDeployedRequest(BaseModel):
+    deployed: bool
+
+
+@app.patch("/api/batch_results/{result_id}/deployed")
+def set_batch_result_deployed(
+    result_id: int, req: BatchResultDeployedRequest
+) -> dict[str, Any]:
+    """Set the deployed status for one batch sweep result."""
+    if result_id <= 0:
+        raise HTTPException(status_code=400, detail="Provide a valid result ID.")
+    updated = _batch_db.set_batch_result_deployed(result_id, req.deployed)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Batch result not found.")
+    return {"status": "success", "id": result_id, "deployed": req.deployed}
+
+
 @app.post("/api/batch_results/auto-validate")
 def auto_validate_batch_results(
     req: BatchResultsAutoValidateRequest,
@@ -897,11 +1396,13 @@ def auto_validate_batch_results(
 
     try:
         # Load results to validate (optionally filtered by target_metric)
-        rows = _batch_db.load_batch_results(
-            target_metric=req.target_metric, limit=1000
-        )
+        rows = _batch_db.load_batch_results(target_metric=req.target_metric, limit=1000)
         if not rows:
-            return {"status": "success", "validated_count": 0, "message": "No results to validate."}
+            return {
+                "status": "success",
+                "validated_count": 0,
+                "message": "No results to validate.",
+            }
 
         validated = 0
         errors: list[str] = []
@@ -911,7 +1412,9 @@ def auto_validate_batch_results(
                 exchange = row.get("exchange", req.exchange or "kucoin")
                 symbol = row.get("symbol", "BTC/USD")
                 timeframe = row.get("timeframe", "5m")
-                target_metric = row.get("target_metric") or req.target_metric or "sharpe_ratio"
+                target_metric = (
+                    row.get("target_metric") or req.target_metric or "sharpe_ratio"
+                )
                 is_multi = bool(target_metric and "|" in target_metric)
                 multi_metrics = (
                     target_metric.split("|").filter(bool) if is_multi else None
@@ -925,7 +1428,11 @@ def auto_validate_batch_results(
                     timeframe=timeframe,
                     limit=500,
                 )
-                strat_params = StrategyParams.from_dict(params_dict) if params_dict else StrategyParams()
+                strat_params = (
+                    StrategyParams.from_dict(params_dict)
+                    if params_dict
+                    else StrategyParams()
+                )
                 validator = StrategyValidator()
                 report = validator.validate(
                     df_candles=df_candles,
@@ -941,7 +1448,9 @@ def auto_validate_batch_results(
                 )
                 validated += 1
             except Exception as exc:
-                errors.append(f"{row.get('symbol', '?')}/{row.get('timeframe', '?')}: {exc}")
+                errors.append(
+                    f"{row.get('symbol', '?')}/{row.get('timeframe', '?')}: {exc}"
+                )
                 logger.warning(
                     f"[API] auto_validate_batch_results: skipping result {row.get('id')}: {exc}"
                 )
@@ -954,7 +1463,7 @@ def auto_validate_batch_results(
         }
     except Exception as e:
         logger.error(f"[API] auto_validate_batch_results error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.patch("/api/batch_results/{result_id}/validation")
@@ -972,7 +1481,7 @@ def update_batch_result_validation(
     return {"status": "success", "id": result_id, "validation_status": req.status}
 
 
-@app.post("/api/batch_results/purge")
+@app.post("/api/batch_results/purge", dependencies=[Depends(get_api_key)])
 def purge_batch_results(req: BatchResultsPurgeRequest) -> dict[str, Any]:
     """Purge stale batch sweep results by age, optionally limited to one metric."""
     if req.older_than_days < 1:
@@ -1006,7 +1515,10 @@ class BatchToPortfolioRequest(BaseModel):
     mc_simulations: int = 500
 
 
-@app.post("/api/batch_results/export_to_portfolio")
+@app.post(
+    "/api/batch_results/export_to_portfolio",
+    dependencies=[Depends(get_api_key)],
+)
 def export_batch_to_portfolio(req: BatchToPortfolioRequest) -> dict[str, Any]:
     """Export selected batch sweep results to portfolio rebalancer with computed target weights."""
     try:
@@ -1127,357 +1639,7 @@ def export_batch_to_portfolio(req: BatchToPortfolioRequest) -> dict[str, Any]:
         raise
     except Exception as e:
         logger.error(f"[API] export_batch_to_portfolio error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-        # -------------------------------------------------------------------------
-        # Tear Sheet Export Endpoints
-        # -------------------------------------------------------------------------
-
-        class TearSheetRequest(BaseModel):
-            """Request to generate a tear sheet for a validated strategy."""
-
-            exchange: str
-            symbol: str
-            timeframe: str
-            params: dict[str, Any]
-            # Optional: use cached validation report from a previous validation run
-            validation_report: dict[str, Any] | None = None
-            # Optional: override default Monte Carlo simulations for fresh run
-            mc_simulations: int = 500
-            target_metric: str = "sharpe_ratio"
-            enable_multi_objective: bool = False
-            multi_objective_metrics: list[str] | None = None
-
-        @app.post("/api/tear-sheet/pdf")
-        async def generate_tear_sheet_pdf(req: TearSheetRequest) -> Response:
-            """Generate and return a PDF tear sheet for the given strategy configuration."""
-            try:
-                from src.web.pdf_renderer import (
-                    generate_tear_sheet_pdf,
-                )
-
-                # Load candles for backtest and validation
-                df_candles = DataLoader.load_candles(
-                    exchange=req.exchange,
-                    symbol=req.symbol,
-                    timeframe=req.timeframe,
-                    limit=1000,
-                    days=180,
-                )
-
-                # If no validation report provided, run validation
-                if req.validation_report is None:
-                    from src.config import MonteCarloConfig, StrategyParams
-                    from src.validator import StrategyValidator
-
-                    strat_params = StrategyParams.from_dict(req.params)
-                    validator = StrategyValidator()
-                    report = validator.validate(
-                        df_candles=df_candles,
-                        params=strat_params,
-                        n_trials=30,
-                        target_metric=req.target_metric,
-                        enable_multi_objective=req.enable_multi_objective,
-                        multi_objective_metrics=req.multi_objective_metrics,
-                    )
-                    validation_report = report.to_dict()
-                else:
-                    validation_report = req.validation_report
-                    strat_params = StrategyParams.from_dict(req.params)
-
-                # Run Monte Carlo for equity curves and percentiles
-                from src.monte_carlo import MonteCarloConfig, MonteCarloSimulator
-
-                engine = BacktestEngine(strat_params)
-                bt_res = engine.run(df_candles)
-
-                mc_cfg = MonteCarloConfig(
-                    num_simulations=req.mc_simulations, sample_with_replacement=True
-                )
-                mc_sim = MonteCarloSimulator(
-                    initial_capital=strat_params.initial_capital or 10000.0,
-                    trades=bt_res.trades,
-                    config=mc_cfg,
-                )
-                mc_report = mc_sim.run()
-
-                # Build trade distribution
-                pnls = [t.get("pnl", 0.0) for t in bt_res.trades]
-                wins = [p for p in pnls if p > 0]
-                losses = [p for p in pnls if p < 0]
-                trade_distribution = {
-                    "total_trades": len(pnls),
-                    "winning_trades": len(wins),
-                    "losing_trades": len(losses),
-                    "win_rate_pct": (
-                        round(len(wins) / len(pnls) * 100, 1) if pnls else 0
-                    ),
-                    "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
-                    "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
-                    "largest_win": round(max(wins), 2) if wins else 0,
-                    "largest_loss": round(min(losses), 2) if losses else 0,
-                    "profit_factor": (
-                        round(sum(wins) / abs(sum(losses)), 2)
-                        if losses
-                        else float("inf")
-                    ),
-                }
-
-                # Build equity curves for template
-                equity_curves = mc_report.get(
-                    "equity_curves_percentiles", {"p5": [], "p50": [], "p95": []}
-                )
-
-                # Build Monte Carlo percentiles
-                mc_percentiles = {
-                    "final_equity": mc_report.get("final_equity_percentiles", {}),
-                    "net_profit": mc_report.get("net_profit_percentiles", {}),
-                    "max_drawdown": mc_report.get("max_drawdown_percentiles", {}),
-                    "sharpe_ratio": mc_report.get("sharpe_ratio_percentiles", {}),
-                    "risk_of_ruin_pct": mc_report.get("risk_of_ruin_pct", 0),
-                    "simulations_count": mc_report.get("num_simulations", 0),
-                }
-
-                # Build context and generate PDF
-                pdf_bytes = generate_tear_sheet_pdf(
-                    report=validation_report,
-                    strategy_params=req.params,
-                    symbol=req.symbol,
-                    timeframe=req.timeframe,
-                    exchange=req.exchange,
-                    trade_distribution=trade_distribution,
-                    equity_curves=equity_curves,
-                    monte_carlo_percentiles=mc_percentiles,
-                )
-
-                filename = f"ema_vwap_tear_sheet_{req.symbol.replace('/', '_')}_{req.timeframe}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.…"
-                return Response(
-                    content=pdf_bytes,
-                    media_type="application/pdf",
-                    headers={
-                        "Content-Disposition": f'attachment; filename="{filename}"'
-                    },
-                )
-
-            except Exception as e:
-                logger.error(f"[API] generate_tear_sheet_pdf error: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
-
-        @app.post("/api/tear-sheet/html")
-        async def generate_tear_sheet_html(req: TearSheetRequest) -> Response:
-            """Generate and return an interactive HTML tear sheet for the given strategy configuration."""
-            try:
-                from src.web.pdf_renderer import (
-                    generate_tear_sheet_html,
-                )
-
-                # Load candles for backtest and validation
-                df_candles = DataLoader.load_candles(
-                    exchange=req.exchange,
-                    symbol=req.symbol,
-                    timeframe=req.timeframe,
-                    limit=1000,
-                    days=180,
-                )
-
-                # If no validation report provided, run validation
-                if req.validation_report is None:
-                    from src.config import StrategyParams
-                    from src.validator import StrategyValidator
-
-                    strat_params = StrategyParams.from_dict(req.params)
-                    validator = StrategyValidator()
-                    report = validator.validate(
-                        df_candles=df_candles,
-                        params=strat_params,
-                        n_trials=30,
-                        target_metric=req.target_metric,
-                        enable_multi_objective=req.enable_multi_objective,
-                        multi_objective_metrics=req.multi_objective_metrics,
-                    )
-                    validation_report = report.to_dict()
-                else:
-                    validation_report = req.validation_report
-                    strat_params = StrategyParams.from_dict(req.params)
-
-                # Run Monte Carlo for equity curves and percentiles
-                from src.monte_carlo import MonteCarloConfig, MonteCarloSimulator
-
-                engine = BacktestEngine(strat_params)
-                bt_res = engine.run(df_candles)
-
-                mc_cfg = MonteCarloConfig(
-                    num_simulations=req.mc_simulations, sample_with_replacement=True
-                )
-                mc_sim = MonteCarloSimulator(
-                    initial_capital=strat_params.initial_capital or 10000.0,
-                    trades=bt_res.trades,
-                    config=mc_cfg,
-                )
-                mc_report = mc_sim.run()
-
-                # Build trade distribution
-                pnls = [t.get("pnl", 0.0) for t in bt_res.trades]
-                wins = [p for p in pnls if p > 0]
-                losses = [p for p in pnls if p < 0]
-                trade_distribution = {
-                    "total_trades": len(pnls),
-                    "winning_trades": len(wins),
-                    "losing_trades": len(losses),
-                    "win_rate_pct": (
-                        round(len(wins) / len(pnls) * 100, 1) if pnls else 0
-                    ),
-                    "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
-                    "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
-                    "largest_win": round(max(wins), 2) if wins else 0,
-                    "largest_loss": round(min(losses), 2) if losses else 0,
-                    "profit_factor": (
-                        round(sum(wins) / abs(sum(losses)), 2)
-                        if losses
-                        else float("inf")
-                    ),
-                }
-
-                # Build equity curves for template
-                equity_curves = mc_report.get(
-                    "equity_curves_percentiles", {"p5": [], "p50": [], "p95": []}
-                )
-
-                # Build Monte Carlo percentiles
-                mc_percentiles = {
-                    "final_equity": mc_report.get("final_equity_percentiles", {}),
-                    "net_profit": mc_report.get("net_profit_percentiles", {}),
-                    "max_drawdown": mc_report.get("max_drawdown_percentiles", {}),
-                    "sharpe_ratio": mc_report.get("sharpe_ratio_percentiles", {}),
-                    "risk_of_ruin_pct": mc_report.get("risk_of_ruin_pct", 0),
-                    "simulations_count": mc_report.get("num_simulations", 0),
-                }
-
-                # Generate HTML
-                html_content = generate_tear_sheet_html(
-                    report=validation_report,
-                    strategy_params=req.params,
-                    symbol=req.symbol,
-                    timeframe=req.timeframe,
-                    exchange=req.exchange,
-                    trade_distribution=trade_distribution,
-                    equity_curves=equity_curves,
-                    monte_carlo_percentiles=mc_percentiles,
-                )
-
-                return HTMLResponse(content=html_content)
-
-            except Exception as e:
-                logger.error(f"[API] generate_tear_sheet_html error: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
-
-        @app.post("/api/tear-sheet/json")
-        async def generate_tear_sheet_json(req: TearSheetRequest) -> dict[str, Any]:
-            """Generate and return a JSON tear sheet bundle for the given strategy configuration."""
-            try:
-
-                # Load candles for backtest and validation
-                df_candles = DataLoader.load_candles(
-                    exchange=req.exchange,
-                    symbol=req.symbol,
-                    timeframe=req.timeframe,
-                    limit=1000,
-                    days=180,
-                )
-
-                # If no validation report provided, run validation
-                if req.validation_report is None:
-                    from src.config import StrategyParams
-                    from src.validator import StrategyValidator
-
-                    strat_params = StrategyParams.from_dict(req.params)
-                    validator = StrategyValidator()
-                    report = validator.validate(
-                        df_candles=df_candles,
-                        params=strat_params,
-                        n_trials=30,
-                        target_metric=req.target_metric,
-                        enable_multi_objective=req.enable_multi_objective,
-                        multi_objective_metrics=req.multi_objective_metrics,
-                    )
-                    validation_report = report.to_dict()
-                else:
-                    validation_report = req.validation_report
-                    strat_params = StrategyParams.from_dict(req.params)
-
-                # Run Monte Carlo for equity curves and percentiles
-                from src.monte_carlo import MonteCarloConfig, MonteCarloSimulator
-
-                engine = BacktestEngine(strat_params)
-                bt_res = engine.run(df_candles)
-
-                mc_cfg = MonteCarloConfig(
-                    num_simulations=req.mc_simulations, sample_with_replacement=True
-                )
-                mc_sim = MonteCarloSimulator(
-                    initial_capital=strat_params.initial_capital or 10000.0,
-                    trades=bt_res.trades,
-                    config=mc_cfg,
-                )
-                mc_report = mc_sim.run()
-
-                # Build trade distribution
-                pnls = [t.get("pnl", 0.0) for t in bt_res.trades]
-                wins = [p for p in pnls if p > 0]
-                losses = [p for p in pnls if p < 0]
-                trade_distribution = {
-                    "total_trades": len(pnls),
-                    "winning_trades": len(wins),
-                    "losing_trades": len(losses),
-                    "win_rate_pct": (
-                        round(len(wins) / len(pnls) * 100, 1) if pnls else 0
-                    ),
-                    "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
-                    "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
-                    "largest_win": round(max(wins), 2) if wins else 0,
-                    "largest_loss": round(min(losses), 2) if losses else 0,
-                    "profit_factor": (
-                        round(sum(wins) / abs(sum(losses)), 2)
-                        if losses
-                        else float("inf")
-                    ),
-                }
-
-                # Build equity curves (downsampled)
-                equity_curves = mc_report.get(
-                    "equity_curves_percentiles", {"p5": [], "p50": [], "p95": []}
-                )
-
-                # Build Monte Carlo percentiles
-                mc_percentiles = {
-                    "final_equity": mc_report.get("final_equity_percentiles", {}),
-                    "net_profit": mc_report.get("net_profit_percentiles", {}),
-                    "max_drawdown": mc_report.get("max_drawdown_percentiles", {}),
-                    "sharpe_ratio": mc_report.get("sharpe_ratio_percentiles", {}),
-                    "risk_of_ruin_pct": mc_report.get("risk_of_ruin_pct", 0),
-                    "simulations_count": mc_report.get("num_simulations", 0),
-                }
-
-                # Return JSON bundle
-                return {
-                    "status": "success",
-                    "symbol": req.symbol,
-                    "timeframe": req.timeframe,
-                    "exchange": req.exchange,
-                    "generated_at": datetime.now(timezone.utc).isoformat() + "Z",
-                    "report": validation_report,
-                    "strategy_params": req.params,
-                    "trade_distribution": trade_distribution,
-                    "equity_curves": equity_curves,
-                    "monte_carlo_percentiles": mc_percentiles,
-                }
-
-            except Exception as e:
-                logger.error(f"[API] generate_tear_sheet_json error: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
-
-        # -------------------------------------------------------------------------
-        # Paper Trading Profiles Endpoints
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # -------------------------------------------------------------------------
@@ -1507,6 +1669,7 @@ def deploy_paper_profile(req: DeployPaperProfileRequest) -> dict[str, Any]:
             params=req.params,
             optuna_score=req.optuna_score,
             is_active=req.is_active,
+            deployed=True,
         )
         saved = _paper_profiles.get_profile(
             exchange=req.exchange,
@@ -1535,7 +1698,7 @@ def deploy_paper_profile(req: DeployPaperProfileRequest) -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[API] deploy_paper_profile error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/paper/profiles")
@@ -1569,7 +1732,7 @@ def list_paper_profiles(
         }
     except Exception as e:
         logger.error(f"[API] list_paper_profiles error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/paper/profiles/{exchange}/{symbol:path}")
@@ -1612,7 +1775,7 @@ def get_paper_profile_for_symbol(
         raise
     except Exception as e:
         logger.error(f"[API] get_paper_profile_for_symbol error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class ToggleActiveRequest(BaseModel):
@@ -1689,7 +1852,7 @@ def step_paper_engine(req: PaperStepRequest) -> dict[str, Any]:
             return {"status": "success", "results": results}
     except Exception as e:
         logger.error(f"[API] step_paper_engine error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class PaperPollingRequest(BaseModel):
@@ -1729,7 +1892,7 @@ def reconcile_paper_engine() -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[API] reconcile_paper_engine error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/paper/engine/status")
@@ -1768,7 +1931,7 @@ def list_paper_positions(exchange: str | None = None) -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[API] list_paper_positions error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/paper/positions/{exchange}/{symbol:path}/close")
@@ -1802,7 +1965,7 @@ def close_paper_position_manual(exchange: str, symbol: str) -> dict[str, Any]:
         raise
     except Exception as e:
         logger.error(f"[API] close_paper_position_manual error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class UpdateSLTPRequest(BaseModel):
@@ -1828,10 +1991,14 @@ def update_paper_position_sl_tp(
             "position": updated,
         }
     except ValueError as ve:
-        raise HTTPException(status_code=404, detail=str(ve))
+        logger.warning(f"[API] update_paper_position_sl_tp: {ve}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No open paper position found for {symbol} on {exchange}.",
+        )
     except Exception as e:
         logger.error(f"[API] update_paper_position_sl_tp error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/paper/ledger/transactions")
@@ -1869,7 +2036,7 @@ def list_paper_ledger_transactions(
         }
     except Exception as e:
         logger.error(f"[API] list_paper_ledger_transactions error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/paper/trades/history")
@@ -1910,7 +2077,7 @@ def list_paper_trade_history(
         }
     except Exception as e:
         logger.error(f"[API] list_paper_trade_history error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/paper/performance")
@@ -1935,7 +2102,7 @@ def get_paper_performance(
         }
     except Exception as e:
         logger.error(f"[API] get_paper_performance error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # -------------------------------------------------------------------------
@@ -1958,7 +2125,7 @@ def get_portfolio_snapshot(
         }
     except Exception as e:
         logger.error(f"[API] get_portfolio_snapshot error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/portfolio/venues")
@@ -1978,7 +2145,7 @@ def get_portfolio_venues(
         }
     except Exception as e:
         logger.error(f"[API] get_portfolio_venues error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/portfolio/positions")
@@ -2001,7 +2168,7 @@ def get_portfolio_positions(
         }
     except Exception as e:
         logger.error(f"[API] get_portfolio_positions error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/portfolio/refresh")
@@ -2020,7 +2187,7 @@ def refresh_portfolio_balances(
         }
     except Exception as e:
         logger.error(f"[API] refresh_portfolio_balances error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/portfolio/history")
@@ -2040,7 +2207,7 @@ def get_portfolio_historical_nav(
         }
     except Exception as e:
         logger.error(f"[API] get_portfolio_historical_nav error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class PositionSizingRequest(BaseModel):
@@ -2071,7 +2238,7 @@ def get_portfolio_correlation(
         }
     except Exception as e:
         logger.error(f"[API] get_portfolio_correlation error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/portfolio/var")
@@ -2098,7 +2265,7 @@ def get_portfolio_var(
         }
     except Exception as e:
         logger.error(f"[API] get_portfolio_var error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/portfolio/size_position")
@@ -2126,7 +2293,7 @@ def size_portfolio_position(
         }
     except Exception as e:
         logger.error(f"[API] size_portfolio_position error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class RouteOrderRequest(BaseModel):
@@ -2154,7 +2321,7 @@ class RebalanceExecuteRequest(BaseModel):
     include_synthetic: bool = False
 
 
-@app.post("/api/portfolio/route_order")
+@app.post("/api/portfolio/route_order", dependencies=[Depends(get_api_key)])
 def route_portfolio_order(req: RouteOrderRequest) -> dict[str, Any]:
     """Route a discrete buy or sell order to appropriate exchange, broker, or paper ledger."""
     try:
@@ -2175,7 +2342,7 @@ def route_portfolio_order(req: RouteOrderRequest) -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[API] route_portfolio_order error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/portfolio/rebalance/plan")
@@ -2199,10 +2366,10 @@ def create_portfolio_rebalance_plan(req: RebalancePlanRequest) -> dict[str, Any]
         }
     except Exception as e:
         logger.error(f"[API] create_portfolio_rebalance_plan error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.post("/api/portfolio/rebalance/execute")
+@app.post("/api/portfolio/rebalance/execute", dependencies=[Depends(get_api_key)])
 def execute_portfolio_rebalance(req: RebalanceExecuteRequest) -> dict[str, Any]:
     """Execute a multi-asset portfolio rebalancing plan across target venues."""
     try:
@@ -2227,7 +2394,7 @@ def execute_portfolio_rebalance(req: RebalanceExecuteRequest) -> dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"[API] execute_portfolio_rebalance error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class PortfolioRiskBudgetRequest(BaseModel):
@@ -2287,91 +2454,103 @@ def compute_portfolio_risk_budget(
         }
     except Exception as e:
         logger.error(f"[API] compute_portfolio_risk_budget error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-        # WebSocket endpoint for real-time dashboard
-        @app.websocket("/ws/dashboard")
-        async def dashboard_websocket(websocket: WebSocket):
-            """WebSocket endpoint for real-time dashboard updates."""
-            await _ws_manager.connect(websocket)
+
+# WebSocket endpoint for real-time dashboard
+@app.websocket("/ws/dashboard")
+async def dashboard_websocket(websocket: WebSocket):
+    """WebSocket endpoint for real-time dashboard updates."""
+    await _ws_manager.connect(websocket)
+    try:
+        # Send initial status
+        status = _paper_engine.get_status()
+        await _ws_manager.send_personal(
+            websocket,
+            {
+                "type": "init",
+                "data": status,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+        # Keep connection alive, handle incoming messages
+        while True:
+            msg = await websocket.receive_text()
             try:
-                # Send initial status
-                status = _paper_engine.get_status()
-                await _ws_manager.send_personal(
-                    websocket,
-                    {
-                        "type": "init",
-                        "data": status,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    },
-                )
+                data = json.loads(msg)
+                msg_type = data.get("type")
 
-                # Keep connection alive, handle incoming messages
-                while True:
-                    msg = await websocket.receive_text()
-                    try:
-                        data = json.loads(msg)
-                        msg_type = data.get("type")
+                if msg_type == "ping":
+                    await _ws_manager.send_personal(
+                        websocket,
+                        {
+                            "type": "pong",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                elif msg_type == "get_status":
+                    status = _paper_engine.get_status()
+                    await _ws_manager.send_personal(
+                        websocket,
+                        {
+                            "type": "status_update",
+                            "data": status,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                elif msg_type == "get_positions":
+                    positions = _paper_engine.ledger.list_positions()
+                    await _ws_manager.send_personal(
+                        websocket,
+                        {
+                            "type": "positions_update",
+                            "data": [p.to_dict() for p in positions],
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                elif msg_type == "get_alerts":
+                    alerts = _system_db.get_alerts(limit=50)
+                    await _ws_manager.send_personal(
+                        websocket,
+                        {
+                            "type": "alerts_update",
+                            "data": alerts,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                elif msg_type == "step_engine":
+                    # Trigger a single engine step
+                    results = _paper_engine.step_all_active_profiles()
+                    await _ws_manager.send_personal(
+                        websocket,
+                        {
+                            "type": "engine_step_result",
+                            "data": results,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                    # Broadcast updated status to all
+                    status = _paper_engine.get_status()
+                    await _ws_manager.broadcast(
+                        {
+                            "type": "status_update",
+                            "data": status,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
 
-                        if msg_type == "ping":
-                            await _ws_manager.send_personal(
-                                websocket,
-                                {
-                                    "type": "pong",
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                },
-                            )
-                        elif msg_type == "get_status":
-                            status = _paper_engine.get_status()
-                            await _ws_manager.send_personal(
-                                websocket,
-                                {
-                                    "type": "status_update",
-                                    "data": status,
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                },
-                            )
-                        elif msg_type == "get_positions":
-                            positions = _paper_engine.ledger.list_positions()
-                            await _ws_manager.send_personal(
-                                websocket,
-                                {
-                                    "type": "positions_update",
-                                    "data": [p.to_dict() for p in positions],
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                },
-                            )
-                        elif msg_type == "step_engine":
-                            # Trigger a single engine step
-                            results = _paper_engine.step_all_active_profiles()
-                            await _ws_manager.send_personal(
-                                websocket,
-                                {
-                                    "type": "engine_step_result",
-                                    "data": results,
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                },
-                            )
-                            # Broadcast updated status to all
-                            status = _paper_engine.get_status()
-                            await _ws_manager.broadcast(
-                                {
-                                    "type": "status_update",
-                                    "data": status,
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                },
-                            )
-
-                    except Exception as e:
-                        logger.error(f"[WebSocket] Message handling error: {e}")
-
-            except WebSocketDisconnect:
-                await _ws_manager.disconnect(websocket)
             except Exception as e:
-                logger.error(f"[WebSocket] Connection error: {e}")
-                await _ws_manager.disconnect(websocket)
+                logger.error(f"[WebSocket] Message handling error: {e}")
 
-        # Mount Web Static Files
+    except WebSocketDisconnect:
+        await _ws_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"[WebSocket] Connection error: {e}")
+        await _ws_manager.disconnect(websocket)
+
+
+# Mount Web Static Files
 
 
 web_dir = os.path.join(os.path.dirname(__file__), "web")
@@ -2386,6 +2565,52 @@ if os.path.exists(web_dir):
         return JSONResponse(
             {"message": "EMA + VWAP Trading System API running. Static UI loading..."}
         )
+
+
+# -------------------------------------------------------------------------
+# Alerting API Endpoints (ema_vwap-6ic)
+# -------------------------------------------------------------------------
+class CreateAlertRequest(BaseModel):
+    alert_type: str
+    message: str
+    level: str = "INFO"
+    metadata: dict[str, Any] | None = None
+
+
+@app.post("/api/alerts")
+def create_alert(req: CreateAlertRequest) -> dict[str, Any]:
+    """Manually trigger an alert via the singleton AlertManager (test/ops)."""
+    from src.alerting import get_alert_manager
+
+    entry = get_alert_manager().send(
+        req.alert_type, req.message, req.level, req.metadata
+    )
+    return {"status": "success", "alert": entry}
+
+
+@app.get("/api/alerts")
+def list_alerts(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+    """Return recent alert history (most recent first)."""
+    alerts = _system_db.get_alerts(limit=limit)
+    return {"status": "success", "count": len(alerts), "alerts": alerts}
+
+
+@app.post("/api/alerts/{alert_id}/acknowledge")
+def acknowledge_alert(alert_id: int) -> dict[str, Any]:
+    """Mark an alert as acknowledged (global — one ack clears for everyone)."""
+    ok = _system_db.acknowledge_alert(alert_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return {"status": "success", "message": "Alert acknowledged", "id": alert_id}
+
+
+@app.delete("/api/alerts/{alert_id}", dependencies=[Depends(get_api_key)])
+def delete_alert(alert_id: int) -> dict[str, Any]:
+    """Delete an alert by ID."""
+    ok = _system_db.delete_alert(alert_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return {"status": "success", "message": "Alert deleted", "id": alert_id}
 
 
 if __name__ == "__main__":

@@ -183,7 +183,7 @@ class OptunaConfig:
     # Max Holding Bars (time-based stop, None = disabled)
     enable_max_holding_bars: bool = False  # Set True to sweep max_holding_bars
     max_holding_bars_min: int = 4  # Minimum bars before forced exit
-    max_holding_bars_max: int = 96  # Maximum bars before forced exit
+    max_holding_bars_max: int = 500  # Maximum bars before forced exit
 
     # Hard Drawdown Constraints (Optuna pruning)
     enable_hard_drawdown_constraint: bool = False
@@ -197,7 +197,7 @@ class OptunaConfig:
 
     # Regime-adaptive sweep settings (ema_vwap-0tj)
     regime_sweep_enabled: bool = False
-    regime_sweep_days: int = 180
+    regime_sweep_days: int = 360
     regime_sweep_n_jobs: int = 1
 
     def to_dict(self) -> dict[str, Any]:

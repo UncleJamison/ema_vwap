@@ -30,7 +30,7 @@ class GeminiAdapter(BaseDataProvider):
         self,
         symbol: str = "BTC/USD",
         timeframe: str = "5m",
-        days: int = 180,
+        days: int = 360,
         limit: int | None = None,
     ) -> pd.DataFrame:
         """Fetch historical candles from Gemini REST API."""
@@ -104,7 +104,7 @@ class KuCoinAdapter(BaseDataProvider):
         self,
         symbol: str = "BTC/USDT",
         timeframe: str = "5m",
-        days: int = 180,
+        days: int = 360,
         limit: int | None = None,
     ) -> pd.DataFrame:
         """

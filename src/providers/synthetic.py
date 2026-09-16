@@ -51,6 +51,17 @@ class SyntheticAdapter(BaseDataProvider):
         """Format symbol to canonical BASE/QUOTE for synthetic generator."""
         return normalize_symbol(symbol)
 
+    def validate_symbol(self, symbol: str) -> str:
+        """Validate symbol exists in the synthetic asset registry."""
+        normalized = normalize_symbol(symbol)
+        base = normalized.split("/")[0]
+        if base not in self.DEFAULT_BASE_PRICES:
+            raise ValueError(
+                f"Symbol {normalized!r} not in synthetic asset registry. "
+                f"Known assets: {', '.join(sorted(self.DEFAULT_BASE_PRICES))}"
+            )
+        return normalized
+
     def get_initial_price(self, symbol: str, start_price: float | None = None) -> float:
         """Resolve initial starting price for a given asset symbol."""
         if start_price is not None and start_price != 65000.0:
@@ -144,7 +155,7 @@ class SyntheticAdapter(BaseDataProvider):
         self,
         symbol: str = "BTC/USD",
         timeframe: str = "5m",
-        days: int = 180,
+        days: int = 360,
         limit: int | None = None,
     ) -> pd.DataFrame:
         """Fetch historical candles via synthetic simulation."""

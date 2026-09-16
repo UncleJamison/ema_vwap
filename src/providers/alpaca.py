@@ -82,7 +82,7 @@ class AlpacaStockAdapter(BaseDataProvider):
         self,
         symbol: str = "AAPL",
         timeframe: str = "5m",
-        days: int = 180,
+        days: int = 360,
         limit: int | None = None,
         adjustment: str = "split",
     ) -> pd.DataFrame:
