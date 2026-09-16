@@ -3,9 +3,11 @@ Data Loader Module for Gemini, KuCoin, and Synthetic Market Data.
 Refactored to orchestrate pluggable BaseDataProvider adapters with persistent SQLite database caching.
 """
 
+from datetime import datetime, timezone
+
 import pandas as pd
 
-from src.database import CandleDatabase
+from src.db_connection_manager import get_database
 from src.providers import (
     STANDARD_TF_ORDER,
     GeminiAdapter,
@@ -14,8 +16,9 @@ from src.providers import (
     normalize_symbol,
     registry,
 )
+from src.validator_symbols import validate_symbol_against_provider
 
-db = CandleDatabase()
+db = get_database("candles")
 
 __all__ = [
     "EXCHANGE_NATIVE_TFS",
@@ -35,6 +38,41 @@ EXCHANGE_NATIVE_TFS: dict[str, set[str]] = {
 }
 
 _TF_ORDER = STANDARD_TF_ORDER
+
+
+# Cache staleness configuration (seconds per timeframe)
+CACHE_TTL_SECONDS = {
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "2h": 7200,
+    "4h": 14400,
+    "6h": 21600,
+    "1d": 86400,
+}
+
+
+def _is_cache_stale(df: pd.DataFrame, timeframe: str) -> bool:
+    """
+    Check if cached data is stale based on the most recent candle timestamp.
+
+    Returns True if the latest candle is older than the TTL for the given timeframe.
+    """
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return True  # Empty or malformed cache is considered stale
+
+    try:
+        latest_ts = pd.to_datetime(df["timestamp"].iloc[-1], utc=True)
+        now = datetime.now(timezone.utc)
+        ttl = CACHE_TTL_SECONDS.get(timeframe, 300)  # Default 5 min TTL
+        age_seconds = (now - latest_ts).total_seconds()
+        return age_seconds > ttl
+    except (ValueError, pd.errors.ParserError, TypeError):  # Timestamp parsing errors
+        # On any parsing error, treat as stale to force refresh
+        return True
 
 
 def get_donor_timeframe(exchange: str, target_tf: str) -> str | None:
@@ -90,7 +128,7 @@ class DataLoader:
 
     @classmethod
     def fetch_kucoin_historical(
-        cls, symbol: str = "BTC/USDT", timeframe: str = "5m", days: int = 180
+        cls, symbol: str = "BTC/USDT", timeframe: str = "5m", days: int = 360
     ) -> pd.DataFrame:
         """
         Fetch up to `days` of historical intraday candles from KuCoin using paginated requests.
@@ -133,7 +171,7 @@ class DataLoader:
 
     @classmethod
     def fetch_gemini_historical(
-        cls, symbol: str = "BTC/USD", timeframe: str = "5m", days: int = 180
+        cls, symbol: str = "BTC/USD", timeframe: str = "5m", days: int = 360
     ) -> pd.DataFrame:
         """Fetch historical candles from Gemini REST API and cache in SQLite.
 
@@ -262,7 +300,7 @@ class DataLoader:
                 df_temp["timestamp"] = pd.to_datetime(
                     df_temp["timestamp"], utc=True, format="ISO8601"
                 )
-            except Exception:
+            except (ValueError, pd.errors.ParserError):
                 df_temp["timestamp"] = pd.to_datetime(df_temp["timestamp"], utc=True)
             df_temp = df_temp.set_index("timestamp")
 
@@ -307,6 +345,11 @@ class DataLoader:
         Checks SQLite cache first; fetches fresh from provider API when needed.
         """
         exchange_lower = exchange.lower()
+        # Validate symbol before proceeding
+        try:
+            validate_symbol_against_provider(registry.get(exchange_lower), symbol)
+        except ValueError as e:
+            raise ValueError(f"Invalid symbol for {exchange_lower}: {e}") from e
         donor_tf = get_donor_timeframe(exchange_lower, timeframe)
         if donor_tf is not None and exchange_lower not in ("synthetic",):
             print(
@@ -359,7 +402,9 @@ class DataLoader:
                 timeframe=timeframe,
                 limit=target_limit,
             )
-            if len(cached_df) >= target_limit:
+            if len(cached_df) >= target_limit and not _is_cache_stale(
+                cached_df, timeframe
+            ):
                 print(
                     f"[DataLoader] Loaded {len(cached_df)} candles for {symbol} ({exchange}) directly from SQLite DB."
                 )
@@ -400,23 +445,28 @@ class DataLoader:
         Falls back to DB cache gracefully on network or rate limit failure.
         """
         exchange_lower = exchange.lower()
+        # Validate symbol before proceeding
+        try:
+            validate_symbol_against_provider(registry.get(exchange_lower), symbol)
+        except ValueError as e:
+            raise ValueError(f"Invalid symbol for {exchange_lower}: {e}") from e
         if exchange_lower == "synthetic":
             return cls.generate_synthetic_candles(
                 symbol=symbol, timeframe=timeframe, num_bars=limit
             )
 
         tf_days_map = {
-            "1m": 1,
-            "3m": 1,
-            "5m": 1,
-            "15m": 2,
-            "30m": 4,
-            "1h": 8,
-            "2h": 16,
-            "4h": 32,
-            "6h": 48,
-            "1d": 180,
-        }
+                    "1m": 1,
+                    "3m": 1,
+                    "5m": 1,
+                    "15m": 280,       # ~26,880 bars (~9 months) — aligns with 20-30K validation target
+                    "30m": 500,       # ~24,000 bars (~1.4 years)
+                    "1h": 1000,       # ~24,000 bars (~2.7 years)
+                    "2h": 2000,       # ~24,000 bars (~5.5 years)
+                    "4h": 3300,       # ~19,800 bars (~9 years)
+                    "6h": 5000,       # ~20,000 bars (~13.7 years, max feasible crypto history)
+                    "1d": 7300,       # ~7,300 bars (~20 years, max feasible crypto history)
+                }
         days_to_fetch = tf_days_map.get(timeframe, 1)
 
         try:

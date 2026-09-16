@@ -21,7 +21,7 @@ def compute_wfo_auto_params(
     n_trials: int,
     is_ratio: float = 0.7,
     target_oos_days: float = 15.0,
-    bars_per_day: float = 288.0,
+    bars_per_day: float | None = None,
 ) -> dict[str, int]:
     """
     Derive optimal WFO num_windows and trials_per_window from dataset size and
@@ -37,11 +37,13 @@ def compute_wfo_auto_params(
         n_trials: Total Optuna trial budget (e.g. the value from the UI).
         is_ratio: Fraction of each window allocated to in-sample training.
         target_oos_days: Desired OOS window length in trading days.
-        bars_per_day: Candles per trading day (288 for 5m, 96 for 15m, 24 for 1h).
+        bars_per_day: Candles per trading day. Auto-detected from data if None.
 
     Returns:
         Dict with keys ``num_windows`` and ``trials_per_window``.
     """
+    if bars_per_day is None:
+        bars_per_day = 288.0
     oos_target_bars = max(15, int(target_oos_days * bars_per_day))
 
     # Mirror the formula used in generate_windows() so num_windows produces
@@ -67,7 +69,7 @@ class WalkForwardEngine:
         wfo_config: WFOConfig | None = None,
         opt_config: OptunaConfig | None = None,
         n_trials_total: int = 0,
-        bars_per_day: float = 288.0,
+        bars_per_day: float | None = None,
     ):
         self.base_params = base_params
         self.wfo_config = wfo_config or WFOConfig()
@@ -177,12 +179,23 @@ class WalkForwardEngine:
             self.wfo_config.num_windows == 0 or self.wfo_config.trials_per_window == 0
         )
         if needs_auto:
+            # Auto-detect bars_per_day from data when using default (288)
+            effective_bars_per_day = self.bars_per_day
+            if effective_bars_per_day == 288.0 and isinstance(df, pd.DataFrame) and len(df) >= 2 and "timestamp" in df.columns:
+                try:
+                    ts_diff = (pd.to_datetime(df["timestamp"].iloc[1]) - pd.to_datetime(df["timestamp"].iloc[0])).total_seconds()
+                    if ts_diff > 0:
+                        inferred = 86400.0 / ts_diff
+                        if 1 <= inferred <= 1440:
+                            effective_bars_per_day = float(inferred)
+                except Exception:
+                    pass
             budget = self.n_trials_total if self.n_trials_total > 0 else 30
             auto_scaled = compute_wfo_auto_params(
                 n_bars=len(df),
                 n_trials=budget,
                 is_ratio=max(0.5, min(0.9, self.wfo_config.in_sample_ratio)),
-                bars_per_day=self.bars_per_day,
+                bars_per_day=effective_bars_per_day,
             )
             resolved_windows = (
                 auto_scaled["num_windows"]
@@ -228,7 +241,11 @@ class WalkForwardEngine:
             if len(window_regimes) > 1:
                 prev = window_regimes[-2]
                 cur = window_regimes[-1]
-                if prev != "insufficient_data" and cur != "insufficient_data" and prev != cur:
+                if (
+                    prev != "insufficient_data"
+                    and cur != "insufficient_data"
+                    and prev != cur
+                ):
                     regime_changes += 1
 
         # Re-optimization trigger: flag if regime changed significantly
@@ -290,7 +307,11 @@ class WalkForwardEngine:
                     "oos_sharpe": oos_result.sharpe_ratio,
                     "oos_trades_count": oos_result.total_trades,
                     # Regime tracking fields
-                    "window_regime": window_regimes[len(window_results)] if len(window_results) < len(window_regimes) else "insufficient_data",
+                    "window_regime": (
+                        window_regimes[len(window_results)]
+                        if len(window_results) < len(window_regimes)
+                        else "insufficient_data"
+                    ),
                     "regime_change_trigger": trigger_reoptimize,
                 }
             )
@@ -343,5 +364,3 @@ class WalkForwardEngine:
             "regime_change_ratio": round(regime_change_ratio, 2),
             "trigger_reoptimize": trigger_reoptimize,
         }
-
-
