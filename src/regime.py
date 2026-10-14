@@ -14,6 +14,7 @@ Config-driven mapping to strategy_mode:
 3-bar hysteresis prevents whipsaw regime switches around ADX=25.
 No external TA libraries — only pandas/numpy (already in requirements).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -41,19 +42,21 @@ class RegimeConfig:
 
     Industry-standard defaults; swept by Optuna during batch optimization.
     """
-    adx_threshold: float = 25.0      # ADX(14) above this = "has trend"
-    er_threshold: float = 0.5        # ER(10) above this = "efficient trend"
-    atr_multiplier: float = 1.5      # ATR% >= multiplier * 60-day median = high vol
+
+    adx_threshold: float = 25.0  # ADX(14) above this = "has trend"
+    er_threshold: float = 0.5  # ER(10) above this = "efficient trend"
+    atr_multiplier: float = 1.5  # ATR% >= multiplier * 60-day median = high vol
     adx_period: int = 14
     er_period: int = 10
     atr_period: int = 14
-    atr_median_window: int = 60      # rolling median window for ATR% baseline
-    hysteresis_bars: int = 3         # consecutive bars required to flip regime
+    atr_median_window: int = 60  # rolling median window for ATR% baseline
+    hysteresis_bars: int = 3  # consecutive bars required to flip regime
 
 
 # ---------------------------------------------------------------------------
 # Indicator computation (vectorized, no external deps)
 # ---------------------------------------------------------------------------
+
 
 def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """Compute Average Directional Index (ADX) following Wilder's method.
@@ -77,20 +80,24 @@ def compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     up_move = high.diff()
     down_move = low.diff() * -1.0
 
-    dm_plus = pd.Series(np.where(
-        (up_move > down_move) & (up_move > 0), up_move, 0.0
-    ), index=df.index)
-    dm_minus = pd.Series(np.where(
-        (down_move > up_move) & (down_move > 0), down_move, 0.0
-    ), index=df.index)
+    dm_plus = pd.Series(
+        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index
+    )
+    dm_minus = pd.Series(
+        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0),
+        index=df.index,
+    )
 
-    di_plus = dm_plus.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean() / atr_smoothed
-    di_minus = dm_minus.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean() / atr_smoothed
+    di_plus = (
+        dm_plus.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+        / atr_smoothed
+    )
+    di_minus = (
+        dm_minus.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+        / atr_smoothed
+    )
 
-    dx = (
-        (di_plus - di_minus).abs()
-        / (di_plus + di_minus)
-    ) * 100.0
+    dx = ((di_plus - di_minus).abs() / (di_plus + di_minus)) * 100.0
     adx = dx.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
     return adx
 
@@ -124,9 +131,8 @@ def compute_atr_pct(df: pd.DataFrame, period: int = 14) -> pd.Series:
 # Regime classification
 # ---------------------------------------------------------------------------
 
-def classify_regime(
-    df: pd.DataFrame, config: RegimeConfig | None = None
-) -> pd.Series:
+
+def classify_regime(df: pd.DataFrame, config: RegimeConfig | None = None) -> pd.Series:
     """Vectorized per-bar regime classification.
 
     Returns a pandas Series of regime labels ('trending', 'ranging', 'high_vol')
@@ -149,7 +155,9 @@ def classify_regime(
     atr_pct = compute_atr_pct(df, period=config.atr_period)
 
     # Rolling median baseline for ATR% (volatility clustering)
-    atr_med = atr_pct.rolling(window=config.atr_median_window, min_periods=config.atr_period).median()
+    atr_med = atr_pct.rolling(
+        window=config.atr_median_window, min_periods=config.atr_period
+    ).median()
 
     # Warmup: first row where all indicators are valid
     valid_from_idx = max(
@@ -167,9 +175,8 @@ def classify_regime(
     # Trending: high ADX AND efficient
     trending_cond = (adx >= config.adx_threshold) & (er >= config.er_threshold)
     # High vol: low ADX (or inefficient trend) + elevated ATR%
-    high_vol_cond = (
-        ((adx < config.adx_threshold) | (er < config.er_threshold))
-        & (atr_pct >= config.atr_multiplier * atr_med)
+    high_vol_cond = ((adx < config.adx_threshold) | (er < config.er_threshold)) & (
+        atr_pct >= config.atr_multiplier * atr_med
     )
     # Ranging: low ADX + low ATR%
     ranging_cond = (
@@ -189,16 +196,16 @@ def classify_regime(
     return result
 
 
-def apply_hysteresis(
-    regime_series: pd.Series, confirmed_bars: int = 3
-) -> pd.Series:
+def apply_hysteresis(regime_series: pd.Series, confirmed_bars: int = 3) -> pd.Series:
     """Apply hysteresis to regime switches.
 
     A regime label only flips after `confirmed_bars` consecutive bars agree on
     the new regime. INSUFFICIENT_DATA labels are preserved as-is.
     """
     result = regime_series.copy()
-    regimes = [r for r in regime_series.unique() if r not in (INSUFFICIENT_DATA, np.nan)]
+    regimes = [
+        r for r in regime_series.unique() if r not in (INSUFFICIENT_DATA, np.nan)
+    ]
     if not regimes:
         return result
 
@@ -210,7 +217,9 @@ def apply_hysteresis(
         value = regime_series.loc[idx]
         is_insufficient = value == INSUFFICIENT_DATA or pd.isna(value)
         if is_insufficient:
-            result.loc[idx] = last_confirmed if last_confirmed is not None else INSUFFICIENT_DATA
+            result.loc[idx] = (
+                last_confirmed if last_confirmed is not None else INSUFFICIENT_DATA
+            )
             continue
 
         if last_confirmed is None:
@@ -232,9 +241,7 @@ def apply_hysteresis(
     return result
 
 
-def get_current_regime(
-    df: pd.DataFrame, config: RegimeConfig | None = None
-) -> str:
+def get_current_regime(df: pd.DataFrame, config: RegimeConfig | None = None) -> str:
     """Return the regime label of the latest valid bar (wrapper for live use)."""
     series = classify_regime(df, config=config)
     last = series.iloc[-1]

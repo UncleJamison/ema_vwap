@@ -1,0 +1,419 @@
+...FF..........FFF...................................................... [ 15%]
+...........FFFFFFFFFFFFFFFF............................................. [ 31%]
+..............................................................FFFFFFFFF. [ 46%]
+FFFFFFFFFFFFFFFFFFFFFFFFFFFF.FFFFF.F..FF.F..F...FF..F.F...F.FF.FFFFF..FF [ 62%]
+...FF.........F........................................F..F.F........... [ 77%]
+............................................................FF.......... [ 93%]
+...............................                                          [100%]
+================================== FAILURES ===================================
+E   AttributeError: 'CandleDatabase' object has no attribute 'save_alert'
+C:\crypto\ema_vwap\src\alerting.py:210: AttributeError: 'CandleDatabase' object has no attribute 'save_alert'
+E   AttributeError: 'CandleDatabase' object has no attribute 'save_alert'
+C:\crypto\ema_vwap\src\alerting.py:210: AttributeError: 'CandleDatabase' object has no attribute 'save_alert'
+E   assert 500 == 200
+     +  where 500 = <Response [500 Internal Server Error]>.status_code
+---------------------------- Captured stderr call -----------------------------
+[2026-10-05 23:55:50] [INFO] [ema_vwap:Worker-task_2ea8956f4899] Background task completed: task_2ea8956f4899
+[2026-10-05 23:55:50] [ERROR] [ema_vwap:AnyIO worker thread] [API] deploy_paper_profile error: table paper_profiles has no column named deployed
+[2026-10-05 23:55:50] [INFO] [httpx2:MainThread] HTTP Request: POST http://testserver/api/paper/profiles/deploy "HTTP/1.1 500 Internal Server Error"
+------------------------------ Captured log call ------------------------------
+INFO     ema_vwap:tasks.py:92 Background task completed: task_2ea8956f4899
+ERROR    ema_vwap:app.py:1713 [API] deploy_paper_profile error: table paper_profiles has no column named deployed
+INFO     httpx2:_client.py:1090 HTTP Request: POST http://testserver/api/paper/profiles/deploy "HTTP/1.1 500 Internal Server Error"
+C:\crypto\ema_vwap\tests\test_app.py:297: assert 500 == 200
+E   assert 500 == 200
+     +  where 500 = <Response [500 Internal Server Error]>.status_code
+---------------------------- Captured stderr call -----------------------------
+[2026-10-05 23:55:50] [ERROR] [ema_vwap:AnyIO worker thread] [API] deploy_paper_profile error: table paper_profiles has no column named deployed
+[2026-10-05 23:55:50] [INFO] [httpx2:MainThread] HTTP Request: POST http://testserver/api/paper/profiles/deploy "HTTP/1.1 500 Internal Server Error"
+------------------------------ Captured log call ------------------------------
+ERROR    ema_vwap:app.py:1713 [API] deploy_paper_profile error: table paper_profiles has no column named deployed
+INFO     httpx2:_client.py:1090 HTTP Request: POST http://testserver/api/paper/profiles/deploy "HTTP/1.1 500 Internal Server Error"
+C:\crypto\ema_vwap\tests\test_app.py:350: assert 500 == 200
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:1224: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   AttributeError: 'CandleDatabase' object has no attribute 'get_db_info'
+C:\crypto\ema_vwap\tests\test_database_maintenance.py:15: AttributeError: 'CandleDatabase' object has no attribute 'get_db_info'
+E   AttributeError: 'CandleDatabase' object has no attribute 'repair_database'
+C:\crypto\ema_vwap\tests\test_database_maintenance.py:25: AttributeError: 'CandleDatabase' object has no attribute 'repair_database'
+E   AttributeError: 'CandleDatabase' object has no attribute 'repair_database'
+C:\crypto\ema_vwap\tests\test_database_maintenance.py:34: AttributeError: 'CandleDatabase' object has no attribute 'repair_database'
+E   AttributeError: 'CandleDatabase' object has no attribute 'export_candles_csv'
+C:\crypto\ema_vwap\tests\test_database_maintenance.py:41: AttributeError: 'CandleDatabase' object has no attribute 'export_candles_csv'
+E   AttributeError: 'CandleDatabase' object has no attribute 'export_candles_json'
+C:\crypto\ema_vwap\tests\test_database_maintenance.py:48: AttributeError: 'CandleDatabase' object has no attribute 'export_candles_json'
+E   AttributeError: 'CandleDatabase' object has no attribute 'export_candles_csv'
+C:\crypto\ema_vwap\tests\test_database_maintenance.py:58: AttributeError: 'CandleDatabase' object has no attribute 'export_candles_csv'
+E   AttributeError: 'CandleDatabase' object has no attribute 'export_candles_json'
+C:\crypto\ema_vwap\tests\test_database_maintenance.py:70: AttributeError: 'CandleDatabase' object has no attribute 'export_candles_json'
+E   AttributeError: 'CandleDatabase' object has no attribute 'vacuum_database'
+C:\crypto\ema_vwap\tests\test_database_maintenance.py:79: AttributeError: 'CandleDatabase' object has no attribute 'vacuum_database'
+E   AttributeError: 'CandleDatabase' object has no attribute 'get_db_info'
+C:\crypto\ema_vwap\tests\test_database_maintenance.py:87: AttributeError: 'CandleDatabase' object has no attribute 'get_db_info'
+E   AttributeError: 'CandleDatabase' object has no attribute 'repair_database'
+C:\crypto\ema_vwap\tests\test_database_maintenance.py:99: AttributeError: 'CandleDatabase' object has no attribute 'repair_database'
+E   AssertionError: assert 'alerts' in ['candles', 'batch_results', 'sqlite_sequence', 'paper_ledger', 'paper_profiles', 'paper_positions', ...]
+C:\crypto\ema_vwap\tests\test_database_traceability.py:38: AssertionError: assert 'alerts' in ['candles', 'batch_results', 'sqlite_sequence', 'paper_ledger', 'paper_profiles', 'paper_positions', ...]
+E   AttributeError: 'CandleDatabase' object has no attribute 'save_alert'
+C:\crypto\ema_vwap\tests\test_database_traceability.py:84: AttributeError: 'CandleDatabase' object has no attribute 'save_alert'
+E   AttributeError: 'CandleDatabase' object has no attribute 'get_alerts'
+C:\crypto\ema_vwap\tests\test_database_traceability.py:159: AttributeError: 'CandleDatabase' object has no attribute 'get_alerts'
+E   AttributeError: 'CandleDatabase' object has no attribute 'repair_database'
+C:\crypto\ema_vwap\tests\test_database_traceability.py:168: AttributeError: 'CandleDatabase' object has no attribute 'repair_database'
+E   AttributeError: 'CandleDatabase' object has no attribute 'repair_database'
+C:\crypto\ema_vwap\tests\test_database_traceability.py:183: AttributeError: 'CandleDatabase' object has no attribute 'repair_database'
+E   AttributeError: 'CandleDatabase' object has no attribute 'save_alert'
+C:\crypto\ema_vwap\src\alerting.py:210: AttributeError: 'CandleDatabase' object has no attribute 'save_alert'
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:217: TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:217: TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:709: TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+---------------------------- Captured stderr call -----------------------------
+[2026-10-05 23:56:01] [ERROR] [ema_vwap:MainThread] [PaperTradingEngine] Startup reconciliation error: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+[2026-10-05 23:56:01] [INFO] [ema_vwap:PaperTradingRunner] [PaperTradingEngine] Started live polling runner (interval=1s)
+------------------------------ Captured log call ------------------------------
+ERROR    ema_vwap:engine.py:1154 [PaperTradingEngine] Startup reconciliation error: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+INFO     ema_vwap:engine.py:1166 [PaperTradingEngine] Started live polling runner (interval=1s)
+DEBUG    ema_vwap:engine.py:874 [PaperTradingEngine] Poll finished in 6.6ms for 0 profiles (0 provider fetches, 0 indicator runs, 0 candle hits, 0 signal hits)
+C:\crypto\ema_vwap\src\paper\engine.py:1224: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:891: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:891: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:891: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:1317: TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:75: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:106: AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:75: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:106: AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:270: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:334: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:384: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:442: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:478: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:545: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:587: AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:75: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:75: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:75: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:75: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:716: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:748: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   Failed: DID NOT RAISE ValueError
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:796: Failed: DID NOT RAISE ValueError
+E   Failed: DID NOT RAISE ValueError
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:801: Failed: DID NOT RAISE ValueError
+E   sqlite3.IntegrityError: NOT NULL constraint failed: paper_ledger_transactions.amount
+C:\crypto\ema_vwap\src\database.py:1273: sqlite3.IntegrityError: NOT NULL constraint failed: paper_ledger_transactions.amount
+E   Failed: DID NOT RAISE ValueError
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:811: Failed: DID NOT RAISE ValueError
+E   Failed: DID NOT RAISE ValueError
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:817: Failed: DID NOT RAISE ValueError
+E   Failed: DID NOT RAISE ValueError
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:823: Failed: DID NOT RAISE ValueError
+E   sqlite3.IntegrityError: NOT NULL constraint failed: paper_ledger_transactions.amount
+C:\crypto\ema_vwap\src\database.py:1273: sqlite3.IntegrityError: NOT NULL constraint failed: paper_ledger_transactions.amount
+E   Failed: DID NOT RAISE ValueError
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:845: Failed: DID NOT RAISE ValueError
+E   AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:859: AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+E   AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:876: AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+E   AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+C:\crypto\ema_vwap\tests\test_paper_epic_l7v_bugs.py:899: AttributeError: 'PaperLedger' object has no attribute 'record_sell_short'
+E   TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:217: TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\tests\test_paper_polling_optimization_l7v12.py:128: TypeError: PaperPosition.__init__() got an unexpected keyword argument 'account_id'
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:1224: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:891: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   sqlite3.OperationalError: table paper_profiles has no column named deployed
+C:\crypto\ema_vwap\src\database.py:986: sqlite3.OperationalError: table paper_profiles has no column named deployed
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:1253: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   assert 500 == 200
+     +  where 500 = <Response [500 Internal Server Error]>.status_code
+---------------------------- Captured stderr call -----------------------------
+[2026-10-05 23:56:03] [ERROR] [ema_vwap:AnyIO worker thread] [API] get_portfolio_snapshot error: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+[2026-10-05 23:56:03] [INFO] [httpx2:MainThread] HTTP Request: GET http://testserver/api/portfolio/snapshot?include_synthetic=true "HTTP/1.1 500 Internal Server Error"
+------------------------------ Captured log call ------------------------------
+DEBUG    asyncio:proactor_events.py:633 Using proactor: IocpProactor
+ERROR    ema_vwap:app.py:2140 [API] get_portfolio_snapshot error: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+INFO     httpx2:_client.py:1090 HTTP Request: GET http://testserver/api/portfolio/snapshot?include_synthetic=true "HTTP/1.1 500 Internal Server Error"
+C:\crypto\ema_vwap\tests\test_portfolio_aggregator.py:97: assert 500 == 200
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:1253: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:1253: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:1253: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   assert 500 == 200
+     +  where 500 = <Response [500 Internal Server Error]>.status_code
+---------------------------- Captured stderr call -----------------------------
+[2026-10-05 23:56:03] [INFO] [httpx2:MainThread] HTTP Request: POST http://testserver/api/portfolio/route_order "HTTP/1.1 200 OK"
+[2026-10-05 23:56:03] [ERROR] [ema_vwap:AnyIO worker thread] [API] create_portfolio_rebalance_plan error: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+[2026-10-05 23:56:03] [INFO] [httpx2:MainThread] HTTP Request: POST http://testserver/api/portfolio/rebalance/plan "HTTP/1.1 500 Internal Server Error"
+------------------------------ Captured log call ------------------------------
+DEBUG    asyncio:proactor_events.py:633 Using proactor: IocpProactor
+INFO     httpx2:_client.py:1090 HTTP Request: POST http://testserver/api/portfolio/route_order "HTTP/1.1 200 OK"
+DEBUG    asyncio:proactor_events.py:633 Using proactor: IocpProactor
+ERROR    ema_vwap:app.py:2381 [API] create_portfolio_rebalance_plan error: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+INFO     httpx2:_client.py:1090 HTTP Request: POST http://testserver/api/portfolio/rebalance/plan "HTTP/1.1 500 Internal Server Error"
+C:\crypto\ema_vwap\tests\test_portfolio_rebalancer.py:108: assert 500 == 200
+E   FileNotFoundError: [WinError 3] The system cannot find the path specified: ''
+<frozen os>:225: FileNotFoundError: [WinError 3] The system cannot find the path specified: ''
+E   FileNotFoundError: [WinError 3] The system cannot find the path specified: ''
+---------------------------- Captured stderr call -----------------------------
+[2026-10-05 23:56:03] [INFO] [httpx2:MainThread] HTTP Request: POST http://testserver/api/batch_results/export_to_portfolio "HTTP/1.1 404 Not Found"
+[2026-10-05 23:56:03] [INFO] [httpx2:MainThread] HTTP Request: POST http://testserver/api/batch_results/export_to_portfolio "HTTP/1.1 404 Not Found"
+------------------------------ Captured log call ------------------------------
+DEBUG    asyncio:proactor_events.py:633 Using proactor: IocpProactor
+INFO     httpx2:_client.py:1090 HTTP Request: POST http://testserver/api/batch_results/export_to_portfolio "HTTP/1.1 404 Not Found"
+DEBUG    asyncio:proactor_events.py:633 Using proactor: IocpProactor
+INFO     httpx2:_client.py:1090 HTTP Request: POST http://testserver/api/batch_results/export_to_portfolio "HTTP/1.1 404 Not Found"
+<frozen os>:225: FileNotFoundError: [WinError 3] The system cannot find the path specified: ''
+E   FileNotFoundError: [WinError 3] The system cannot find the path specified: ''
+<frozen os>:225: FileNotFoundError: [WinError 3] The system cannot find the path specified: ''
+E   FileNotFoundError: [WinError 3] The system cannot find the path specified: ''
+<frozen os>:225: FileNotFoundError: [WinError 3] The system cannot find the path specified: ''
+E   TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+C:\crypto\ema_vwap\src\paper\engine.py:1253: TypeError: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+E   assert 500 == 200
+     +  where 500 = <Response [500 Internal Server Error]>.status_code
+---------------------------- Captured stderr call -----------------------------
+[2026-10-05 23:56:03] [INFO] [httpx2:MainThread] HTTP Request: GET http://testserver/api/portfolio/correlation?symbols=BTC/USD,ETH/USD,AAPL,SPY "HTTP/1.1 200 OK"
+[2026-10-05 23:56:03] [ERROR] [ema_vwap:AnyIO worker thread] [API] get_portfolio_var error: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+[2026-10-05 23:56:03] [INFO] [httpx2:MainThread] HTTP Request: GET http://testserver/api/portfolio/var?confidence_level=0.95&horizon_days=1&include_synthetic=true "HTTP/1.1 500 Internal Server Error"
+------------------------------ Captured log call ------------------------------
+DEBUG    asyncio:proactor_events.py:633 Using proactor: IocpProactor
+INFO     httpx2:_client.py:1090 HTTP Request: GET http://testserver/api/portfolio/correlation?symbols=BTC/USD,ETH/USD,AAPL,SPY "HTTP/1.1 200 OK"
+DEBUG    asyncio:proactor_events.py:633 Using proactor: IocpProactor
+ERROR    ema_vwap:app.py:2280 [API] get_portfolio_var error: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+INFO     httpx2:_client.py:1090 HTTP Request: GET http://testserver/api/portfolio/var?confidence_level=0.95&horizon_days=1&include_synthetic=true "HTTP/1.1 500 Internal Server Error"
+C:\crypto\ema_vwap\tests\test_portfolio_risk.py:168: assert 500 == 200
+E   FileNotFoundError: [WinError 3] The system cannot find the path specified: ''
+<frozen os>:225: FileNotFoundError: [WinError 3] The system cannot find the path specified: ''
+E   AssertionError: /api/portfolio/snapshot should return 200 without API key, got 500
+    assert 500 == 200
+     +  where 500 = <Response [500 Internal Server Error]>.status_code
+---------------------------- Captured stderr call -----------------------------
+[2026-10-05 23:56:04] [ERROR] [ema_vwap:AnyIO worker thread] [API] get_portfolio_snapshot error: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+[2026-10-05 23:56:04] [INFO] [httpx2:MainThread] HTTP Request: GET http://testserver/api/portfolio/snapshot "HTTP/1.1 500 Internal Server Error"
+------------------------------ Captured log call ------------------------------
+DEBUG    asyncio:proactor_events.py:633 Using proactor: IocpProactor
+ERROR    ema_vwap:app.py:2140 [API] get_portfolio_snapshot error: PaperLedger.list_positions() got an unexpected keyword argument 'account_id'
+INFO     httpx2:_client.py:1090 HTTP Request: GET http://testserver/api/portfolio/snapshot "HTTP/1.1 500 Internal Server Error"
+C:\crypto\ema_vwap\tests\test_security_audit.py:90: AssertionError: /api/portfolio/snapshot should return 200 without API key, got 500
+E   sqlite3.ProgrammingError: You can only execute one statement at a time.
+C:\crypto\ema_vwap\src\database.py:178: sqlite3.ProgrammingError: You can only execute one statement at a time.
+E   AttributeError: 'CandleDatabase' object has no attribute 'vacuum_database'
+C:\crypto\ema_vwap\tests\test_security_audit.py:162: AttributeError: 'CandleDatabase' object has no attribute 'vacuum_database'
+E   assert 500 == 200
+     +  where 500 = <Response [500 Internal Server Error]>.status_code
+---------------------------- Captured stderr call -----------------------------
+[2026-10-05 23:56:04] [ERROR] [ema_vwap:AnyIO worker thread] [API] db/export/csv error: 'CandleDatabase' object has no attribute 'export_candles_csv'
+[2026-10-05 23:56:04] [INFO] [httpx2:MainThread] HTTP Request: GET http://testserver/api/db/export/csv?limit=5 "HTTP/1.1 500 Internal Server Error"
+------------------------------ Captured log call ------------------------------
+DEBUG    asyncio:proactor_events.py:633 Using proactor: IocpProactor
+ERROR    ema_vwap:app.py:646 [API] db/export/csv error: 'CandleDatabase' object has no attribute 'export_candles_csv'
+INFO     httpx2:_client.py:1090 HTTP Request: GET http://testserver/api/db/export/csv?limit=5 "HTTP/1.1 500 Internal Server Error"
+C:\crypto\ema_vwap\tests\test_ui_traceability.py:53: assert 500 == 200
+E   assert 500 == 200
+     +  where 500 = <Response [500 Internal Server Error]>.status_code
+---------------------------- Captured stderr call -----------------------------
+[2026-10-05 23:56:04] [ERROR] [ema_vwap:AnyIO worker thread] [API] db/export/json error: 'CandleDatabase' object has no attribute 'export_candles_json'
+[2026-10-05 23:56:04] [INFO] [httpx2:MainThread] HTTP Request: GET http://testserver/api/db/export/json?limit=5 "HTTP/1.1 500 Internal Server Error"
+------------------------------ Captured log call ------------------------------
+DEBUG    asyncio:proactor_events.py:633 Using proactor: IocpProactor
+ERROR    ema_vwap:app.py:672 [API] db/export/json error: 'CandleDatabase' object has no attribute 'export_candles_json'
+INFO     httpx2:_client.py:1090 HTTP Request: GET http://testserver/api/db/export/json?limit=5 "HTTP/1.1 500 Internal Server Error"
+C:\crypto\ema_vwap\tests\test_ui_traceability.py:73: assert 500 == 200
+============================== warnings summary ===============================
+tests/test_app.py: 4 warnings
+tests/test_optimizer.py: 14 warnings
+tests/test_optuna_api_lifecycle_8ig4.py: 6 warnings
+tests/test_optuna_benchmark_certification_8ig6.py: 4 warnings
+tests/test_optuna_worker_parity_8ig2.py: 2 warnings
+tests/test_parameter_flow.py: 1 warning
+tests/test_validator.py: 1 warning
+tests/test_wfo.py: 23 warnings
+  C:\Users\Josh\AppData\Local\hermes\hermes-agent\venv\Lib\site-packages\optuna\importance\_ped_anova\evaluator.py:289: UserWarning: The number of trials is too small to compute importances. Parameter importances will be equal.
+    optuna_warn(
+
+tests/test_optuna_batch_process_8ig5.py::test_batch_optimizer_multiprocess_execution_parity
+tests/test_optuna_batch_process_8ig5.py::test_batch_optimizer_multiprocess_execution_parity
+tests/test_optuna_batch_process_8ig5.py::test_batch_optimizer_progress_tracking
+  C:\Users\Josh\AppData\Local\hermes\hermes-agent\venv\Lib\site-packages\optuna\importance\_ped_anova\evaluator.py:298: UserWarning: Target and region quantiles select the same set of trials. Parameter importances will be equal.
+    optuna_warn(
+
+tests/test_paper_polling_optimization_l7v12.py::TestLockContentionAvoidance::test_concurrent_evaluations_for_different_symbols
+  C:\Users\Josh\AppData\Local\hermes\hermes-agent\venv\Lib\site-packages\_pytest\threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-45 (evaluate_symbol)
+  
+  Traceback (most recent call last):
+    File "C:\Users\Josh\AppData\Local\hermes\hermes-agent\.hermes-runtime\python\cpython-3.11-windows-x86_64-none\Lib\threading.py", line 1045, in _bootstrap_inner
+      self.run()
+    File "C:\Users\Josh\AppData\Local\hermes\hermes-agent\.hermes-runtime\python\cpython-3.11-windows-x86_64-none\Lib\threading.py", line 982, in run
+      self._target(*self._args, **self._kwargs)
+    File "C:\crypto\ema_vwap\src\paper\engine.py", line 217, in evaluate_symbol
+      pos = self.ledger.get_position(exchange, symbol, account_id=self.account_id)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+tests/test_paper_polling_optimization_l7v12.py::TestLockContentionAvoidance::test_concurrent_evaluations_for_different_symbols
+  C:\Users\Josh\AppData\Local\hermes\hermes-agent\venv\Lib\site-packages\_pytest\threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-46 (evaluate_symbol)
+  
+  Traceback (most recent call last):
+    File "C:\Users\Josh\AppData\Local\hermes\hermes-agent\.hermes-runtime\python\cpython-3.11-windows-x86_64-none\Lib\threading.py", line 1045, in _bootstrap_inner
+      self.run()
+    File "C:\Users\Josh\AppData\Local\hermes\hermes-agent\.hermes-runtime\python\cpython-3.11-windows-x86_64-none\Lib\threading.py", line 982, in run
+      self._target(*self._args, **self._kwargs)
+    File "C:\crypto\ema_vwap\src\paper\engine.py", line 217, in evaluate_symbol
+      pos = self.ledger.get_position(exchange, symbol, account_id=self.account_id)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  TypeError: PaperLedger.get_position() got an unexpected keyword argument 'account_id'
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_alerting.py::test_send_alert_returns_entry_with_timestamp
+FAILED tests/test_alerting.py::test_send_alert_rate_limits_per_channel - Attr...
+FAILED tests/test_app.py::test_deploy_paper_profile_endpoint - assert 500 == 200
+FAILED tests/test_app.py::test_optuna_profile_deployment_requires_validation_report
+FAILED tests/test_app.py::test_paper_engine_and_ledger_endpoints - TypeError:...
+FAILED tests/test_database_maintenance.py::test_get_db_info_on_healthy_db - A...
+FAILED tests/test_database_maintenance.py::test_repair_database_healthy_reports_healthy
+FAILED tests/test_database_maintenance.py::test_repair_database_empty_path - ...
+FAILED tests/test_database_maintenance.py::test_export_candles_csv_empty - At...
+FAILED tests/test_database_maintenance.py::test_export_candles_json_empty - A...
+FAILED tests/test_database_maintenance.py::test_export_candles_csv_with_data
+FAILED tests/test_database_maintenance.py::test_export_candles_json_with_data
+FAILED tests/test_database_maintenance.py::test_vacuum_database - AttributeEr...
+FAILED tests/test_database_maintenance.py::test_get_db_info_integrity_check_on_new_db
+FAILED tests/test_database_maintenance.py::test_repair_database_quarantine_and_rebuild
+FAILED tests/test_database_traceability.py::test_init_db_creates_alerts_table_and_indexes
+FAILED tests/test_database_traceability.py::test_alert_lifecycle - AttributeE...
+FAILED tests/test_database_traceability.py::test_alerts_legacy_schema_migration
+FAILED tests/test_database_traceability.py::test_repair_database_healthy - At...
+FAILED tests/test_database_traceability.py::test_repair_database_corrupt_quarantined_and_rebuilt
+FAILED tests/test_database_traceability.py::test_app_alerts_api_integration
+FAILED tests/test_paper_1m_forensic_red.py::test_1m_strategy_must_enter_position
+FAILED tests/test_paper_1m_live_path.py::test_1m_live_paper_path_polling_signal_entry_ledger
+FAILED tests/test_paper_1m_live_path.py::test_short_and_long_modes_all_four
+FAILED tests/test_paper_engine.py::test_paper_engine_entry_and_hold - sqlite3...
+FAILED tests/test_paper_engine.py::test_paper_engine_respects_profile_risk_percentage_before_safety_cap
+FAILED tests/test_paper_engine.py::test_paper_engine_stop_loss_trigger - Type...
+FAILED tests/test_paper_engine.py::test_paper_engine_take_profit_trigger - Ty...
+FAILED tests/test_paper_engine.py::test_paper_engine_manual_market_close - Ty...
+FAILED tests/test_paper_engine.py::test_paper_engine_polling_runner_lifecycle
+FAILED tests/test_paper_engine.py::test_reconcile_positions_stop_loss_breach
+FAILED tests/test_paper_engine.py::test_reconcile_positions_take_profit_breach
+FAILED tests/test_paper_engine.py::test_reconcile_positions_updates_mtm_no_exit
+FAILED tests/test_paper_engine.py::test_paper_engine_update_sl_tp - TypeError...
+FAILED tests/test_paper_epic_l7v_bugs.py::TestEquityUnification::test_long_equity_consistent
+FAILED tests/test_paper_epic_l7v_bugs.py::TestEquityUnification::test_short_equity_uses_cost_basis_not_quantity_times_price
+FAILED tests/test_paper_epic_l7v_bugs.py::TestEquityUnification::test_equity_scoped_to_account
+FAILED tests/test_paper_epic_l7v_bugs.py::TestEquityUnification::test_short_upnl_pct_uses_cost_basis_denominator
+FAILED tests/test_paper_epic_l7v_bugs.py::TestEquityUnification::test_manual_close_includes_entry_fee
+FAILED tests/test_paper_epic_l7v_bugs.py::TestIdempotentExecution::test_duplicate_bar_returns_hold_with_note
+FAILED tests/test_paper_epic_l7v_bugs.py::TestIdempotentExecution::test_new_bar_updates_last_bar_time
+FAILED tests/test_paper_epic_l7v_bugs.py::TestReconciliationCheckpoint::test_reconcile_skips_already_processed_bars
+FAILED tests/test_paper_epic_l7v_bugs.py::TestReconciliationCheckpoint::test_reconcile_processes_bars_after_checkpoint
+FAILED tests/test_paper_epic_l7v_bugs.py::TestCausalFills::test_gap_down_stop_fills_at_open_not_stop
+FAILED tests/test_paper_epic_l7v_bugs.py::TestCausalFills::test_gap_up_short_stop_fills_at_open_not_stop
+FAILED tests/test_paper_epic_l7v_bugs.py::TestAccountScopedPositions::test_two_accounts_same_symbol_isolated
+FAILED tests/test_paper_epic_l7v_bugs.py::TestAccountScopedPositions::test_list_positions_scoped
+FAILED tests/test_paper_epic_l7v_bugs.py::TestAccountScopedPositions::test_close_position_scoped
+FAILED tests/test_paper_epic_l7v_bugs.py::TestAccountScopedPositions::test_equity_does_not_cross_accounts
+FAILED tests/test_paper_epic_l7v_bugs.py::TestPricePrecisionAndHoldingPeriod::test_micro_price_not_rounded_to_zero
+FAILED tests/test_paper_epic_l7v_bugs.py::TestPricePrecisionAndHoldingPeriod::test_holding_period_bars_derived_from_elapsed
+FAILED tests/test_paper_epic_l7v_bugs.py::TestLedgerCashValidation::test_deposit_rejects_zero
+FAILED tests/test_paper_epic_l7v_bugs.py::TestLedgerCashValidation::test_deposit_rejects_negative
+FAILED tests/test_paper_epic_l7v_bugs.py::TestLedgerCashValidation::test_deposit_rejects_nan
+FAILED tests/test_paper_epic_l7v_bugs.py::TestLedgerCashValidation::test_deposit_rejects_inf
+FAILED tests/test_paper_epic_l7v_bugs.py::TestLedgerCashValidation::test_withdraw_rejects_zero
+FAILED tests/test_paper_epic_l7v_bugs.py::TestLedgerCashValidation::test_withdraw_rejects_negative
+FAILED tests/test_paper_epic_l7v_bugs.py::TestLedgerCashValidation::test_withdraw_rejects_nan
+FAILED tests/test_paper_epic_l7v_bugs.py::TestLedgerCashValidation::test_failed_validation_leaves_balance_unchanged
+FAILED tests/test_paper_epic_l7v_bugs.py::TestShortLedgerTransactionType::test_record_sell_short_type
+FAILED tests/test_paper_epic_l7v_bugs.py::TestShortLedgerTransactionType::test_short_ledger_history_reconstructs_qty
+FAILED tests/test_paper_epic_l7v_bugs.py::TestShortLedgerTransactionType::test_short_balance_after_reflects_collateral
+FAILED tests/test_paper_epic_l7v_bugs.py::TestShortLedgerTransactionType::test_engine_short_entry_uses_sell_short
+FAILED tests/test_paper_ledger.py::test_paper_profile_registry_crud - sqlite3...
+FAILED tests/test_paper_polling_optimization_l7v12.py::TestSnapshotReuse::test_snapshot_reuse_for_shared_exchange_symbol_timeframe
+FAILED tests/test_paper_polling_optimization_l7v12.py::TestLockContentionAvoidance::test_no_global_lock_during_remote_data_fetch
+FAILED tests/test_paper_polling_optimization_l7v12.py::TestPollCycleConcurrencyAndRetention::test_prevent_overlapping_poll_cycles
+FAILED tests/test_paper_polling_optimization_l7v12.py::TestBenchmarkSmokeCoverage::test_benchmark_smoke_latency_and_metrics_by_profile_count
+FAILED tests/test_paper_short_and_equity.py::test_paper_engine_total_equity_with_open_position
+FAILED tests/test_paper_short_and_equity.py::test_paper_profile_update_trade_direction
+FAILED tests/test_parameter_flow.py::test_paper_engine_reconciliation_safely_parses_params
+FAILED tests/test_parameter_flow.py::test_full_pipeline_optuna_to_paper_trading
+FAILED tests/test_portfolio_aggregator.py::test_portfolio_aggregator_snapshot_fallback
+FAILED tests/test_portfolio_aggregator.py::test_portfolio_endpoints_with_test_client
+FAILED tests/test_portfolio_aggregator.py::test_portfolio_aggregator_historical_nav_method
+FAILED tests/test_portfolio_rebalancer.py::test_rebalance_plan_generation - T...
+FAILED tests/test_portfolio_rebalancer.py::test_rebalance_plan_execution - Ty...
+FAILED tests/test_portfolio_rebalancer.py::test_rebalance_and_routing_endpoints
+FAILED tests/test_portfolio_rebalancer.py::test_export_batch_to_portfolio - F...
+FAILED tests/test_portfolio_rebalancer.py::test_export_batch_to_portfolio_validation
+FAILED tests/test_portfolio_rebalancer.py::test_paper_trading_balance_connector
+FAILED tests/test_portfolio_rebalancer.py::test_paper_trading_engine_get_balance_snapshot
+FAILED tests/test_portfolio_risk.py::test_correlation_penalized_position_sizing
+FAILED tests/test_portfolio_risk.py::test_portfolio_risk_endpoints - assert 5...
+FAILED tests/test_portfolio_risk_budget.py::test_export_batch_to_portfolio_risk_budget
+FAILED tests/test_security_audit.py::test_unauthenticated_research_and_paper_endpoints_allowed
+FAILED tests/test_security_audit.py::test_database_pragma_journal_mode_allowlist
+FAILED tests/test_security_audit.py::test_database_maintenance_no_exception_leak
+FAILED tests/test_ui_traceability.py::test_db_export_csv_supports_get_and_post
+FAILED tests/test_ui_traceability.py::test_db_export_json_supports_get_and_post
+90 failed, 373 passed, 60 warnings in 22.39s

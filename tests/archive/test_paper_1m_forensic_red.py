@@ -66,7 +66,7 @@ def test_1m_strategy_must_enter_position(test_db_1m):
     assert result.get("action") is not None, f"No action returned: {result}"
     assert "ENTER" in str(result.get("action")), (
         f"Expected entry action (ENTER_LONG/ENTER_SHORT), got: {result.get('action')}. "
-        f"Result details: {result}. Check: profile active={engine.registry.get_profile('synthetic','BTC/USDT','1m','crossover') is not None}, signal conditions, and entry trigger logic."
+        f"Result details: {result}. Check: profile active={engine.registry.get_profile('synthetic', 'BTC/USDT', '1m', 'crossover') is not None}, signal conditions, and entry trigger logic."
     )
 
     # If position entered, verify it exists in the ledger

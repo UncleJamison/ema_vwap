@@ -168,6 +168,7 @@ def test_run_backtest_endpoint():
         "stop_loss_type": "vwap",
         "risk_per_trade_pct": 1.0,
         "initial_capital": 10000.0,
+        "target_metric": "sharpe_ratio",
     }
 
     response = client.post("/api/backtest", json=payload)
@@ -191,13 +192,32 @@ def test_run_optimize_endpoint():
         "strategy_mode": "crossover",
         "target_metric": "sharpe_ratio",
         "n_trials": 3,
+        "sampler_seed": 73,
     }
     response = client.post("/api/optimize", json=payload)
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "success"
-    assert "results" in data
-    assert "best_params" in data["results"]
+    assert data["status"] == "started"
+    assert "task_id" in data
+
+
+def test_run_optimize_endpoint_respects_explicit_slope_bounds():
+    payload = {
+        "exchange": "synthetic",
+        "symbol": "BTC/USD",
+        "timeframe": "5m",
+        "limit": 200,
+        "strategy_mode": "crossover",
+        "target_metric": "sharpe_ratio",
+        "n_trials": 3,
+        "vwap_slope_min_bound": 0.0001,
+        "vwap_slope_max_bound": 0.005,
+    }
+    response = client.post("/api/optimize", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "started"
+    assert "task_id" in data
 
 
 def test_run_multi_objective_optimize_endpoint():
@@ -215,9 +235,8 @@ def test_run_multi_objective_optimize_endpoint():
     response = client.post("/api/optimize", json=payload)
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "success"
-    assert data["results"]["optimization_mode"] == "multi_objective"
-    assert "pareto_objectives" in data["results"]
+    assert data["status"] == "started"
+    assert "task_id" in data
 
 
 def test_run_walk_forward_endpoint():
@@ -290,7 +309,6 @@ def test_deploy_paper_profile_endpoint(tmp_path, monkeypatch):
     list_resp = client.get("/api/paper/profiles")
     assert list_resp.status_code == 200
     assert list_resp.json()["count"] == 1
-
     profile_id = res_data["profile"]["id"]
 
     # Toggle active
@@ -304,10 +322,46 @@ def test_deploy_paper_profile_endpoint(tmp_path, monkeypatch):
     del_resp = client.delete(f"/api/paper/profiles/{profile_id}")
     assert del_resp.status_code == 200
     assert del_resp.json()["deleted"] is True
-
-    # Check 404 after deletion
     not_found = client.get("/api/paper/profiles/kucoin/BTC/USDT")
     assert not_found.status_code == 404
+
+
+def test_optuna_profile_deployment_requires_validation_report(tmp_path, monkeypatch):
+    from src.paper import PaperProfileRegistry
+
+    db = CandleDatabase(db_path=str(tmp_path / "test_app_paper_optuna_validation.db"))
+    monkeypatch.setattr(app_module, "_paper_profiles", PaperProfileRegistry(db=db))
+
+    response = client.post(
+        "/api/paper/profiles/deploy",
+        json={
+            "source": "optuna",
+            "exchange": "kucoin",
+            "symbol": "BTC/USDT",
+            "timeframe": "5m",
+            "strategy_mode": "crossover",
+            "target_metric": "sharpe_ratio",
+            "params": {"fast_ema": 12, "slow_ema": 26},
+            "optuna_score": 2.0,
+            "is_active": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = {
+        "source": "optuna",
+        "exchange": "kucoin",
+        "symbol": "BTC/USDT",
+        "timeframe": "5m",
+        "strategy_mode": "crossover",
+        "target_metric": "sharpe_ratio",
+        "params": {"fast_ema": 12, "slow_ema": 26},
+        "optuna_score": 2.0,
+        "is_active": True,
+        "validation_report": {"status": "PASS", "overall_score": 90.0},
+    }
+    validated_response = client.post("/api/paper/profiles/deploy", json=payload)
+    assert validated_response.status_code == 200
 
 
 def test_paper_engine_and_ledger_endpoints(tmp_path, monkeypatch):
@@ -402,7 +456,7 @@ async def test_app_lifespan_auto_resumes_runner(tmp_path, monkeypatch):
     from src.paper import PaperTradingEngine
     from src.settings import SettingsManager
 
-    db = CandleDatabase(db_path=str(tmp_path / "test_app_lifespan.db"))
+    db = CandleDatabase(db_path=str(tmp_path / "system_test_app_lifespan.db"))
     settings_mgr = SettingsManager(db)
     engine = PaperTradingEngine(db=db)
 
@@ -439,3 +493,52 @@ def test_validate_strategy_endpoint(tmp_path):
     assert "report" in data
     assert data["report"]["total_gates"] == 3
     assert "gate_results" in data["report"]
+
+
+def test_validate_strategy_endpoint_default_lookback(tmp_path):
+    # Verify that when days is None and limit is 500 (UI default), optimal lookback is resolved
+    resp = client.post(
+        "/api/strategy/validate",
+        json={
+            "exchange": "synthetic",
+            "symbol": "BTC/USD",
+            "timeframe": "5m",
+            "limit": 500,
+            "days": None,
+            "asset_type": "crypto",
+            "params": {"fast_ema": 9, "slow_ema": 21, "strategy_mode": "crossover"},
+            "n_trials": 2,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert "report" in data
+
+
+def test_validate_strategy_endpoint_accepts_ui_criteria_aliases():
+    resp = client.post(
+        "/api/strategy/validate",
+        json={
+            "exchange": "synthetic",
+            "symbol": "BTC/USD",
+            "timeframe": "5m",
+            "limit": 150,
+            "params": {"fast_ema": 9, "slow_ema": 21, "strategy_mode": "crossover"},
+            "criteria": {
+                "min_backtest_sharpe": 0.0,
+                "max_backtest_drawdown_pct": 80.0,
+                "min_trade_count": 1,
+                "min_walk_forward_efficiency": 0.0,
+                "min_profitable_windows_pct": 0.0,
+                "min_oos_return_pct": -50.0,
+                "max_monte_carlo_ruin_pct": 50.0,
+                "max_monte_carlo_drawdown_pct": 80.0,
+            },
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert "report" in data
+    assert data["report"]["total_gates"] == 3

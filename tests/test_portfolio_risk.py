@@ -26,8 +26,46 @@ def test_correlation_matrix_computation():
 
 def test_portfolio_var_and_risk_decomposition():
     """Verify Parametric VaR, Historical VaR, CVaR, and component decomposition."""
-    aggregator = PortfolioAggregator()
-    snapshot = aggregator.get_unified_snapshot()
+    from src.portfolio.connectors import SyntheticBalanceConnector
+
+    snapshot = SyntheticBalanceConnector().fetch_balances()
+    snapshot = UnifiedPortfolioSnapshot(
+        timestamp="2026-08-31",
+        total_nav_usd=100000.0,
+        total_cash_usd=50000.0,
+        total_stablecoin_usd=0.0,
+        total_crypto_usd=50000.0,
+        total_stock_usd=0.0,
+        total_buying_power_usd=50000.0,
+        total_unrealized_pnl_usd=0.0,
+        crypto_weight_pct=50.0,
+        stock_weight_pct=0.0,
+        cash_weight_pct=50.0,
+        positions=[
+            AssetPosition(
+                symbol="BTC/USD",
+                venue="synthetic",
+                asset_type="crypto",
+                side=1,
+                quantity=1.0,
+                entry_price=60000.0,
+                current_price=60000.0,
+                market_value_usd=60000.0,
+                unrealized_pnl_usd=0.0,
+            ),
+            AssetPosition(
+                symbol="ETH/USD",
+                venue="synthetic",
+                asset_type="crypto",
+                side=1,
+                quantity=2.0,
+                entry_price=3000.0,
+                current_price=3000.0,
+                market_value_usd=6000.0,
+                unrealized_pnl_usd=0.0,
+            ),
+        ],
+    )
 
     risk_report = PortfolioRiskEngine.compute_portfolio_var(
         snapshot=snapshot, confidence_level=0.95, horizon_days=1

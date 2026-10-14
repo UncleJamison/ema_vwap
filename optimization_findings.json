@@ -1,0 +1,299 @@
+{
+  "findings": [
+    {
+      "category": "CACHING",
+      "title": "Missing memoization on compute_slope_bounds_from_df - recalculates for same symbol/timeframe",
+      "file": "src/indicators.py",
+      "line": 78,
+      "description": "compute_slope_bounds_from_df is called during every batch optimization run for the same symbol/timeframe but results are not cached. The function performs percentile calculations on VWAP slopes which is computationally expensive. Since batch_optimizer.py calls this for each combo, identical symbols/timeframes across runs will recalculate.",
+      "current_code": "def compute_slope_bounds_from_df(\n    df: pd.DataFrame,\n    timeframe: str = \"5m\",\n    lookback: int = 5,\n    min_samples: int = 100,\n) -> dict[str, float]:\n    from src.config import get_vwap_slope_bounds\n    static_bounds = get_vwap_slope_bounds(timeframe)\n    ...",
+      "suggested_fix": "Add functools.lru_cache decorator with a hashable key (timeframe + hash of slope values) or use a module-level cache dict keyed by (exchange, symbol, timeframe). Since df varies, cache the static fallback bounds per timeframe and the live-calibrated bounds per symbol+timeframe combination.",
+      "estimated_impact": "Eliminates redundant VWAP slope percentile calculations across batch runs; ~10-50ms saved per combo",
+      "effort": "low"
+    },
+    {
+      "category": "CACHING",
+      "title": "DataLoader.load_candles recursively calls itself for donor timeframe without caching the donor result",
+      "file": "src/data_loader.py",
+      "line": 348,
+      "description": "When a timeframe requires donor resampling (e.g., 3m from 1m), load_candles recursively calls itself for the donor TF. This donor fetch result is not cached at the call site, causing redundant fetches if multiple higher timeframes need the same donor.",
+      "current_code": "if donor_tf is not None and exchange_lower not in (\"synthetic\",):\n    cls.load_candles(\n        exchange=exchange,\n        symbol=symbol,\n        timeframe=donor_tf,\n        ...\n    )\n    donor_df = db.load_candles(...)",
+      "suggested_fix": "Add a local LRU cache on load_candles for (exchange, symbol, timeframe, limit, days) or use functools.lru_cache on a private _load_candles_raw method. Return cached donor DataFrame to avoid re-fetching.",
+      "estimated_impact": "Avoids redundant API calls and DB reads when multiple timeframes share a donor (e.g., 3m, 15m, 30m all from 1m); ~100-500ms per donor fetch saved",
+      "effort": "low"
+    },
+    {
+      "category": "CACHING",
+      "title": "EmaVwapStrategy.generate_signals recomputes shared indicators for every Optuna trial",
+      "file": "src/strategy.py",
+      "line": 1,
+      "description": "Strategy generates signals by computing EMA/VWAP/ATR fresh for every trial. The shared indicators (VWAP, VWAP slope, ATR, volume SMA) only depend on base params (fast_ema, slow_ema, trend_ema, atr_period, etc.) and not on the trial-specific params. These are recomputed identically across all trials in a study.",
+      "current_code": "def generate_signals(self, df, precomputed_indicators=None):\n    if precomputed_indicators is None:\n        df = compute_all_indicators(df, self.params)\n    ...",
+      "suggested_fix": "Add precomputed_indicators support to OptunaOptimizer.optimize - compute shared indicators once per study using compute_shared_indicators, pass to each trial's objective function. OptunaOptimizer already accepts precomputed_indicators in BacktestEngine but doesn't use it.",
+      "estimated_impact": "Reduces per-trial indicator computation by ~60-80%; with 100 trials, saves ~500ms-2s per optimization run",
+      "effort": "medium"
+    },
+    {
+      "category": "PERFORMANCE",
+      "title": "BacktestEngine.run uses Python loop over bars instead of vectorized operations",
+      "file": "src/backtester.py",
+      "line": 234,
+      "description": "The main backtest loop iterates bar-by-bar in pure Python (for i in range(n_bars)). With 1000-5000 bars and 100+ trials, this is the hottest path. NumPy arrays are pre-extracted but the loop body has complex branching, dict lookups, and method calls.",
+      "current_code": "for i in range(n_bars):\n    timestamp_str = timestamps[i]\n    open_p = opens[i]\n    ...\n    if active_trade is not None:\n        ...  # complex exit logic\n    if active_trade is None and allow_entry and signal in (1, -1):\n        ...  # complex entry logic",
+      "suggested_fix": "Vectorize the backtest using NumPy/pandas operations where possible: pre-compute entry/exit signals as boolean masks, use cumulative operations for equity curve. For stop/trailing logic which is path-dependent, consider Numba JIT (@numba.jit) on the inner loop or rewrite in Cython. At minimum, move fee/position sizing calculations out of the loop.",
+      "estimated_impact": "10-50x speedup on backtest execution; critical for Optuna (100 trials x 1000 bars = 100k iterations)",
+      "effort": "high"
+    },
+    {
+      "category": "PERFORMANCE",
+      "title": "PaperTradingEngine.evaluate_symbol creates new RiskManager and EmaVwapStrategy instances per call",
+      "file": "src/paper/engine.py",
+      "line": 194,
+      "description": "Each evaluate_symbol call creates new RiskManager(params) and EmaVwapStrategy(params) objects. In step_all_active_profiles, this happens for every active profile every poll cycle (default 15s). These objects are stateless and only depend on params which are cached in the registry.",
+      "current_code": "strategy = EmaVwapStrategy(params)\ndf_signals = strategy.generate_signals(df_candles)\n...\nrm = RiskManager(params)\nstop_loss, take_profit = rm.calculate_stop_and_target(...)\nunits, pos_val, _ = rm.calculate_position_size(...)",
+      "suggested_fix": "Cache strategy and risk manager instances keyed by params hash (or profile ID) in PaperTradingEngine. Reuse when params haven't changed. Add a _strategy_cache and _risk_manager_cache dict.",
+      "estimated_impact": "Eliminates object allocation and indicator recomputation per poll cycle; ~5-10ms saved per profile per poll",
+      "effort": "low"
+    },
+    {
+      "category": "PERFORMANCE",
+      "title": "BatchOptimizer._run_single_optuna reloads candles for each combo instead of reusing loaded data",
+      "file": "src/batch_optimizer.py",
+      "line": 293,
+      "description": "For each symbol/timeframe combo, DataLoader.load_candles is called which may hit the network or DB. When running all combos sequentially, candles for the same symbol at different timeframes could share base data (e.g., 1m donor for 3m/5m/15m). The resample_and_upsert does cache derived TFs but the initial fetch is repeated.",
+      "current_code": "df = DataLoader.load_candles(\n    exchange=cfg.exchange,\n    symbol=symbol,\n    timeframe=timeframe,\n    days=days,\n)",
+      "suggested_fix": "Pre-fetch base timeframe candles (e.g., 1m) once per symbol before the combo loop, then resample in-memory for all target timeframes. Or add a batch_load_candles method that fetches all needed TFs for a symbol in one pass.",
+      "estimated_impact": "Reduces API calls and DB round-trips by 50-80% for multi-timeframe sweeps; ~1-5s saved per symbol",
+      "effort": "medium"
+    },
+    {
+      "category": "DB_OPTIMIZATION",
+      "title": "CandleDatabase.get_connection creates new SQLite connection per call; no connection pooling",
+      "file": "src/database.py",
+      "line": 446,
+      "description": "Every database operation calls get_connection() which opens a new sqlite3 connection with PRAGMA settings. Under high concurrency (paper trading polling + API requests + batch optimization), this creates connection churn. SQLite connections are relatively cheap but not free; WAL mode helps but each connection still has overhead.",
+      "current_code": "def get_connection(self) -> sqlite3.Connection:\n    conn = sqlite3.connect(self.db_path, timeout=30.0)\n    conn.execute(\"PRAGMA synchronous = NORMAL;\")\n    conn.execute(\"PRAGMA cache_size = -64000;\")\n    conn.execute(\"PRAGMA temp_store = MEMORY;\")\n    return conn",
+      "suggested_fix": "Implement a simple connection pool using queue.Queue with a fixed number of pre-configured connections (e.g., 5-10). Or use apsw (Another Python SQLite Wrapper) which supports connection pooling natively. For SQLite, a thread-local connection cache (one per thread) is often sufficient.",
+      "estimated_impact": "Reduces connection overhead under concurrent load; ~1-5ms per DB operation saved, significant at scale",
+      "effort": "medium"
+    },
+    {
+      "category": "DB_OPTIMIZATION",
+      "title": "Missing compound indexes for common query patterns in batch_results and paper tables",
+      "file": "src/database.py",
+      "line": 524,
+      "description": "Indexes exist on individual columns but common query patterns use multiple columns. E.g., batch_results queries filter by (target_metric, exchange, symbol, timeframe) but only idx_batch_results_metric on (target_metric, best_value) exists. paper_positions queried by (exchange, symbol, account_id) has index but paper_ledger_transactions by (account_id, timestamp) has one.",
+      "current_code": "cursor.execute(\"\"\"\nCREATE INDEX IF NOT EXISTS idx_batch_results_metric\nON batch_results (target_metric, best_value DESC)\n\"\")",
+      "suggested_fix": "Add compound indexes matching query patterns:\n- batch_results: (exchange, symbol, timeframe, target_metric, best_value DESC)\n- paper_ledger: (exchange, symbol, timeframe, timestamp)\n- paper_profiles: (exchange, symbol, is_active, strategy_mode)\n- optuna_profiles: (exchange, symbol, timeframe, target_metric, best_value DESC)",
+      "estimated_impact": "Faster leaderboard queries and profile lookups; ~10-100x faster for large tables",
+      "effort": "low"
+    },
+    {
+      "category": "DB_OPTIMIZATION",
+      "title": "CandleDatabase.save_candles uses INSERT OR REPLACE row-by-row in a loop (implied by primary key)",
+      "file": "src/database.py",
+      "line": 1,
+      "description": "save_candles (not fully shown but implied by primary key on 4 columns) likely uses executemany with INSERT OR REPLACE. For bulk inserts of 1000+ candles, this is slower than batch UPSERT with a temporary table or using the newer SQLite UPSERT syntax (ON CONFLICT DO UPDATE).",
+      "current_code": "Not fully visible but primary key is (exchange, symbol, timeframe, timestamp) suggesting row-by-row upsert",
+      "suggested_fix": "Use batch UPSERT with a CTE or temporary table: INSERT INTO temp_table ... then INSERT INTO candles SELECT * FROM temp_table ON CONFLICT(exchange, symbol, timeframe, timestamp) DO UPDATE SET ... Or use pandas to_sql with method='multi' if using SQLAlchemy.",
+      "estimated_impact": "5-10x faster bulk candle inserts; important for historical data loading",
+      "effort": "medium"
+    },
+    {
+      "category": "ASYNC_THREADING",
+      "title": "FastAPI endpoints call synchronous database and compute functions blocking the event loop",
+      "file": "src/app.py",
+      "line": 163,
+      "description": "API endpoints like generate_tear_sheet_pdf, run_backtest_endpoint, run_optimize_endpoint call synchronous functions (DataLoader.load_candles, BacktestEngine.run, OptunaOptimizer.optimize) directly in async def handlers. This blocks the event loop during CPU-intensive work, preventing concurrent request handling.",
+      "current_code": "@app.post(\"/api/tear-sheet/pdf\")\nasync def generate_tear_sheet_pdf(req: TearSheetRequest) -> Response:\n    df_candles = DataLoader.load_candles(...)\n    engine = BacktestEngine(strat_params)\n    bt_res = engine.run(df_candles)\n    ...",
+      "suggested_fix": "Use run_in_threadpool (from starlette.concurrency) or FastAPI's BackgroundTasks for CPU-bound work. For long-running optimizations, use the existing TaskManager with background threads. Mark endpoints as sync (def instead of async def) when they do blocking work, or properly offload to thread pool.",
+      "estimated_impact": "Enables true concurrent request handling; prevents event loop starvation under load",
+      "effort": "medium"
+    },
+    {
+      "category": "ASYNC_THREADING",
+      "title": "PaperTradingEngine uses threading.RLock heavily but step_all_active_profiles holds _poll_cycle_lock during entire evaluation loop",
+      "file": "src/paper/engine.py",
+      "line": 785,
+      "description": "step_all_active_profiles acquires _poll_cycle_lock (threading.Lock) at line 785 and holds it for the entire evaluation of all profiles (lines 793-879). This serializes all profile evaluations even though they operate on independent symbols. The lock is meant to prevent overlapping poll cycles, not to serialize within a cycle.",
+      "current_code": "if not self._poll_cycle_lock.acquire(blocking=False):\n    ...\ntry:\n    for p in profiles:\n        ...  # evaluate each profile\n        res = self.evaluate_symbol(...)\n    ...\nfinally:\n    self._poll_cycle_lock.release()",
+      "suggested_fix": "Release _poll_cycle_lock after snapshot collection (candle/signal snapshots) but before the per-profile evaluate_symbol calls. Use per-position locks (already in _get_position_lock) for position updates. Only hold the cycle lock for the snapshot collection phase.",
+      "estimated_impact": "Enables parallel evaluation of independent profiles within a poll cycle; ~Nx speedup where N=active profiles",
+      "effort": "low"
+    },
+    {
+      "category": "ASYNC_THREADING",
+      "title": "Optimizer.run_workers uses ProcessPoolExecutor but passes evaluator function that captures df (large DataFrame) via closure",
+      "file": "src/optimizer.py",
+      "line": 1121,
+      "description": "The multiprocess optimization pickles the evaluator closure which captures the full candle DataFrame. This DataFrame is serialized and sent to each worker process, causing significant IPC overhead (pickle/unpickle of large DataFrame x n_workers).",
+      "current_code": "def optimize(self, df, ...):\n    ...\n    def objective(trial):\n        ... uses df from closure ...\n    executor = ProcessPoolExecutor(max_workers=n_workers)\n    future = executor.submit(self._run_worker_trials, evaluator, budget, ...)",
+      "suggested_fix": "Pass DataFrame as explicit argument to evaluator (not closure), or use shared memory (multiprocessing.shared_memory) for the DataFrame, or use Optuna's built-in distributed optimization with JournalStorage (already used) which avoids pickling the objective. The current StorageCoordinator approach is better - use that pattern consistently.",
+      "estimated_impact": "Eliminates large DataFrame serialization overhead per worker; ~100-500ms saved per optimization run with multiprocess",
+      "effort": "medium"
+    },
+    {
+      "category": "CODE_QUALITY",
+      "title": "app.py is a 2855-line monolith mixing routes, business logic, and initialization",
+      "file": "src/app.py",
+      "line": 1,
+      "description": "The main FastAPI app file contains 2855 lines with all endpoints, lifecycle, and business logic. This violates separation of concerns, makes testing difficult, and creates merge conflicts. Endpoints for tear-sheet, batch optimization, paper trading, portfolio, WebSocket are all in one file.",
+      "current_code": "Single file with 50+ endpoint definitions, lifespan manager, global instances, helper functions",
+      "suggested_fix": "Split into route modules: api/tear_sheet.py, api/batch.py, api/paper.py, api/portfolio.py, api/backtest.py, api/optimize.py, api/ws.py. Use FastAPI's APIRouter with include_router. Keep app.py minimal: create app, include routers, lifespan.",
+      "estimated_impact": "Improves maintainability, testability, and team collaboration; reduces cognitive load",
+      "effort": "high"
+    },
+    {
+      "category": "CODE_QUALITY",
+      "title": "Database migration logic embedded in init_db makes schema changes brittle and hard to test",
+      "file": "src/database.py",
+      "line": 470,
+      "description": "init_db contains 15+ migration blocks (ALTER TABLE, RENAME, rebuild) that run on every startup. This mixes schema initialization with data migration, makes testing migrations difficult, and risks data loss if a migration fails mid-way. No version tracking or rollback mechanism.",
+      "current_code": "if \"deployed\" not in pp_cols:\n    cursor.execute(\"ALTER TABLE paper_profiles ADD COLUMN deployed...\")\n...  # 15+ similar blocks",
+      "suggested_fix": "Use a proper migration tool (alembic is already in requirements) with versioned migration scripts. Create a migrations/ directory with upgrade/downgrade scripts. Run migrations separately from init_db (e.g., on startup or via CLI).",
+      "estimated_impact": "Safer schema evolution, testable migrations, audit trail of schema changes",
+      "effort": "high"
+    },
+    {
+      "category": "CODE_QUALITY",
+      "title": "Duplicate candle loading logic in DataLoader.load_candles, fetch_kucoin_historical, fetch_gemini_historical",
+      "file": "src/data_loader.py",
+      "line": 92,
+      "description": "Three methods (load_candles, fetch_kucoin_historical, fetch_gemini_historical) have nearly identical logic for: fetch from provider -> check empty -> fallback to synthetic -> save to DB -> resample_and_upsert -> return. This duplication makes changes error-prone.",
+      "current_code": "fetch_kucoin_historical: provider.fetch -> if empty -> synthetic -> db.save -> resample_upsert -> return\nfetch_gemini_historical: same pattern\nload_candles: same pattern with donor logic",
+      "suggested_fix": "Extract common logic into a private _fetch_and_cache method: _fetch_and_cache(provider, exchange, symbol, timeframe, days, donor_tf=None). Each provider method calls this with its specific provider and parameters.",
+      "estimated_impact": "Reduces code duplication by ~100 lines; single source of truth for fetch/cache/resample logic",
+      "effort": "low"
+    },
+    {
+      "category": "DEAD_CODE",
+      "title": "Unused imports and dead code paths in multiple files",
+      "file": "src/app.py",
+      "line": 1,
+      "description": "app.py imports ClassVar from typing but only uses it once. Many imports may be unused. database.py imports functools but only uses wraps. optimizer.py imports math, warnings but some may be unused. Need systematic cleanup.",
+      "current_code": "from typing import Any, ClassVar, Literal  # ClassVar used once\nimport functools  # only for @functools.wraps",
+      "suggested_fix": "Run ruff with --select=F401 (unused imports) and F841 (unused variables). Remove dead code. Use pyflakes or vulture for broader dead code detection.",
+      "estimated_impact": "Cleaner codebase, faster imports, reduced cognitive load",
+      "effort": "low"
+    },
+    {
+      "category": "DUPLICATION",
+      "title": "PaperTradingEngine.evaluate_symbol and step_all_active_profiles duplicate signal generation logic",
+      "file": "src/paper/engine.py",
+      "line": 139,
+      "description": "evaluate_symbol generates signals via EmaVwapStrategy. step_all_active_profiles builds signal_snapshots dict to reuse signals across profiles with same params, but evaluate_symbol doesn't use this cache when called directly (e.g., from API). The signal generation is duplicated.",
+      "current_code": "evaluate_symbol: strategy = EmaVwapStrategy(params); df_signals = strategy.generate_signals(df_candles)\nstep_all_active_profiles: builds signal_snapshots dict keyed by (exchange, symbol, timeframe, params_json)",
+      "suggested_fix": "Make evaluate_symbol accept optional precomputed signals (like it does with force_signals) and use the same caching strategy. Or move signal generation to a shared method that both paths use with caching.",
+      "estimated_impact": "Eliminates redundant indicator computation when evaluating same symbol/timeframe/params multiple times",
+      "effort": "low"
+    },
+    {
+      "category": "DUPLICATION",
+      "title": "Tear sheet endpoints (PDF, HTML, JSON) duplicate validation/backtest/Monte Carlo logic",
+      "file": "src/app.py",
+      "line": 163,
+      "description": "generate_tear_sheet_pdf, generate_tear_sheet_html, generate_tear_sheet_json all have nearly identical code: load candles -> run validation if needed -> run backtest -> run Monte Carlo -> build trade distribution -> render. Only the final render step differs.",
+      "current_code": "Three separate async functions each ~100 lines with 90% identical logic",
+      "suggested_fix": "Extract common logic into a private _generate_tear_sheet_data method that returns the computed data (validation_report, bt_res, mc_report, trade_distribution, equity_curves, mc_percentiles). Each endpoint calls this then renders to its format.",
+      "estimated_impact": "Eliminates ~200 lines of duplicate code; single source of truth for tear sheet data generation",
+      "effort": "low"
+    },
+    {
+      "category": "PERFORMANCE",
+      "title": "DataLoader.resample_and_upsert converts timestamp column to datetime and sets index for EACH target timeframe",
+      "file": "src/data_loader.py",
+      "line": 292,
+      "description": "Inside the loop over target timeframes, the code copies the DataFrame, converts timestamp to datetime, sets index, resamples, then resets index. This conversion happens repeatedly for each target TF instead of once.",
+      "current_code": "for tf in tfs_to_build:\n    df_temp = df.copy()\n    df_temp[\"timestamp\"] = pd.to_datetime(...)\n    df_temp = df_temp.set_index(\"timestamp\")\n    resampled = df_temp.resample(...)\n    ...",
+      "suggested_fix": "Convert timestamp to datetime index ONCE before the loop. Then resample the indexed DataFrame for each target TF. Avoid repeated copy/convert/set_index.",
+      "estimated_impact": "Reduces resampling overhead by ~50-70% when generating multiple higher timeframes from one base",
+      "effort": "low"
+    },
+    {
+      "category": "CACHING",
+      "title": "PaperProfileRegistry.get_strategy_params fetches from DB on every call; no in-memory cache",
+      "file": "src/paper/profiles.py",
+      "line": 1,
+      "description": "get_strategy_params is called in every evaluate_symbol and step_all_active_profiles poll cycle. It queries the paper_profiles table each time. Profiles change infrequently (only on deploy/update). An in-memory cache with TTL or invalidation on update would eliminate repeated DB reads.",
+      "current_code": "def get_strategy_params(self, exchange, symbol, timeframe):\n    # queries paper_profiles table each call",
+      "suggested_fix": "Add a simple LRU cache (functools.lru_cache) on get_strategy_params keyed by (exchange, symbol, timeframe). Invalidate cache in save_paper_profile/set_active. Or use a dict with timestamps and TTL.",
+      "estimated_impact": "Eliminates DB query per profile per poll cycle; ~1-5ms saved per call",
+      "effort": "low"
+    },
+    {
+      "category": "CACHING",
+      "title": "StrategyValidator.validate creates new OptunaOptimizer for each validation run; could reuse study",
+      "file": "src/validator.py",
+      "line": 1,
+      "description": "StrategyValidator.validate runs a full Optuna optimization (n_trials=30 by default) every time it's called. The same strategy params on the same data will produce similar results. No caching of validation reports for identical (df_hash, params_hash).",
+      "current_code": "def validate(self, df_candles, params, n_trials=30, ...):\n    optimizer = OptunaOptimizer(base_params=params, config=...)\n    result = optimizer.optimize(df_candles, ...)",
+      "suggested_fix": "Add a cache keyed by (df_hash, params_hash, n_trials, target_metric). Compute hash of candle data (e.g., last N rows + shape) and params. Return cached validation report if available. Use disk cache (sqlite or file) for persistence across restarts.",
+      "estimated_impact": "Avoids re-running validation for same strategy; saves 30 Optuna trials (~5-30s) per duplicate validation",
+      "effort": "medium"
+    },
+    {
+      "category": "DB_OPTIMIZATION",
+      "title": "CandleDatabase.load_candles lacks LIMIT pushdown for large result sets; fetches all then slices",
+      "file": "src/database.py",
+      "line": 1,
+      "description": "load_candles (implementation not fully visible but typical pattern) likely does SELECT * FROM candles WHERE ... ORDER BY timestamp LIMIT ?. With proper index this is OK, but for very large tables (millions of rows), the ORDER BY + LIMIT can be slow without a covering index.",
+      "current_code": "Not fully visible but typical pattern implies ORDER BY timestamp LIMIT ?",
+      "suggested_fix": "Ensure covering index: CREATE INDEX IF NOT EXISTS idx_candles_cover ON candles (exchange, symbol, timeframe, timestamp DESC) INCLUDE (open, high, low, close, volume) - SQLite doesn't support INCLUDE but the PK (exchange, symbol, timeframe, timestamp) should be used with timestamp DESC. Verify query plan with EXPLAIN QUERY PLAN.",
+      "estimated_impact": "Faster candle loading for large datasets; ensures index-only scans",
+      "effort": "low"
+    },
+    {
+      "category": "ASYNC_THREADING",
+      "title": "WebSocket manager broadcasts to all connections synchronously in a loop",
+      "file": "src/ws_server.py",
+      "line": 48,
+      "description": "ws_manager.broadcast iterates over all connected websockets and sends sequentially with await. If one connection is slow/blocked, it delays broadcasts to all other connections. No timeout or concurrent send.",
+      "current_code": "async def broadcast(self, message):\n    for ws in self.active_connections:\n        await ws.send_json(message)",
+      "suggested_fix": "Use asyncio.gather with return_exceptions=True to send concurrently. Add per-connection timeout. Remove dead connections in the same pass.",
+      "estimated_impact": "Prevents slow clients from blocking real-time updates to others; better scalability",
+      "effort": "low"
+    },
+    {
+      "category": "CODE_QUALITY",
+      "title": "RiskManager and EmaVwapStrategy instantiated repeatedly in hot paths without caching",
+      "file": "src/paper/engine.py",
+      "line": 470,
+      "description": "RiskManager(params) is created in multiple places: evaluate_symbol (lines 270, 370, 470, 497, 552, 562), close_position_market (line 716), reconcile_positions_on_startup. Each instantiation recomputes nothing but adds allocation overhead. Same for EmaVwapStrategy in evaluate_symbol.",
+      "current_code": "rm = RiskManager(params)  # called 7+ times in evaluate_symbol alone",
+      "suggested_fix": "Cache RiskManager and EmaVwapStrategy instances per params hash in PaperTradingEngine. Since params come from registry which caches them, use the same cache key.",
+      "estimated_impact": "Reduces object allocation in hot path; minor but cumulative",
+      "effort": "low"
+    },
+    {
+      "category": "PERFORMANCE",
+      "title": "compute_all_indicators recomputes EMA for each period separately instead of reusing intermediate results",
+      "file": "src/indicators.py",
+      "line": 199,
+      "description": "compute_all_indicators calls compute_ema three times for fast_ema, slow_ema, trend_ema. Each call does series.ewm(span=period).mean() which iterates the full series. For related periods (e.g., fast=12, slow=26, trend=50), there's no reuse of intermediate EMA calculations.",
+      "current_code": "df[f\"ema_{params.fast_ema}\"] = compute_ema(df[\"close\"], params.fast_ema)\ndf[f\"ema_{params.slow_ema}\"] = compute_ema(df[\"close\"], params.slow_ema)\ndf[f\"ema_{params.trend_ema}\"] = compute_ema(df[\"close\"], params.trend_ema)",
+      "suggested_fix": "If periods are related, consider computing all EMAs in a single pass using a custom implementation, or accept the current approach as pandas ewm is C-optimized. The overhead is minimal compared to the Python backtest loop. Priority: low.",
+      "estimated_impact": "Minor (~5-10% of indicator computation time)",
+      "effort": "low"
+    },
+    {
+      "category": "CACHING",
+      "title": "OptunaOptimizer.optimize recreates TPESampler and Study for each call; could reuse for warm-start",
+      "file": "src/optimizer.py",
+      "line": 132,
+      "description": "Each call to optimize() creates a new TPESampler and Study from scratch. For batch optimization running multiple combos sequentially, or for re-running optimization with same config, the sampler's learned parameter distributions are discarded. Optuna supports study persistence via storage.",
+      "current_code": "sampler = optuna.samplers.TPESampler(...)\nstudy = optuna.create_study(directions=directions, sampler=sampler)",
+      "suggested_fix": "Use Optuna's JournalStorage (already used in StorageCoordinator) to persist study across runs. Pass storage to create_study. For batch optimization, consider a single study per symbol with conditional parameter spaces, or warm-start from previous study's trials.",
+      "estimated_impact": "Faster convergence in subsequent runs; better sample efficiency",
+      "effort": "medium"
+    }
+  ],
+  "summary": {
+    "async_threading": 5,
+    "caching": 7,
+    "code_quality": 4,
+    "db_optimization": 4,
+    "dead_code": 1,
+    "duplication": 3,
+    "performance": 5
+  }
+}

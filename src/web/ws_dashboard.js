@@ -8,7 +8,22 @@ const _wsMaxReconnectAttempts = 10;
 const _wsReconnectDelay = 2000;
 
 function initWebSocketDashboard() {
-  const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/dashboard`;
+  // API key auth: append ?api_key= from multiple sources (priority order)
+  // 1) BOOTSTRAP_API_KEY injected by server at page load
+  // 2) cachedSettings (populated from backend via fetch)
+  // 3) input field (user-entered)
+  let apiKey = (typeof window.BOOTSTRAP_API_KEY !== "undefined" && window.BOOTSTRAP_API_KEY) || "";
+  if (!apiKey) {
+    apiKey = (typeof cachedSettings !== "undefined" && cachedSettings.app_api_key) || "";
+  }
+  if (!apiKey) {
+    // Fallback: read from the settings input field (user may have entered it manually)
+    const inputEl = document.getElementById("setting-app-api-key");
+    apiKey = (inputEl?.value || "").trim();
+  }
+  const apiKeyQs = apiKey ? `?api_key=${encodeURIComponent(apiKey)}` : "";
+  console.log('[WebSocket] initWebSocketDashboard, apiKey present:', !!apiKey, 'url:', `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/dashboard${apiKeyQs}`);
+  const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/dashboard${apiKeyQs}`;
 
   function connect() {
     try {

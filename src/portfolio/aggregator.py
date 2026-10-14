@@ -4,8 +4,10 @@ Consolidates real-time balances, positions, and purchasing power across crypto e
 """
 
 import datetime as dt
+import logging
 from typing import Any
 
+from src.db_connection_manager import get_database
 from src.portfolio.connectors import (
     AlpacaBalanceConnector,
     BaseVenueConnector,
@@ -27,7 +29,7 @@ class PortfolioAggregator:
     """Aggregates and normalizes multi-venue assets into a unified portfolio snapshot."""
 
     def __init__(self, settings: SettingsManager | None = None):
-        self.settings = settings or SettingsManager()
+        self.settings = settings or SettingsManager(get_database("system"))
         self.connectors: dict[str, BaseVenueConnector] = {
             "gemini": GeminiBalanceConnector(self.settings),
             "kucoin": KuCoinBalanceConnector(self.settings),
@@ -171,7 +173,9 @@ class PortfolioAggregator:
                     df = df.sort_values("timestamp_dt")
                     candles_by_pos[p.symbol] = df
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "Portfolio candle fetch skipped for symbol"
+                )
 
         history: list[dict[str, Any]] = []
 

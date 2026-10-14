@@ -1,0 +1,54 @@
+# Walkthrough — Persistent Live Trading Engine with Auto-Resume, Downtime Gap Reconciliation & Containerized Deployment (`ema_vwap-xh2`)
+
+We have completed Epic **`ema_vwap-xh2`** across all three subtasks (`ema_vwap-xh2.1`, `ema_vwap-xh2.2`, `ema_vwap-xh2.3`).
+
+---
+
+## What Was Accomplished
+
+```mermaid
+flowchart TD
+    subgraph Containerized Deployment
+        A[Docker / OS Daemon Process] -->|Start / Reboot| B[FastAPI Lifespan Boot]
+        B --> C[Load SQLite DB & Settings]
+        C --> D{paper_runner_enabled?}
+        D -->|Yes| E[Downtime Position & Candle Reconciliation]
+        E --> F[Evaluate Missed SL/TP Breaches]
+        F --> G[Record Fills with Historical Timestamps]
+        G --> H[Start Live Polling Runner Thread]
+        D -->|No| I[Standby / Await API Activation]
+        H --> J[Continuous Real-Time Stepping Loop]
+        B -.->|Shutdown Signal| K[FastAPI Lifespan Teardown]
+        K --> L[Stop Polling & Flush State]
+    end
+```
+
+### 1. Persistent Runner State & FastAPI Lifespan Auto-Resume (`ema_vwap-xh2.1`)
+- Stored `paper_runner_enabled` and `paper_polling_interval` in SQLite `system_settings`.
+- Added `@asynccontextmanager async def lifespan(app: FastAPI)` in [`src/app.py`](file:///c:/crypto/ema_vwap/src/app.py) to automatically resume live polling when the server boots up and cleanly terminate threads on shutdown.
+
+### 2. Downtime Historical Gap Reconciliation & SL/TP Backfill (`ema_vwap-xh2.2`)
+- Implemented `reconcile_positions_on_startup()` in [`src/paper/engine.py`](file:///c:/crypto/ema_vwap/src/paper/engine.py) to audit open positions against candles elapsed during offline downtime.
+- Identifies and executes Stop-Loss/Take-Profit triggers at the exact historical downtime timestamp, recording completed trades and updating ledger balances before resuming live polling.
+- Added `POST /api/paper/engine/reconcile` for on-demand reconciliation.
+
+### 3. Production Dockerfile, Compose Configuration & Documentation (`ema_vwap-xh2.3`)
+- **[`Dockerfile`](file:///c:/crypto/ema_vwap/Dockerfile)**: Multi-stage secure build with non-root user `trader` and container health checking.
+- **[`docker-compose.yml`](file:///c:/crypto/ema_vwap/docker-compose.yml)**: Persistent SQLite WAL volume mount (`./data:/app/data`), `restart: unless-stopped` crash recovery, and resource limits.
+- **[`requirements.txt`](file:///c:/crypto/ema_vwap/requirements.txt)** & **[`requirements-dev.txt`](file:///c:/crypto/ema_vwap/requirements-dev.txt)**: Pinned production and test dependencies.
+- **[`docs/DEPLOYMENT.md`](file:///c:/crypto/ema_vwap/docs/DEPLOYMENT.md)**: Deployment and continuous operation guide.
+
+---
+
+## Verification & Quality Gates
+
+- **Unit & Integration Tests**: All 95 tests pass with 0 failures:
+  ```bash
+  pytest
+  # ============================= 95 passed in 4.95s ==============================
+  ```
+- **Linter**: 100% clean with zero errors or warnings:
+  ```bash
+  ruff check src tests
+  # All checks passed!
+  ```

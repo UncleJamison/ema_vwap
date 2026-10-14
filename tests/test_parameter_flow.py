@@ -254,7 +254,9 @@ def test_full_pipeline_optuna_to_paper_trading():
     assert strat_params.atr_multiplier == bt_params.atr_multiplier
 
     # Step 5: Verify paper engine can use these params
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+    with tempfile.NamedTemporaryFile(
+        suffix="paper_trading_test_db.db", delete=False
+    ) as f:
         db_path = f.name
     db = None
     engine = None

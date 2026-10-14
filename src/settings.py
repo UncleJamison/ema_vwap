@@ -40,8 +40,11 @@ def mask_secret_value(value: str) -> str:
 class SettingsManager:
     """Centralized manager for application settings and credentials."""
 
-    def __init__(self, db: CandleDatabase | None = None):
-        self.db = db or CandleDatabase()
+    def __init__(self, db: CandleDatabase):
+        # Require a database instance — callers must pass one.
+        self.db = db
+        # Ensure the database tables are initialized.
+        self.db.init_db()
 
     def get(self, key: str, default: str | None = None) -> str | None:
         """
@@ -178,3 +181,51 @@ class SettingsManager:
         Reads from settings: max_monte_carlo_drawdown_pct (default 35.0 if not set).
         """
         return float(self.get("max_monte_carlo_drawdown_pct") or 35.0)
+
+    def get_all_sensitive(self) -> dict[str, str]:
+        """Retrieve all sensitive settings (API keys, secrets) for the current session."""
+        sensitive_keys = {
+            "app_api_key",
+            "gemini_api_key",
+            "gemini_secret_key",
+            "kucoin_api_key",
+            "kucoin_secret_key",
+            "kucoin_passphrase",
+            "robinhood_api_key",
+            "robinhood_private_key",
+            "alpaca_api_key_id",
+            "alpaca_secret_key",
+            "polygon_api_key",
+            "tiingo_api_token",
+        }
+        result = {}
+        for key in sensitive_keys:
+            val = self.get(key)
+            if val:
+                result[key] = val
+        return result
+
+    def update_sensitive(self, settings_map: dict[str, Any]) -> int:
+        """Update sensitive settings (API keys, secrets) from a dictionary."""
+        sensitive_keys = {
+            "app_api_key",
+            "gemini_api_key",
+            "gemini_secret_key",
+            "kucoin_api_key",
+            "kucoin_secret_key",
+            "kucoin_passphrase",
+            "robinhood_api_key",
+            "robinhood_private_key",
+            "alpaca_api_key_id",
+            "alpaca_secret_key",
+            "polygon_api_key",
+            "tiingo_api_token",
+        }
+        updated_count = 0
+        for k, v in settings_map.items():
+            if k in sensitive_keys and v is not None:
+                val_str = str(v).strip()
+                if val_str:  # Only update if non-empty
+                    self.db.save_setting(key=k, value=val_str, is_secret=True)
+                    updated_count += 1
+        return updated_count

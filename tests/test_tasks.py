@@ -10,7 +10,7 @@ from src.tasks import TaskCancelledException, TaskManager, TaskStatus
 
 
 def test_task_manager_lifecycle(tmp_path):
-    db_file = os.path.join(tmp_path, "test_tasks.db")
+    db_file = os.path.join(tmp_path, "system_test_tasks.db")
     db = CandleDatabase(db_path=db_file)
     mgr = TaskManager(db=db)
 
@@ -40,7 +40,7 @@ def test_task_manager_lifecycle(tmp_path):
 
 
 def test_task_cancellation(tmp_path):
-    db_file = os.path.join(tmp_path, "test_cancel.db")
+    db_file = os.path.join(tmp_path, "system_test_cancel.db")
     db = CandleDatabase(db_path=db_file)
     mgr = TaskManager(db=db)
 
@@ -62,14 +62,14 @@ def test_task_cancellation(tmp_path):
 
 
 def test_background_thread_execution(tmp_path):
-    db_file = os.path.join(tmp_path, "test_thread.db")
+    db_file = os.path.join(tmp_path, "system_test_thread.db")
     db = CandleDatabase(db_path=db_file)
     mgr = TaskManager(db=db)
 
     def worker_job(task_id, manager, items_count):
         for i in range(items_count):
             progress = ((i + 1) / items_count) * 100.0
-            manager.update_progress(task_id, progress, f"Step {i+1}/{items_count}")
+            manager.update_progress(task_id, progress, f"Step {i + 1}/{items_count}")
             time.sleep(0.01)
         return {"processed": items_count}
 

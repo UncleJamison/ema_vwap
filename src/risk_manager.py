@@ -18,7 +18,11 @@ class RiskManager:
         self.params = params
 
     def calculate_position_size(
-        self, equity: float, entry_price: float, stop_loss_price: float, regime: str = "trending"
+        self,
+        equity: float,
+        entry_price: float,
+        stop_loss_price: float,
+        regime: str = "trending",
     ) -> tuple[float, float, float]:
         """
         Calculate position size in units and USD value based on equity risk %.
@@ -87,16 +91,49 @@ class RiskManager:
         return max(stop_loss, 1e-9), max(take_profit, 1e-9)
 
     def update_trailing_stop(
-        self, side: int, current_price: float, current_stop: float, atr: float, regime: str = "trending"
+        self,
+        side: int,
+        current_price: float,
+        current_stop: float,
+        atr: float,
+        regime: str = "trending",
+        entry_price: float | None = None,
     ) -> float:
-        """Update trailing stop loss if current price moves favorably."""
+        """Update trailing stop loss if current price moves favorably.
+
+        Uses ATR as base distance; trailing_stop_pct acts as a MAXIMUM distance cap.
+        If entry_price is provided, can set initial trail from entry (Fix #18).
+        """
         if atr <= 0:
             return current_stop
+
+        # Base distance: ATR * multiplier * regime multiplier
         stop_mult = _REGIME_STOP_MULTIPLIER.get(regime, 1.0)
-        distance = atr * self.params.atr_multiplier * stop_mult
-        if side == 1:  # Long: ratchet stop loss upward
+        atr_distance = atr * self.params.atr_multiplier * stop_mult
+
+        # If trailing_stop_pct configured, use it as MAXIMUM distance (cap)
+        if (
+            hasattr(self.params, "trailing_stop_pct")
+            and self.params.trailing_stop_pct > 0
+        ):
+            pct_distance = current_price * (self.params.trailing_stop_pct / 100.0)
+            distance = min(atr_distance, pct_distance)  # ATR base, capped by %
+        else:
+            distance = atr_distance
+
+        # Fix #18: If entry_price provided and no current stop (or very loose),
+        # set initial trail from entry (allows trailing from entry, not just in profit)
+        if entry_price is not None and current_stop <= 1e-9:
+            # Set initial stop at entry minus distance (Long) or entry plus distance (Short)
+            if side == 1:  # Long
+                return max(current_stop, entry_price - distance)
+            else:  # Short
+                return min(current_stop, entry_price + distance)
+
+        # Standard trailing logic: only ratchet in favorable direction
+        if side == 1:  # Long
             new_stop = current_price - distance
-            return max(current_stop, new_stop)
-        else:  # Short: ratchet stop loss downward
+            return max(current_stop, new_stop)  # ratchet upward only
+        else:  # Short
             new_stop = current_price + distance
             return min(current_stop, new_stop)

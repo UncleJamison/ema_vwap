@@ -4,11 +4,13 @@ batch results after sweep completes, updates DB badges, and refreshes leaderboar
 
 Runs RED until the feature is implemented.
 """
+
 import json
 
 from fastapi.testclient import TestClient
 
 import src.app as app_module
+import src.data_loader
 from src.app import app
 
 # Import BatchOptimizer so the backend endpoint can use it
@@ -28,18 +30,44 @@ def test_batch_auto_validate_writes_status_for_all_results_after_sweep(
     db = CandleDatabase(db_path=str(tmp_path / "batch_autovalidate.db"))
     # Seed two results as if a sweep just finished
     db.save_batch_result(
-        "kucoin", "BTC/USD", "5m", "auto", "sharpe_ratio",
-        1.5, 8, 1.5, 1.2, 60.0, 4.0, 12.0,
+        "kucoin",
+        "BTC/USD",
+        "5m",
+        "auto",
+        "sharpe_ratio",
+        1.5,
+        8,
+        1.5,
+        1.2,
+        60.0,
+        4.0,
+        12.0,
         json.dumps({"fast_ema": 9, "slow_ema": 21, "trend_ema": 50}),
         "2026-08-20T00:00:00+00:00",
     )
     db.save_batch_result(
-        "kucoin", "ETH/USD", "5m", "auto", "sharpe_ratio",
-        1.2, 6, 1.0, 0.8, 50.0, 3.0, 8.0,
+        "kucoin",
+        "ETH/USD",
+        "5m",
+        "auto",
+        "sharpe_ratio",
+        1.2,
+        6,
+        1.0,
+        0.8,
+        50.0,
+        3.0,
+        8.0,
         json.dumps({"fast_ema": 9, "slow_ema": 21, "trend_ema": 50}),
         "2026-08-20T00:00:00+00:00",
     )
     monkeypatch.setattr(app_module, "_batch_db", db)
+    # Also monkeypatch DataLoader's db to use a CandleDatabase for the test DB so ETH/USD can be validated
+    monkeypatch.setattr(
+        src.data_loader,
+        "db",
+        CandleDatabase(db_path=str(tmp_path / "batch_autovalidate.db")),
+    )
     client = TestClient(app)
 
     # Simulate the frontend invoking auto-validate after sweep completion

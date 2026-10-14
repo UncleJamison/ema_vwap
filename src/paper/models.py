@@ -18,6 +18,9 @@ class PaperProfile:
     params: dict[str, Any]
     optuna_score: float = 0.0
     is_active: bool = True
+    deployed: bool = False
+    deployed_at: str | None = None
+    validation_report_json: str | None = None
     profile_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -46,7 +49,9 @@ class PaperPosition:
     unrealized_pnl_pct: float = 0.0
     entry_time: str | None = None
     updated_time: str | None = None
+    last_bar_time: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    account_id: str = "default"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +68,7 @@ class PaperPosition:
             "unrealized_pnl_pct": self.unrealized_pnl_pct,
             "entry_time": self.entry_time,
             "updated_time": self.updated_time,
+            "last_bar_time": self.last_bar_time,
             "metadata": self.metadata,
         }
 

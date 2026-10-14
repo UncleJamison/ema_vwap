@@ -1,0 +1,69 @@
+# Alembic Migrations (ema_vwap-y7a3)
+
+## Overview
+
+Database schema migrations are managed with [Alembic](https://alembic.sqlalchemy.org/).
+The baseline revision (`0001_baseline`) captures the complete schema as created by
+`CandleDatabase.init_db()`.
+
+**Existing databases (created by `init_db`)** are stamped at the baseline —
+they already have the schema, so no DDL is run:
+
+```bash
+# Stamps the DB at 0001_baseline without running DDL
+ALEMBIC_DB_PATH=data/candles.db alembic stamp head
+```
+
+**New/empty databases** can be built entirely by Alembic:
+
+```bash
+ALEMBIC_DB_PATH=data/new_candles.db alembic upgrade head
+```
+
+## Database resolution order
+
+`alembic/env.py` resolves the target SQLite file:
+
+1. `ALEMBIC_DB_PATH` env var (preferred for running migrations on a specific DB)
+2. `DB_PATH` env var (the same one the app uses)
+3. `sqlalchemy.url` in `alembic.ini` (default: `sqlite:///./data/candles.db`)
+
+## Making schema changes
+
+Never edit `init_db()` for new schema changes. Instead:
+
+```bash
+# 1. Generate a revision
+alembic revision -m "add_foo_column_to_bar"
+
+# 2. Edit alembic/versions/<new>_add_foo_column_to_bar.py:
+#    - upgrade(): op.add_column(...), op.create_table(...), etc.
+#    - downgrade(): the inverse operations
+
+# 3. Apply
+ALEMBIC_DB_PATH=data/candles.db alembic upgrade head
+
+# 4. Verify current version
+ALEMBIC_DB_PATH=data/candles.db alembic current
+```
+
+For each domain DB (candles / batch_results / paper_trading / system), run
+`upgrade head` (or `stamp head` for pre-existing files) with the respective path.
+
+## Rollback
+
+```bash
+# One step back
+ALEMBIC_DB_PATH=data/candles.db alembic downgrade -1
+
+# All the way back (drops all schema objects!)
+ALEMBIC_DB_PATH=data/candles.db alembic downgrade base
+```
+
+## Notes
+
+- `init_db()` remains the runtime bootstrap (backward compatible); Alembic is the
+  versioned, reviewable path forward for schema evolution.
+- SQLite has limited ALTER support; `render_as_batch=True` is enabled in
+  `env.py` so column alters use the table-rebuild pattern automatically.
+- The `alembic_version` table in each DB records the applied revision.

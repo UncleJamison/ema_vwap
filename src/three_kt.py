@@ -37,6 +37,7 @@ from src.config import StrategyParams
 # SQLite-backed version store (branches, tags, history)
 # ──────────────────────────────────────────────────────────────
 
+
 class StrategyVersionDB:
     """SQLite version store for strategy configurations."""
 
@@ -49,8 +50,10 @@ class StrategyVersionDB:
     def conn(self):
         if self._conn is None:
             import sqlite3
+
             self._conn = sqlite3.connect(str(self.path))
-            self._conn.execute("""
+            self._conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS strategy_versions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
@@ -61,15 +64,20 @@ class StrategyVersionDB:
                     updated_at TEXT NOT NULL,
                     is_active INTEGER DEFAULT 1
                 )
-            """)
-            self._conn.execute("""
+            """
+            )
+            self._conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_versions_tag
                 ON strategy_versions(tag)
-            """)
-            self._conn.execute("""
+            """
+            )
+            self._conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_versions_branch
                 ON strategy_versions(branch)
-            """)
+            """
+            )
         return self._conn
 
     def create_version(
@@ -109,6 +117,9 @@ class StrategyVersionDB:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def promote(self, version_id: int) -> bool:
+        self.conn.execute(
+            "UPDATE strategy_versions SET is_active = 0 WHERE id != ?", (version_id,)
+        )
         cur = self.conn.execute(
             "UPDATE strategy_versions SET is_active = 1 WHERE id = ?", (version_id,)
         )
@@ -124,6 +135,7 @@ class StrategyVersionDB:
 # ──────────────────────────────────────────────────────────────
 # StrategyVersion dataclass
 # ──────────────────────────────────────────────────────────────
+
 
 @dataclass
 class StrategyVersion:
@@ -187,22 +199,30 @@ class StrategyVersion:
         return cls(name=name, tag=tag, config=config)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["_id"] = self.id
+        d["_db"] = self._db
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> StrategyVersion:
-        return cls(
+        version = cls(
             name=data.get("name", "unknown"),
             branch=data.get("branch", "main"),
             tag=data.get("tag", "v0.0.0"),
             config=data.get("config", {}),
             is_active=data.get("is_active", True),
         )
+        version._id = data.get("_id", data.get("id"))
+        if "_db" in data:
+            version._db = data.get("_db")
+        return version
 
 
 # ──────────────────────────────────────────────────────────────
 # A/B Test Runner – parallel BacktestEngine runs
 # ──────────────────────────────────────────────────────────────
+
 
 class AbTestRunner:
     """
@@ -228,7 +248,9 @@ class AbTestRunner:
 
     def run(self) -> dict[str, Any]:
         """Execute both strategies and return comparison with statistical analysis."""
-        print(f"[AbTestRunner] Running A/B test: champion={self.champion.name} vs challenger={self.challenger.name}")
+        print(
+            f"[AbTestRunner] Running A/B test: champion={self.champion.name} vs challenger={self.challenger.name}"
+        )
 
         champ_res = self._run(self.champion)
         self.results[self.champion.name] = champ_res
@@ -279,11 +301,8 @@ class AbTestRunner:
         if len(pnl1) > 1 and len(pnl2) > 1:
             _t_stat, p_value = stats.ttest_ind(pnl1, pnl2, equal_var=False)
         else:
-            # Fallback: compare metric values directly
-            v1 = getattr(r1, self.metric, 0.0)
-            v2 = getattr(r2, self.metric, 0.0)
-            diff = v1 - v2
-            p_value = 0.05 if abs(diff) < 1e-6 else 0.01
+            # Fallback: compare metric values directly (values unused; p_value = 1.0)
+            p_value = 1.0
 
         # Winner: higher metric wins if p < 0.05, else "inconclusive"
         val1 = getattr(r1, self.metric, 0.0)
@@ -294,7 +313,11 @@ class AbTestRunner:
             "significant": p_value < 0.05,
             "champion_score": val1,
             "challenger_score": val2,
-            "winner": "champion" if p_value < 0.05 and val1 >= val2 else "challenger" if p_value < 0.05 and val1 < val2 else "inconclusive",
+            "winner": (
+                "champion"
+                if p_value < 0.05 and val1 >= val2
+                else "challenger" if p_value < 0.05 and val1 < val2 else "inconclusive"
+            ),
             "recommendation": "manual_promotion_required",
         }
 
@@ -311,10 +334,10 @@ class AbTestRunner:
         return db.promote(target["id"])
 
 
-
 # ──────────────────────────────────────────────────────────────
 # Convenience helpers
 # ──────────────────────────────────────────────────────────────
+
 
 def get_current_champion(db: StrategyVersionDB | None = None) -> StrategyVersion | None:
     """Retrieve the currently active (champion) strategy version."""

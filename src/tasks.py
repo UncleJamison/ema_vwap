@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any
 
 from src.database import CandleDatabase
+from src.db_connection_manager import get_database
 from src.logger import logger
 
 
@@ -31,7 +32,11 @@ class TaskManager:
     """Thread-safe background task execution & status polling manager."""
 
     def __init__(self, db: CandleDatabase | None = None):
-        self.db = db or CandleDatabase()
+        if db is None:
+            from src.db_connection_manager import get_database
+
+            db = get_database("system")
+        self.db = db
         self._active_threads: dict[str, threading.Thread] = {}
         self._cancelled_ids: set = set()
         self._lock = threading.Lock()
@@ -89,6 +94,12 @@ class TaskManager:
 
         self.db.save_background_task(task)
         logger.info(f"Background task completed: {task_id}")
+
+        if hasattr(self.db, "prune_background_tasks"):
+            try:
+                self.db.prune_background_tasks(keep_limit=50)
+            except Exception as e:
+                logger.debug(f"[TaskManager] Background task pruning skipped: {e}")
 
         with self._lock:
             self._active_threads.pop(task_id, None)
@@ -182,5 +193,6 @@ class TaskManager:
         return task_id
 
 
-# Global Singleton TaskManager Instance
-global_task_manager = TaskManager()
+# Global Singleton TaskManager Instance — must use system.db so all
+# background task records land in the same DB that app.py's _system_db reads.
+global_task_manager = TaskManager(get_database("system"))

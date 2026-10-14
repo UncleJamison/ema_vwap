@@ -6,6 +6,118 @@ Defines parameter dataclasses, exchange configurations, and default settings.
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+MAX_OPTUNA_WORKERS: int = 4
+
+
+def get_optimal_lookback_days(timeframe: str, category: str = "crypto") -> int:
+    """Calculate optimal lookback days based on timeframe and asset category.
+    Returns the default_lookback_days from TimeframeSpec (tf_lookbacks).
+    """
+    # Use the same defaults as get_timeframe_spec tf_lookbacks
+    tf = timeframe.lower()
+    crypto_lookbacks = {
+        "1m": 30,
+        "3m": 60,
+        "5m": 90,
+        "15m": 180,
+        "30m": 250,
+        "1h": 900,
+        "2h": 540,
+        "4h": 350,
+        "6h": 540,
+        "8h": 540,
+        "12h": 350,
+        "1d": 1800,
+        "1w": 10950,
+    }
+    return crypto_lookbacks.get(tf, 90)
+
+
+@dataclass
+class TimeframeSpec:
+    """Timeframe specification with lookback windows and bars per day."""
+
+    bars_per_day_crypto: int = 60
+    bars_per_day_stock: int = 30
+    bars_per_day_synthetic: int = 45
+    min_lookback_days: int = 1
+    max_lookback_days: int = 3650
+    default_lookback_days: int = 30
+
+
+def get_timeframe_spec(timeframe: str, category: str = "crypto") -> TimeframeSpec:
+    """Return timeframe specification with bars per day and lookback windows."""
+    # Per-timeframe bars per day (how many candles in a full trading day)
+    tf_bars = {
+        "1m": 1440 if category == "crypto" else 78,
+        "3m": 480 if category == "crypto" else 26,
+        "5m": 288 if category == "crypto" else 78,
+        "15m": 96 if category == "crypto" else 39,
+        "30m": 48 if category == "crypto" else 20,
+        "1h": 24 if category == "crypto" else 6.5,
+        "2h": 12 if category == "crypto" else 3.25,
+        "4h": 6 if category == "crypto" else 3.25,
+        "6h": 4 if category == "crypto" else 1.0,
+        "8h": 3 if category == "crypto" else 1.0,
+        "12h": 2 if category == "crypto" else 1.0,
+        "1d": 1.0,
+    }
+    # Lookback windows (in days)
+    tf_lookbacks = {
+        "1m": (14, 60, 30),
+        "3m": (30, 90, 60),
+        "5m": (60, 180, 90),
+        "15m": (180, 365, 180),
+        "30m": (90, 500, 250),
+        "1h": (730, 1095, 900),
+        "2h": (365, 730, 540),
+        "4h": (183, 500, 350),
+        "6h": (365, 730, 540),
+        "8h": (365, 730, 540),
+        "12h": (183, 500, 350),
+        "1d": (1825, 3650, 1800),
+    }
+    bars_per_day = tf_bars.get(timeframe, 60 if category == "crypto" else 30)
+
+    min_lb, max_lb, default_lb = tf_lookbacks.get(
+        timeframe, (60, 180, 180)  # fallback to 5m spec for unknown timeframes
+    )
+
+    spec = TimeframeSpec(
+        bars_per_day_crypto=1440 if category == "crypto" else 30,
+        bars_per_day_stock=30 if category == "crypto" else 78,
+        min_lookback_days=min_lb,
+        max_lookback_days=max_lb,
+        default_lookback_days=default_lb,
+    )
+    # Override bars_per_day based on category
+    if category == "crypto":
+        spec.bars_per_day_crypto = int(bars_per_day)
+    else:
+        spec.bars_per_day_stock = float(bars_per_day)
+
+    return spec
+
+
+def get_bars_per_day(timeframe: str, category: str = "crypto") -> int:
+    """
+    Return the number of bars per day for a given timeframe and category.
+    """
+    tf_bars = {
+        "1m": 1440 if category == "crypto" else 78,
+        "3m": 480 if category == "crypto" else 26,
+        "5m": 288 if category == "crypto" else 78,
+        "15m": 96 if category == "crypto" else 39,
+        "30m": 48 if category == "crypto" else 20,
+        "1h": 24 if category == "crypto" else 6.5,
+        "2h": 12 if category == "crypto" else 3.25,
+        "4h": 6 if category == "crypto" else 3.25,
+        "6h": 4 if category == "crypto" else 1.0,
+        "1d": 1.0,
+    }
+    bars_per_day = tf_bars.get(timeframe, 60 if category == "crypto" else 30)
+    return int(bars_per_day)
+
 
 @dataclass
 class StrategyParams:
@@ -40,8 +152,14 @@ class StrategyParams:
     vwap_stop_offset_pct: float = 0.1  # Offset % added beyond VWAP line for stop loss
     atr_period: int = 14
     atr_multiplier: float = 2.0  # ATR trailing stop multiplier
+    trailing_stop_pct: float = (
+        1.5  # Trailing stop % of price (profit lock); 0 to disable
+    )
     risk_reward_ratio: float = 2.0  # Target R:R (e.g., 2.0 means Take Profit = 2x Risk)
     risk_per_trade_pct: float = 1.0  # Risk % of account equity per trade
+    max_position_pct: float = (
+        80.0  # Max total position value as % of equity (portfolio cap)
+    )
     max_holding_bars: int | None = (
         None  # Maximum bars to hold before forced time-based exit (None = disabled)
     )
@@ -145,7 +263,7 @@ class OptunaConfig:
     ] = "sharpe_ratio"
     n_trials: int = 50
     timeout_seconds: int | None = None
-    min_trades: int = 3
+    min_trades: int = 0
     n_startup_trials: int | None = None
     n_jobs: int = 1
     multivariate: bool = True
@@ -163,10 +281,14 @@ class OptunaConfig:
     vwap_slope_max: float = 0.003
 
     volume_multiplier_min: float = 0.8
+    sampler_seed: int | None = 42
+    enable_warmstart: bool = False  # ema_vwap-ddgr: opt-in warm-start from prior sweeps
+    execution_mode: str = "sequential"
+    n_workers: int = 1
     volume_multiplier_max: float = 3.5
 
-    atr_multiplier_min: float = 1.0
-    atr_multiplier_max: float = 6.0
+    atr_multiplier_min: float = 2.0
+    atr_multiplier_max: float = 5.0
 
     risk_reward_min: float = 1.0
     risk_reward_max: float = 6.0
@@ -181,13 +303,21 @@ class OptunaConfig:
     risk_per_trade_max: float = 3.0
 
     # Max Holding Bars (time-based stop, None = disabled)
-    enable_max_holding_bars: bool = False  # Set True to sweep max_holding_bars
+    enable_max_holding_bars: bool = True  # Set True to sweep max_holding_bars
     max_holding_bars_min: int = 4  # Minimum bars before forced exit
     max_holding_bars_max: int = 96  # Maximum bars before forced exit
+
+    # Trailing Stop % of Price (profit lock; 0 to disable)
+    trailing_stop_min: float = 1.0  # Min trailing stop % of price
+    trailing_stop_max: float = 3.0  # Max trailing stop % of price
 
     # Hard Drawdown Constraints (Optuna pruning)
     enable_hard_drawdown_constraint: bool = False
     max_drawdown_constraint_pct: float = 25.0
+
+    # Portfolio Position Cap (max total position value as % of equity)
+    max_position_pct_min: float = 25.0
+    max_position_pct_max: float = 100.0
 
     # Multi-Objective Optimization (Pareto Frontier)
     enable_multi_objective: bool = False
@@ -240,6 +370,9 @@ class OptunaConfig:
             "regime_sweep_enabled": self.regime_sweep_enabled,
             "regime_sweep_days": self.regime_sweep_days,
             "regime_sweep_n_jobs": self.regime_sweep_n_jobs,
+            "sampler_seed": self.sampler_seed,
+            "execution_mode": self.execution_mode,
+            "n_workers": self.n_workers,
         }
 
 
@@ -277,3 +410,23 @@ class MonteCarloConfig:
             "confidence_levels": self.confidence_levels,
             "random_seed": self.random_seed,
         }
+
+
+def get_vwap_slope_bounds(timeframe: str) -> dict:
+    """Return static VWAP slope bounds for the given timeframe."""
+    return {
+        "vwap_slope_min": 0.0001,
+        "vwap_slope_max": 0.05,
+    }
+
+
+def get_ema_bounds(tf: str, asset_type: str = "crypto") -> dict:
+    """Compute EMA search bounds by timeframe and asset class."""
+    return {
+        "fast_ema_min": 3,
+        "fast_ema_max": 30,
+        "slow_ema_min": 10,
+        "slow_ema_max": 60,
+        "trend_ema_min": 20,
+        "trend_ema_max": 120,
+    }

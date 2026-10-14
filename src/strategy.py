@@ -5,7 +5,7 @@ Implements Crossover, Multi-EMA Confirmation, and VWAP Pullback setups with VWAP
 import pandas as pd
 
 from src.config import StrategyParams
-from src.indicators import compute_all_indicators
+from src.indicators import compute_all_indicators, compute_ema
 from src.regime import get_current_regime, regime_to_strategy_mode
 
 
@@ -36,6 +36,14 @@ class EmaVwapStrategy:
 
         return slope_pass, volume_pass
 
+    def _cross(self, s1: pd.Series, s2: pd.Series) -> tuple[pd.Series, pd.Series]:
+        """Return (cross_above, cross_below) for two series."""
+        s1_prev = s1.shift(1)
+        s2_prev = s2.shift(1)
+        cross_above = (s1_prev <= s2_prev) & (s1 > s2)
+        cross_below = (s1_prev >= s2_prev) & (s1 < s2)
+        return cross_above, cross_below
+
     def generate_crossover_signals(self, df: pd.DataFrame) -> pd.Series:
         """
         Setup 1: Fast EMA x VWAP Crossover.
@@ -44,16 +52,9 @@ class EmaVwapStrategy:
         """
         fast_ema = df[f"ema_{self.params.fast_ema}"]
         vwap = df["vwap"]
-
-        fast_prev = fast_ema.shift(1)
-        vwap_prev = vwap.shift(1)
-
-        cross_above = (fast_prev <= vwap_prev) & (fast_ema > vwap)
-        cross_below = (fast_prev >= vwap_prev) & (fast_ema < vwap)
-
+        cross_above, cross_below = self._cross(fast_ema, vwap)
         long_cond = cross_above & (df["close"] > vwap)
         short_cond = cross_below & (df["close"] < vwap)
-
         signals = pd.Series(0, index=df.index)
         signals[long_cond] = 1
         signals[short_cond] = -1
@@ -69,16 +70,9 @@ class EmaVwapStrategy:
         slow_ema = df[f"ema_{self.params.slow_ema}"]
         trend_ema = df[f"ema_{self.params.trend_ema}"]
         vwap = df["vwap"]
-
-        fast_prev = fast_ema.shift(1)
-        slow_prev = slow_ema.shift(1)
-
-        ema_cross_above = (fast_prev <= slow_prev) & (fast_ema > slow_ema)
-        ema_cross_below = (fast_prev >= slow_prev) & (fast_ema < slow_ema)
-
-        long_cond = ema_cross_above & (trend_ema > vwap) & (df["close"] > vwap)
-        short_cond = ema_cross_below & (trend_ema < vwap) & (df["close"] < vwap)
-
+        cross_above, cross_below = self._cross(fast_ema, slow_ema)
+        long_cond = cross_above & (trend_ema > vwap) & (df["close"] > vwap)
+        short_cond = cross_below & (trend_ema < vwap) & (df["close"] < vwap)
         signals = pd.Series(0, index=df.index)
         signals[long_cond] = 1
         signals[short_cond] = -1
@@ -121,7 +115,11 @@ class EmaVwapStrategy:
         signals[short_cond] = -1
         return signals
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(
+        self,
+        df: pd.DataFrame,
+        precomputed_indicators: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
         """
         Applies requested setup and filters df with all technical indicators.
         Returns DataFrame with 'signal' column (1 = Buy, -1 = Sell, 0 = Hold).
@@ -129,7 +127,16 @@ class EmaVwapStrategy:
         mapped to a strategy mode via REGIME_MAP (trending->multi_ema,
         ranging->pullback, high_vol->crossover).
         """
-        df = compute_all_indicators(df, self.params)
+        if precomputed_indicators is None:
+            df = compute_all_indicators(df, self.params)
+        else:
+            df = precomputed_indicators.copy()
+            for period in {
+                self.params.fast_ema,
+                self.params.slow_ema,
+                self.params.trend_ema,
+            }:
+                df[f"ema_{period}"] = compute_ema(df["close"], period)
 
         if self.params.strategy_mode == "auto":
             regime = get_current_regime(df)

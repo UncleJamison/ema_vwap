@@ -1,0 +1,12 @@
+						
+						
+Recommended Lookback & Resolution Matrix						
+Timeframe	Crypto Bars/Day (24/7)	Equity Bars/Day (RTH 6.5h)	Recommended Historical Days	Expected Total Bars (Crypto)	Expected Total Bars (Equities)	Target Usage
+1m	1440	390	30 – 60 Days	43,200 – 86,400	11,700 – 23,400	Microstructure & scalping
+3m	480	130	60 – 90 Days	28,800 – 43,200	7,800 – 11,700	Momentum timing & donor base
+5m	288	78	180 Days	51840	14040	Core intraday baseline
+15m	96	26	365 Days (1 Year)	35040	9490	Institutional swing timing
+30m	48	13	730 Days (2 Years)	35040	9490	Multi-day swing positioning
+1h	24	6.5	1,095 Days (3 Years)	26280	7117	Multi-regime institutional bias
+2h / 4h	12 / 6	3.25 / ~1.6	1,825 Days (5 Years)	10,950 – 21,900	~2,920 – 5,840	Structural trend validation
+1d	1	1	3,650 Days (10 Years)	3650	2520	Multi-cycle secular macro

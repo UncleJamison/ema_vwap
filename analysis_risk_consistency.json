@@ -1,0 +1,6 @@
+{
+  "consistent_with_risk_manager": "formula_consistent_but_risk_manager_applies_regime_multiplier_crossasset_risk_budget_does_not",
+  "portfolio_risk_formula": "base_risk_usd = total_nav * (risk_per_trade_pct / 100.0) — same formula used by both RiskManager and CrossAssetRiskBudgeter",
+  "conflicts": "paper_engine_position_cap_25_percent_vs_portfolio_risk_budget_30_percent_cap_paper_engine_cap_is_tighter_25_vs_30",
+  "notes": "Both RiskManager and CrossAssetRiskBudgeter share the same core risk_per_trade_pct formula: risk_amount_usd = total_nav * (risk_per_trade_pct / 100.0). RiskManager additionally applies a regime-based equity multiplier (trending=1.0, ranging=0.8, high_vol=0.7) before computing risk_amount_usd. CrossAssetRiskBudgeter does not apply a regime multiplier but does apply circuit_breaker_scale and correlation_penalty multipliers to effective_risk_usd. Position cap conflict: PaperTradingEngine caps single position at 25% of total_equity (line 444), while CrossAssetRiskBudgeter and PortfolioRiskBudgetEngine both cap at 30% of total_nav (CrossAssetRiskBudgeter line 103, PortfolioRiskBudgetEngine RiskBudgetConfig max_single_asset_weight default=0.30). The paper engine cap is 5 percentage points tighter."
+}

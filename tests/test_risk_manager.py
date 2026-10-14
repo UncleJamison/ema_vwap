@@ -44,13 +44,17 @@ def test_stop_and_target_vwap():
 
 
 def test_trailing_stop_update():
-    params = StrategyParams(atr_multiplier=2.0)
+    params = StrategyParams(atr_multiplier=2.0, trailing_stop_pct=1.5)
     rm = RiskManager(params)
 
     atr = 100.0
     # Long trade
     current_stop = 50000.0
-    # Price rises to 50500 -> new trailing stop = 50500 - (2 * 100) = 50300
+    # Price rises to 50500
+    # ATR distance = 100 * 2.0 = 200
+    # % distance = 50500 * 0.015 = 757.5
+    # distance = min(200, 757.5) = 200 (ATR base, capped by %)
+    # new_stop = 50500 - 200 = 50300, ratchet: max(50000, 50300) = 50300
     updated_stop = rm.update_trailing_stop(
         side=1, current_price=50500.0, current_stop=current_stop, atr=atr
     )
@@ -60,4 +64,4 @@ def test_trailing_stop_update():
     no_drop_stop = rm.update_trailing_stop(
         side=1, current_price=50200.0, current_stop=updated_stop, atr=atr
     )
-    assert no_drop_stop == 50300.0
+    assert no_drop_stop == 50300.0  # price drop: stop must not ratchet down

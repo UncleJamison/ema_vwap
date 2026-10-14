@@ -59,7 +59,7 @@ def test_synthetic_stock_split_simulation():
 
 def test_alpaca_adapter_symbol_formatting_and_missing_keys(tmp_path):
     """Verify Alpaca adapter handles symbols and returns empty df with warning if keys missing."""
-    db_file = os.path.join(tmp_path, "test_settings.db")
+    db_file = os.path.join(tmp_path, "system_test_settings.db")
     db = CandleDatabase(db_path=db_file)
     settings = SettingsManager(db=db)
 
@@ -76,7 +76,7 @@ def test_alpaca_adapter_symbol_formatting_and_missing_keys(tmp_path):
 
 def test_polygon_adapter_symbol_formatting_and_missing_keys(tmp_path):
     """Verify Polygon adapter handles symbols and returns empty df with warning if key missing."""
-    db_file = os.path.join(tmp_path, "test_settings.db")
+    db_file = os.path.join(tmp_path, "system_test_settings.db")
     db = CandleDatabase(db_path=db_file)
     settings = SettingsManager(db=db)
 
@@ -91,7 +91,7 @@ def test_polygon_adapter_symbol_formatting_and_missing_keys(tmp_path):
 
 def test_stock_data_loader_sqlite_caching_and_resampling(tmp_path):
     """Verify stock candle caching into SQLite database and resampling."""
-    db_file = os.path.join(tmp_path, "test_stock_candles.db")
+    db_file = os.path.join(tmp_path, "system_test_stock_candles.db")
     db = CandleDatabase(db_path=db_file)
 
     adapter = SyntheticStockAdapter()
@@ -108,7 +108,7 @@ def test_stock_data_loader_sqlite_caching_and_resampling(tmp_path):
 
 def test_stock_settings_manager_storage_and_masking(tmp_path):
     """Verify SettingsManager stores and masks Alpaca, Polygon, and Tiingo credentials."""
-    db_file = os.path.join(tmp_path, "test_settings_stock.db")
+    db_file = os.path.join(tmp_path, "system_test_settings_stock.db")
     db = CandleDatabase(db_path=db_file)
     mgr = SettingsManager(db=db)
 

@@ -4,12 +4,12 @@ Implements double-entry ledger auditing, virtual balances, position lifecycles, 
 """
 
 import json
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from src.database import CandleDatabase
-from src.database import db as default_db
 from src.paper.models import (
     LedgerTransaction,
     PaperPosition,
@@ -21,11 +21,22 @@ class PaperLedger:
     """Double-entry transaction ledger and virtual portfolio balance manager."""
 
     def __init__(self, db: CandleDatabase | None = None) -> None:
-        self.db = db or default_db
+        if db is None:
+            from src.db_connection_manager import get_database
+
+            db = get_database("paper_trading")
+        self.db = db
 
     def get_balance(self, account_id: str = "default") -> float:
         """Get the current cash balance for the paper account."""
         return self.db.get_account_balance(account_id=account_id)
+
+    def get_total_equity(self, account_id: str = "default") -> float:
+        """Get total equity (cash + positions) for the paper account."""
+        cash = self.get_balance(account_id)
+        positions = self.list_positions(account_id=account_id)
+        position_value = sum(p.cost_basis + p.unrealized_pnl for p in positions)
+        return cash + position_value
 
     def deposit(
         self,
@@ -34,6 +45,14 @@ class PaperLedger:
         notes: str = "Initial deposit",
     ) -> LedgerTransaction:
         """Deposit cash into the virtual paper trading account."""
+        if (
+            not isinstance(amount, (int, float))
+            or not math.isfinite(amount)
+            or amount <= 0
+        ):
+            raise ValueError(
+                f"Deposit amount must be a finite positive number, got: {amount}"
+            )
         current_balance = self.get_balance(account_id)
         new_balance = current_balance + amount
         tx_id = f"tx_dep_{uuid.uuid4().hex[:10]}"
@@ -76,6 +95,14 @@ class PaperLedger:
         notes: str = "Withdrawal",
     ) -> LedgerTransaction:
         """Withdraw cash from the paper trading account."""
+        if (
+            not isinstance(amount, (int, float))
+            or not math.isfinite(amount)
+            or amount <= 0
+        ):
+            raise ValueError(
+                f"Withdrawal amount must be a finite positive number, got: {amount}"
+            )
         current_balance = self.get_balance(account_id)
         if amount > current_balance:
             raise ValueError(
@@ -223,6 +250,63 @@ class PaperLedger:
             metadata=metadata or {},
         )
 
+    def record_sell_short(
+        self,
+        account_id: str,
+        exchange: str,
+        symbol: str,
+        quantity: float,
+        price: float,
+        cost_basis: float,
+        fee: float = 0.0,
+        notes: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> LedgerTransaction:
+        """Record short sell order execution, add borrowed asset and record cost basis."""
+        current_balance = self.get_balance(account_id)
+        total_cost = cost_basis + fee
+        if total_cost > current_balance:
+            raise ValueError(
+                f"Insufficient funds: cost {total_cost:.2f} exceeds available balance {current_balance:.2f}"
+            )
+
+        new_balance = current_balance - total_cost
+        tx_id = f"tx_sellshort_{uuid.uuid4().hex[:10]}"
+        now_iso = datetime.now(timezone.utc).isoformat()
+        meta_json = json.dumps(metadata or {})
+
+        self.db.record_ledger_transaction(
+            transaction_id=tx_id,
+            account_id=account_id,
+            exchange=exchange,
+            symbol=symbol,
+            tx_type="SELL_SHORT",
+            amount=-cost_basis,
+            asset_qty=-quantity,
+            price=price,
+            fee=fee,
+            balance_after=new_balance,
+            timestamp=now_iso,
+            notes=notes,
+            metadata=meta_json,
+        )
+
+        return LedgerTransaction(
+            transaction_id=tx_id,
+            account_id=account_id,
+            exchange=exchange,
+            symbol=symbol,
+            type="SELL_SHORT",
+            amount=-cost_basis,
+            asset_qty=-quantity,
+            price=price,
+            fee=fee,
+            balance_after=new_balance,
+            timestamp=now_iso,
+            notes=notes,
+            metadata=metadata or {},
+        )
+
     def record_close_position(
         self,
         account_id: str,
@@ -308,24 +392,36 @@ class PaperLedger:
             unrealized_pnl=pos.unrealized_pnl,
             unrealized_pnl_pct=pos.unrealized_pnl_pct,
             entry_time=pos.entry_time,
+            last_bar_time=pos.last_bar_time,
             metadata=meta_json,
+            account_id=pos.account_id,
         )
 
-    def get_position(self, exchange: str, symbol: str) -> PaperPosition | None:
+    def get_position(
+        self, exchange: str, symbol: str, account_id: str = "default"
+    ) -> PaperPosition | None:
         """Get active open position for an asset."""
-        row = self.db.get_paper_position(exchange=exchange, symbol=symbol)
+        row = self.db.get_paper_position(
+            exchange=exchange, symbol=symbol, account_id=account_id
+        )
         if not row:
             return None
         return self._row_to_position(row)
 
-    def list_positions(self, exchange: str | None = None) -> list[PaperPosition]:
+    def list_positions(
+        self, exchange: str | None = None, account_id: str = "default"
+    ) -> list[PaperPosition]:
         """List all active open positions."""
-        rows = self.db.list_paper_positions(exchange=exchange)
+        rows = self.db.list_paper_positions(exchange=exchange, account_id=account_id)
         return [self._row_to_position(r) for r in rows]
 
-    def close_position(self, exchange: str, symbol: str) -> bool:
+    def close_position(
+        self, exchange: str, symbol: str, account_id: str = "default"
+    ) -> bool:
         """Remove open position from active list upon exit."""
-        return self.db.close_paper_position(exchange=exchange, symbol=symbol)
+        return self.db.close_paper_position(
+            exchange=exchange, symbol=symbol, account_id=account_id
+        )
 
     def record_completed_trade(self, trade: PaperTradeRecord) -> int:
         """Record completed round-trip trade into history."""
@@ -406,6 +502,10 @@ class PaperLedger:
             )
         return txs
 
+    def reset(self, account_id: str = "default") -> dict[str, int]:
+        """Reset all paper trading data for an account to initial state ($10,000 balance, no positions)."""
+        return self.db.reset_paper_account(account_id)
+
     @staticmethod
     def _row_to_position(row: dict[str, Any]) -> PaperPosition:
         try:
@@ -433,7 +533,9 @@ class PaperLedger:
             unrealized_pnl_pct=float(row.get("unrealized_pnl_pct", 0.0)),
             entry_time=row.get("entry_time"),
             updated_time=row.get("updated_time"),
+            last_bar_time=row.get("last_bar_time"),
             metadata=meta,
+            account_id=row.get("account_id", "default"),
         )
 
     @staticmethod

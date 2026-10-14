@@ -3,11 +3,13 @@ Configurable channels: email, Discord webhook, Telegram bot, Slack webhook.
 Integrates with SettingsManager for channel credentials and rate limiting.
 """
 
+import sqlite3
 import time
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from src.db_connection_manager import get_database
 from src.logger import logger
 from src.settings import SettingsManager
 
@@ -124,7 +126,7 @@ class AlertManager:
     """Central manager for sending alerts to configured notification channels."""
 
     def __init__(self, settings_mgr: SettingsManager | None = None):
-        self.settings = settings_mgr or SettingsManager()
+        self.settings = settings_mgr or SettingsManager(get_database("system"))
         self.channels: dict[str, AlertChannel] = {}
         self._register_default_channels()
         self.history: list[dict[str, Any]] = []
@@ -204,11 +206,7 @@ class AlertManager:
         self.history.append(entry)
         # Persist low-frequency alert to DB (ema_vwap-6ic)
         try:
-            import sqlite3
-
-            from src.database import CandleDatabase
-
-            db = CandleDatabase()
+            db = get_database("system")
             db.save_alert(entry)
         except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
             logger.warning(f"DB persistence skipped for alert: {e}")

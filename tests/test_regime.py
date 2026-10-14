@@ -2,6 +2,7 @@
 
 Covers indicators, classification, hysteresis, edge cases, and REGIME_MAP mapping.
 """
+
 import numpy as np
 import pandas as pd
 

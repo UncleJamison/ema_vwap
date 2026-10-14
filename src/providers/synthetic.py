@@ -8,6 +8,8 @@ from typing import ClassVar
 import numpy as np
 import pandas as pd
 
+from src.config import get_optimal_lookback_days
+from src.price_estimates import get_estimated_price
 from src.providers.base import BaseDataProvider, normalize_symbol
 
 
@@ -44,23 +46,34 @@ class SyntheticAdapter(BaseDataProvider):
         "NVDA": 125.0,
         "TSLA": 210.0,
         "MSFT": 440.0,
-        "BTC": 65000.0,
+        "BTC": get_estimated_price("BTC"),
     }
 
     def format_symbol(self, symbol: str) -> str:
         """Format symbol to canonical BASE/QUOTE for synthetic generator."""
         return normalize_symbol(symbol)
 
+    def validate_symbol(self, symbol: str) -> str:
+        """Validate symbol exists in the synthetic asset registry."""
+        normalized = normalize_symbol(symbol)
+        base = normalized.split("/")[0]
+        if base not in self.DEFAULT_BASE_PRICES:
+            raise ValueError(
+                f"Symbol {normalized!r} not in synthetic asset registry. "
+                f"Known assets: {', '.join(sorted(self.DEFAULT_BASE_PRICES))}"
+            )
+        return normalized
+
     def get_initial_price(self, symbol: str, start_price: float | None = None) -> float:
         """Resolve initial starting price for a given asset symbol."""
-        if start_price is not None and start_price != 65000.0:
+        if start_price is not None and start_price != get_estimated_price("BTC"):
             return float(start_price)
 
         sym_upper = symbol.upper()
         for token, price in self.DEFAULT_BASE_PRICES.items():
             if token in sym_upper:
                 return price
-        return 65000.0
+        return get_estimated_price("BTC")
 
     def generate_candles(
         self,
@@ -144,10 +157,13 @@ class SyntheticAdapter(BaseDataProvider):
         self,
         symbol: str = "BTC/USD",
         timeframe: str = "5m",
-        days: int = 180,
+        days: int | None = None,
         limit: int | None = None,
     ) -> pd.DataFrame:
         """Fetch historical candles via synthetic simulation."""
+        if days is None:
+            days = get_optimal_lookback_days(timeframe, "crypto")
+
         tf_seconds_map = {
             "1m": 60,
             "3m": 180,

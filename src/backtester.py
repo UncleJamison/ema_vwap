@@ -13,6 +13,8 @@ from src.config import StrategyParams
 from src.risk_manager import RiskManager
 from src.strategy import EmaVwapStrategy
 
+_MIN_CALMAR_PERIOD_SECONDS = 90 * 24 * 60 * 60
+
 
 def dynamic_round_price(price: float) -> float:
     """Preserve exact float precision up to 10 decimal places for micro-cap tokens (BONK, SHIB, PEPE)."""
@@ -92,17 +94,78 @@ class BacktestResult:
 class BacktestEngine:
     """Executes event-driven backtesting loop over DataFrame candles."""
 
-    def __init__(self, params: StrategyParams):
+    def __init__(
+        self,
+        params: StrategyParams,
+        precomputed_indicators: pd.DataFrame | None = None,
+    ):
         self.params = params
         self.strategy = EmaVwapStrategy(params)
         self.risk_manager = RiskManager(params)
+        self.precomputed_indicators = precomputed_indicators
+
+    def _calculate_transaction_fee(
+        self, units: float, price: float, is_stock: bool, is_sell: bool
+    ) -> float:
+        """Calculate transaction commission and applicable stock sell-side fees."""
+        base_fee = units * price * (self.params.taker_fee_pct / 100.0)
+        if not is_stock or not is_sell:
+            return base_fee
+
+        sec_fee = (units * price) * (
+            getattr(self.params, "sec_fee_per_million", 27.80) / 1_000_000.0
+        )
+        finra_fee = min(
+            8.30,
+            units * getattr(self.params, "finra_taf_per_share", 0.000166),
+        )
+        return base_fee + sec_fee + finra_fee
+
+    def _finalize_trade(
+        self,
+        trade: Trade,
+        exit_price: float,
+        exit_time: str,
+        exit_reason: str,
+        duration_bars: int,
+        is_stock: bool,
+    ) -> float:
+        """Record lifecycle PnL and return the exit cash flow for portfolio equity."""
+        if trade.side == 1:
+            raw_pnl = (exit_price - trade.entry_price) * trade.units
+        else:
+            raw_pnl = (trade.entry_price - exit_price) * trade.units
+
+        exit_fee = self._calculate_transaction_fee(
+            units=trade.units,
+            price=exit_price,
+            is_stock=is_stock,
+            is_sell=trade.side == 1,
+        )
+        portfolio_pnl = raw_pnl - exit_fee
+        trade_pnl = portfolio_pnl - trade.fee
+        trade.exit_time = exit_time
+        trade.exit_price = dynamic_round_price(exit_price)
+        trade.exit_reason = exit_reason
+        trade.pnl = round(trade_pnl, 2)
+        trade.pnl_pct = (
+            round((trade_pnl / trade.position_value_usd) * 100.0, 2)
+            if trade.position_value_usd > 0
+            else 0.0
+        )
+        trade.fee = round(trade.fee + exit_fee, 2)
+        trade.duration_bars = duration_bars
+        return portfolio_pnl
 
     def run(self, df: pd.DataFrame, warmup_bars: int = 0) -> BacktestResult:
         """Run backtest on provided OHLCV candles DataFrame with optional warmup bars."""
         if "signal" in df.columns and "vwap" in df.columns and "atr" in df.columns:
             df_signals = df.copy()
         else:
-            df_signals = self.strategy.generate_signals(df)
+            df_signals = self.strategy.generate_signals(
+                df,
+                precomputed_indicators=self.precomputed_indicators,
+            )
         if warmup_bars > 0 and len(df_signals) > warmup_bars:
             df_signals = df_signals.iloc[warmup_bars:].reset_index(drop=True)
 
@@ -114,7 +177,6 @@ class BacktestEngine:
         trade_counter = 0
         entry_bar_index = 0
 
-        taker_fee = self.params.taker_fee_pct / 100.0
         slippage = self.params.slippage_pct / 100.0
 
         n_bars = len(df_signals)
@@ -132,6 +194,10 @@ class BacktestEngine:
                 max_drawdown_pct=0.0,
                 sharpe_ratio=0.0,
                 sortino_ratio=0.0,
+                calmar_ratio=0.0,
+                drawdown_penalized_sharpe=0.0,
+                drawdown_penalized_sortino=0.0,
+                ulcer_index=0.0,
                 avg_trade_pnl=0.0,
                 avg_win=0.0,
                 avg_loss=0.0,
@@ -153,7 +219,9 @@ class BacktestEngine:
         highs = df_signals["high"].to_numpy(dtype=float)
         lows = df_signals["low"].to_numpy(dtype=float)
         closes = df_signals["close"].to_numpy(dtype=float)
-        signals = df_signals["signal"].to_numpy(dtype=int)
+        source_signals = df_signals["signal"].to_numpy(dtype=int)
+        signals = np.zeros_like(source_signals)
+        signals[1:] = source_signals[:-1]
         vwaps = df_signals["vwap"].to_numpy(dtype=float)
         atrs = df_signals["atr"].to_numpy(dtype=float)
 
@@ -169,131 +237,58 @@ class BacktestEngine:
             high = highs[i]
             low = lows[i]
             close = closes[i]
-            signal = signals[i]
-            vwap = vwaps[i]
             atr = atrs[i]
+            signal = signals[i]
+            signal_vwap = vwaps[i - 1] if i > 0 else 0.0
+            signal_atr = atrs[i - 1] if i > 0 else 0.0
+            allow_entry = active_trade is None
 
-            # Process open trade
+            # Opening gaps and close-derived reversal signals execute at the open.
             if active_trade is not None:
                 side = active_trade.side
                 units = active_trade.units
                 stop_loss = active_trade.stop_loss
                 take_profit = active_trade.take_profit
                 entry_price = active_trade.entry_price
+                exit_reason = None
+                exit_price = open_p
 
-                exited = False
-                exit_price = close
-                exit_reason = ""
-
-                # Check Overnight Gaps and Stop Loss / Take Profit triggers
                 if side == 1:  # Long position
                     if open_p <= stop_loss:
-                        # Overnight gap down below stop loss fills at open price
-                        exited = True
                         exit_price = open_p * (1.0 - slippage)
                         exit_reason = "gap_stop_loss"
                     elif open_p >= take_profit:
-                        # Overnight gap up above take profit fills at open price
-                        exited = True
                         exit_price = open_p * (1.0 - slippage)
                         exit_reason = "gap_take_profit"
-                    elif low <= stop_loss:
-                        exited = True
-                        exit_price = stop_loss * (1.0 - slippage)
-                        exit_reason = "stop_loss"
-                    elif high >= take_profit:
-                        exited = True
-                        exit_price = take_profit * (1.0 - slippage)
-                        exit_reason = "take_profit"
                     elif signal == -1:  # Signal reversal
-                        exited = True
-                        exit_price = close * (1.0 - slippage)
+                        exit_price = open_p * (1.0 - slippage)
                         exit_reason = "signal_reversal"
                 elif side == -1:  # Short position
                     if open_p >= stop_loss:
-                        # Overnight gap up above stop loss fills at open price
-                        exited = True
                         exit_price = open_p * (1.0 + slippage)
                         exit_reason = "gap_stop_loss"
                     elif open_p <= take_profit:
-                        # Overnight gap down below take profit fills at open price
-                        exited = True
                         exit_price = open_p * (1.0 + slippage)
                         exit_reason = "gap_take_profit"
-                    elif high >= stop_loss:
-                        exited = True
-                        exit_price = stop_loss * (1.0 + slippage)
-                        exit_reason = "stop_loss"
-                    elif low <= take_profit:
-                        exited = True
-                        exit_price = take_profit * (1.0 + slippage)
-                        exit_reason = "take_profit"
                     elif signal == 1:  # Signal reversal
-                        exited = True
-                        exit_price = close * (1.0 + slippage)
+                        exit_price = open_p * (1.0 + slippage)
                         exit_reason = "signal_reversal"
 
-                # Max holding bars time-based exit (checked after SL/TP/reversal)
-                if not exited and self.params.max_holding_bars is not None:
-                    if (i - entry_bar_index) >= self.params.max_holding_bars:
-                        exited = True
-                        exit_price = close
-                        exit_reason = "timeout"
-
-                if exited:
-                    if side == 1:
-                        raw_pnl = (exit_price - entry_price) * units
-                    else:
-                        raw_pnl = (entry_price - exit_price) * units
-
-                    # Calculate commission and regulatory fees
-                    base_exit_fee = (units * exit_price) * taker_fee
-                    regulatory_fee = 0.0
-                    if is_stock:
-                        # SEC Section 31 fee on sells ($27.80 per million)
-                        sec_fee = (units * exit_price) * (
-                            getattr(self.params, "sec_fee_per_million", 27.80)
-                            / 1_000_000.0
-                        )
-                        # FINRA TAF fee ($0.000166 per share, max $8.30)
-                        finra_fee = min(
-                            8.30,
-                            units
-                            * getattr(self.params, "finra_taf_per_share", 0.000166),
-                        )
-                        regulatory_fee = sec_fee + finra_fee
-
-                    exit_fee = base_exit_fee + regulatory_fee
-                    total_trade_fee = active_trade.fee + exit_fee
-                    net_pnl = raw_pnl - exit_fee
-                    pnl_pct = (
-                        (net_pnl / active_trade.position_value_usd) * 100.0
-                        if active_trade.position_value_usd > 0
-                        else 0.0
+                if exit_reason is not None:
+                    equity += self._finalize_trade(
+                        active_trade,
+                        exit_price,
+                        timestamp_str,
+                        exit_reason,
+                        i - entry_bar_index,
+                        is_stock,
                     )
-
-                    active_trade.exit_time = timestamp_str
-                    active_trade.exit_price = dynamic_round_price(exit_price)
-                    active_trade.exit_reason = exit_reason
-                    active_trade.pnl = round(net_pnl, 2)
-                    active_trade.pnl_pct = round(pnl_pct, 2)
-                    active_trade.fee = round(total_trade_fee, 2)
-                    active_trade.duration_bars = i - entry_bar_index
-
-                    equity += net_pnl
                     trades.append(active_trade)
                     active_trade = None
+                    allow_entry = exit_reason == "signal_reversal"
 
-                # A trailing stop derived from this candle's close can only
-                # protect subsequent candles; checking it before this candle's
-                # high/low would use future intrabar information.
-                if active_trade is not None and self.params.stop_loss_type == "atr":
-                    active_trade.stop_loss = self.risk_manager.update_trailing_stop(
-                        side=side, current_price=close, current_stop=stop_loss, atr=atr
-                    )
-
-            # Open new trade if no position is active and signal exists
-            if active_trade is None and signal in (1, -1):
+            # Fill eligible signals at this bar's open, using only prior-close indicators.
+            if active_trade is None and allow_entry and signal in (1, -1):
                 can_enter = True
                 side = int(signal)
 
@@ -309,28 +304,27 @@ class BacktestEngine:
 
                 # Intraday Margin Monitoring (4:1 longs, 2:1 shorts based on maintenance margin excess)
                 if can_enter and enforce_margin_calls and is_stock:
-                    # Check minimum equity requirement and real-time buying power constraints
                     if equity < min_margin_equity:
-                        can_enter = False  # Auto-liquidation triggered
+                        can_enter = False
                     else:
-                        # Calculate available buying power based on side
                         bp_ratio = long_bp_ratio if side == 1 else short_bp_ratio
                         available_bp = equity * bp_ratio
-                        # Rough position check (more refined margin monitoring would include maintenance requirements)
-                        position_cost = abs(close * self.params.position_size)
+                        position_cost = abs(open_p * self.params.position_size)
                         if position_cost > available_bp:
-                            can_enter = False  # Insufficient margin
+                            can_enter = False
 
                 if can_enter:
-                    side = int(signal)
                     if side == 1:
-                        entry_price = close * (1.0 + slippage)
+                        entry_price = open_p * (1.0 + slippage)
                     else:
-                        entry_price = close * (1.0 - slippage)
+                        entry_price = open_p * (1.0 - slippage)
 
                     stop_loss, take_profit = (
                         self.risk_manager.calculate_stop_and_target(
-                            entry_price=entry_price, side=side, vwap=vwap, atr=atr
+                            entry_price=entry_price,
+                            side=side,
+                            vwap=signal_vwap,
+                            atr=signal_atr,
                         )
                     )
 
@@ -344,10 +338,20 @@ class BacktestEngine:
                     units = dynamic_round_units(units)
                     val_usd = units * entry_price
 
-                    if units > 0 and val_usd <= equity * 3.0:  # Cap max leverage at 3x
+                    max_position_value = equity * 3.0
+                    if is_stock and enforce_margin_calls:
+                        bp_ratio = long_bp_ratio if side == 1 else short_bp_ratio
+                        max_position_value = min(max_position_value, equity * bp_ratio)
+
+                    if units > 0 and val_usd <= max_position_value:
                         trade_counter += 1
                         entry_bar_index = i
-                        entry_fee = val_usd * taker_fee
+                        entry_fee = self._calculate_transaction_fee(
+                            units=units,
+                            price=entry_price,
+                            is_stock=is_stock,
+                            is_sell=side == -1,
+                        )
                         equity -= entry_fee
 
                         active_trade = Trade(
@@ -359,8 +363,96 @@ class BacktestEngine:
                             position_value_usd=round(val_usd, 2),
                             stop_loss=dynamic_round_price(stop_loss),
                             take_profit=dynamic_round_price(take_profit),
-                            fee=round(entry_fee, 2),
+                            fee=entry_fee,
                         )
+
+            # Evaluate stop/target levels after the bar-open fill; stop wins if both touch.
+            if active_trade is not None:
+                side = active_trade.side
+                exit_price = close
+                exit_reason = None
+
+                if side == 1:
+                    if low <= active_trade.stop_loss:
+                        exit_price = active_trade.stop_loss * (1.0 - slippage)
+                        exit_reason = "stop_loss"
+                    elif high >= active_trade.take_profit:
+                        exit_price = active_trade.take_profit * (1.0 - slippage)
+                        exit_reason = "take_profit"
+                else:
+                    if high >= active_trade.stop_loss:
+                        exit_price = active_trade.stop_loss * (1.0 + slippage)
+                        exit_reason = "stop_loss"
+                    elif low <= active_trade.take_profit:
+                        exit_price = active_trade.take_profit * (1.0 + slippage)
+                        exit_reason = "take_profit"
+
+                if (
+                    exit_reason is None
+                    and self.params.max_holding_bars is not None
+                    and (i - entry_bar_index) >= self.params.max_holding_bars
+                ):
+                    exit_price = close * (
+                        1.0 - slippage if side == 1 else 1.0 + slippage
+                    )
+                    exit_reason = "timeout"
+
+                if exit_reason is None and enforce_margin_calls and is_stock:
+                    margin_exit_price = close * (
+                        1.0 - slippage if side == 1 else 1.0 + slippage
+                    )
+                    if side == 1:
+                        margin_raw_pnl = (
+                            margin_exit_price - active_trade.entry_price
+                        ) * active_trade.units
+                    else:
+                        margin_raw_pnl = (
+                            active_trade.entry_price - margin_exit_price
+                        ) * active_trade.units
+                    margin_exit_fee = self._calculate_transaction_fee(
+                        units=active_trade.units,
+                        price=margin_exit_price,
+                        is_stock=is_stock,
+                        is_sell=side == 1,
+                    )
+                    projected_equity = equity + margin_raw_pnl - margin_exit_fee
+                    if projected_equity < min_margin_equity:
+                        exit_price = margin_exit_price
+                        exit_reason = "margin_call"
+
+                if exit_reason is not None:
+                    equity += self._finalize_trade(
+                        active_trade,
+                        exit_price,
+                        timestamp_str,
+                        exit_reason,
+                        i - entry_bar_index,
+                        is_stock,
+                    )
+                    trades.append(active_trade)
+                    active_trade = None
+
+            # A trailing stop derived from this candle's close protects later bars only.
+            if active_trade is not None:
+                side = active_trade.side
+                unrealized_pct = 0.0
+                if active_trade.entry_price > 0:
+                    unrealized_pct = (
+                        (close - active_trade.entry_price)
+                        / active_trade.entry_price
+                        * 100
+                        if side == 1
+                        else (active_trade.entry_price - close)
+                        / active_trade.entry_price
+                        * 100
+                    )
+                if unrealized_pct > 0 and active_trade.stop_loss is not None:
+                    active_trade.stop_loss = self.risk_manager.update_trailing_stop(
+                        side=side,
+                        current_price=close,
+                        current_stop=active_trade.stop_loss,
+                        atr=atr,
+                    )
 
             # Record mark-to-market equity
             mtm_pnl = 0.0
@@ -371,38 +463,28 @@ class BacktestEngine:
                     mtm_pnl = (active_trade.entry_price - close) * active_trade.units
 
             current_equity = equity + mtm_pnl
-            equity_curve.append(
-                {"timestamp": timestamp_str, "equity": round(current_equity, 2)}
-            )
+            # Collect flat tuples in-loop; dict construction happens once after the
+            # loop (ema_vwap-27kv) — cheaper than building a dict per bar.
+            equity_curve.append((timestamp_str, current_equity))
 
         # Close any remaining position at end of backtest data
         if active_trade is not None:
             last_close = closes[-1]
-            if active_trade.side == 1:
-                exit_price = last_close * (1.0 - slippage)
-            else:
-                exit_price = last_close * (1.0 + slippage)
-            if active_trade.side == 1:
-                raw_pnl = (exit_price - active_trade.entry_price) * active_trade.units
-            else:
-                raw_pnl = (active_trade.entry_price - exit_price) * active_trade.units
-
-            exit_fee = (active_trade.units * exit_price) * taker_fee
-            net_pnl = raw_pnl - exit_fee
-            active_trade.exit_time = timestamps[-1]
-            active_trade.exit_price = dynamic_round_price(exit_price)
-            active_trade.exit_reason = "end_of_data"
-            active_trade.pnl = round(net_pnl, 2)
-            active_trade.fee = round(active_trade.fee + exit_fee, 2)
-            active_trade.duration_bars = n_bars - 1 - entry_bar_index
-            equity += net_pnl
+            exit_price = last_close * (
+                1.0 - slippage if active_trade.side == 1 else 1.0 + slippage
+            )
+            equity += self._finalize_trade(
+                active_trade,
+                exit_price,
+                timestamps[-1],
+                "end_of_data",
+                n_bars - 1 - entry_bar_index,
+                is_stock,
+            )
             trades.append(active_trade)
             # Replace the last mark-to-market point with realized end-of-data
             # equity so analytics and final_equity describe the same curve.
-            equity_curve[-1] = {
-                "timestamp": timestamps[-1],
-                "equity": round(equity, 2),
-            }
+            equity_curve[-1] = (str(timestamps[-1]), equity)
 
         # Basic Performance Metrics
         total_trades = len(trades)
@@ -472,18 +554,32 @@ class BacktestEngine:
             for k, v in sorted(monthly_map.items())
         ]
 
-        # Max Drawdown
-        eq_series = pd.Series([point["equity"] for point in equity_curve])
-        if len(eq_series) > 0:
-            peak = eq_series.cummax()
-            drawdown = (peak - eq_series) / peak
-            max_drawdown_pct = float(drawdown.max() * 100.0)
-        else:
-            max_drawdown_pct = 0.0
+        # Convert flat tuples to the public dict format (ema_vwap-27kv)
+        equity_curve = [
+            {"timestamp": ts, "equity": round(eq, 2)} for ts, eq in equity_curve
+        ]
+
+        # Keep the opening balance in metric calculations without changing chart output.
+        eq_series = pd.Series([point["equity"] for point in equity_curve], dtype=float)
+        metric_equity = pd.concat(
+            [pd.Series([capital], dtype=float), eq_series], ignore_index=True
+        )
+        peak = metric_equity.cummax()
+        drawdown = (peak - metric_equity).div(peak.where(peak > 0)).fillna(0.0)
+        max_drawdown_pct = float(drawdown.max() * 100.0)
 
         # Sharpe Ratio
-        if len(eq_series) > 1:
-            returns = eq_series.pct_change().dropna()
+        elapsed_seconds = 0.0
+        periods_per_year = 252 * 6.5 * 12 if is_stock else 288 * 365
+        if len(metric_equity) > 1:
+            previous_equity = metric_equity.shift()
+            returns = (
+                metric_equity.div(previous_equity)
+                .sub(1.0)
+                .where(previous_equity > 0)
+                .replace([np.inf, -np.inf], np.nan)
+                .dropna()
+            )
             std_ret = returns.std()
             try:
                 timestamp_series = pd.to_datetime(
@@ -493,34 +589,50 @@ class BacktestEngine:
                 timestamp_series = pd.to_datetime(df_signals["timestamp"], utc=True)
             median_interval = timestamp_series.diff().dropna().median()
             if pd.notna(median_interval) and median_interval.total_seconds() > 0:
-                periods_per_year = pd.Timedelta(days=365) / median_interval
-            else:
-                periods_per_year = 288 * 365
+                interval_seconds = median_interval.total_seconds()
+                if is_stock:
+                    session_seconds = (
+                        24 * 60 * 60
+                        if median_interval >= pd.Timedelta(hours=12)
+                        else 6.5 * 60 * 60
+                    )
+                    periods_per_year = 252 * session_seconds / interval_seconds
+                else:
+                    periods_per_year = 365 * 24 * 60 * 60 / interval_seconds
+            elapsed_seconds = (
+                timestamp_series.iloc[-1] - timestamp_series.iloc[0]
+            ).total_seconds()
             sharpe_ratio = (
                 float((returns.mean() / std_ret) * np.sqrt(periods_per_year))
-                if std_ret > 0
+                if pd.notna(std_ret) and std_ret > 0
                 else 0.0
             )
-            # Sortino Ratio (Downside deviation risk)
-            downside_returns = returns[returns < 0]
-            downside_std = downside_returns.std()
-            if len(downside_returns) > 0 and downside_std > 0:
+            # Sortino downside deviation is the RMS of all returns below the target.
+            downside_deviation = float(np.sqrt(np.square(returns.clip(upper=0)).mean()))
+            if downside_deviation > 0:
                 sortino_ratio = float(
-                    (returns.mean() / downside_std) * np.sqrt(periods_per_year)
+                    (returns.mean() / downside_deviation) * np.sqrt(periods_per_year)
                 )
             else:
-                sortino_ratio = sharpe_ratio if sharpe_ratio > 0 else 0.0
+                sortino_ratio = 0.0
         else:
             sharpe_ratio = 0.0
             sortino_ratio = 0.0
 
-        # Calmar Ratio (Total Return / Max Drawdown)
-        if max_drawdown_pct > 0.05:
-            calmar_ratio = float(total_return_pct / max_drawdown_pct)
+        # Calmar uses annualized geometric return divided by fractional max drawdown.
+        if (
+            capital > 0
+            and equity > 0
+            and elapsed_seconds > 0
+            and elapsed_seconds >= _MIN_CALMAR_PERIOD_SECONDS
+            and max_drawdown_pct > 0
+        ):
+            annualized_return = (equity / capital) ** (
+                (365 * 24 * 60 * 60) / elapsed_seconds
+            ) - 1.0
+            calmar_ratio = float(annualized_return / (max_drawdown_pct / 100.0))
         else:
-            calmar_ratio = (
-                float(total_return_pct / 0.1) if total_return_pct > 0 else 0.0
-            )
+            calmar_ratio = 0.0
 
         # Drawdown-Penalized Sharpe (Smooth returns with heavy tail-risk penalty)
         if max_drawdown_pct > 0:
@@ -535,7 +647,7 @@ class BacktestEngine:
             drawdown_penalized_sharpe = float(sharpe_ratio)
 
         # Drawdown-Penalized Sortino (Sortino ratio adjusted for drawdown severity)
-        if len(eq_series) > 1 and max_drawdown_pct > 0:
+        if len(metric_equity) > 1 and max_drawdown_pct > 0:
             dd_penalty = max(0.0, 1.0 - (max_drawdown_pct / 50.0))
             drawdown_penalized_sortino = float(sortino_ratio * dd_penalty)
         else:
@@ -543,9 +655,8 @@ class BacktestEngine:
 
         # Ulcer Index: sqrt(mean of (drawdown_pct)^2 at each peak)
         # Measures depth and duration of peak-to-trough declines
-        if len(eq_series) > 1:
-            peak = eq_series.cummax()
-            drawdown_pct = ((peak - eq_series) / peak) * 100.0
+        if len(metric_equity) > 1:
+            drawdown_pct = drawdown * 100.0
             ulcer_index = float(np.sqrt(np.mean(drawdown_pct**2)))
         else:
             ulcer_index = 0.0

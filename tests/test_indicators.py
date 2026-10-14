@@ -4,12 +4,13 @@ Unit tests for Technical Indicators Engine.
 
 import pandas as pd
 
-from src.config import StrategyParams
+from src.config import StrategyParams, get_vwap_slope_bounds
 from src.data_loader import DataLoader
 from src.indicators import (
     compute_all_indicators,
     compute_atr,
     compute_ema,
+    compute_slope_bounds_from_df,
     compute_vwap,
     compute_vwap_slope,
 )
@@ -59,3 +60,57 @@ def test_compute_all_indicators():
     assert "vwap_slope" in df_ind.columns
     assert "atr" in df_ind.columns
     assert "rvol" in df_ind.columns
+
+
+def test_compute_slope_bounds_from_df_normal():
+    """Derives live p01 and p95 bounds from synthetic candle data when samples >= min_samples."""
+    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=42)
+    bounds = compute_slope_bounds_from_df(df, timeframe="5m", min_samples=50)
+
+    assert "vwap_slope_min" in bounds
+    assert "vwap_slope_max" in bounds
+    assert isinstance(bounds["vwap_slope_min"], float)
+    assert isinstance(bounds["vwap_slope_max"], float)
+    assert bounds["vwap_slope_min"] >= 1e-7
+    assert bounds["vwap_slope_max"] <= 0.5
+    assert bounds["vwap_slope_max"] > bounds["vwap_slope_min"]
+
+
+def test_compute_slope_bounds_from_df_fallback_insufficient_samples():
+    """Falls back to static get_vwap_slope_bounds when df has fewer than min_samples valid slope values."""
+    df = DataLoader.generate_synthetic_candles(num_bars=30, seed=42)
+    static_expected = get_vwap_slope_bounds("15m")
+    bounds = compute_slope_bounds_from_df(df, timeframe="15m", min_samples=100)
+
+    assert bounds == static_expected
+
+
+def test_compute_slope_bounds_from_df_empty_or_none():
+    """Returns static fallback safely without exception when df is empty or None."""
+    static_expected = get_vwap_slope_bounds("1h")
+    assert (
+        compute_slope_bounds_from_df(pd.DataFrame(), timeframe="1h") == static_expected
+    )
+    assert compute_slope_bounds_from_df(None, timeframe="1h") == static_expected
+
+
+def test_compute_slope_bounds_from_df_existing_vwap_column():
+    """Reuses existing vwap column in df when present instead of recomputing."""
+    df = DataLoader.generate_synthetic_candles(num_bars=250, seed=123)
+    df["vwap"] = compute_vwap(df)
+    bounds = compute_slope_bounds_from_df(df, timeframe="5m", min_samples=50)
+
+    assert bounds["vwap_slope_max"] > bounds["vwap_slope_min"]
+
+
+def test_compute_slope_bounds_from_df_flat_prices():
+    """When all prices are flat (all slopes are zero/filtered), safely falls back to static bounds."""
+    df = DataLoader.generate_synthetic_candles(num_bars=200, seed=42)
+    df["close"] = 100.0
+    df["high"] = 100.0
+    df["low"] = 100.0
+    df["open"] = 100.0
+    static_expected = get_vwap_slope_bounds("5m")
+    bounds = compute_slope_bounds_from_df(df, timeframe="5m", min_samples=50)
+
+    assert bounds == static_expected

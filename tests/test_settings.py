@@ -15,7 +15,7 @@ def test_secret_masking_format():
 
 
 def test_settings_manager_crud_and_masking(tmp_path):
-    db_file = os.path.join(tmp_path, "test_settings.db")
+    db_file = os.path.join(tmp_path, "system_test_settings.db")
     db = CandleDatabase(db_path=db_file)
     mgr = SettingsManager(db=db)
 
@@ -34,7 +34,7 @@ def test_settings_manager_crud_and_masking(tmp_path):
 
 
 def test_settings_manager_bulk_update_skips_placeholders(tmp_path):
-    db_file = os.path.join(tmp_path, "test_settings_bulk.db")
+    db_file = os.path.join(tmp_path, "system_test_settings_bulk.db")
     db = CandleDatabase(db_path=db_file)
     mgr = SettingsManager(db=db)
 

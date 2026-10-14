@@ -11,6 +11,27 @@ window._validationReportCache = {};
 window._validationContextCache = {};
 window._activeValidationContext = null;
 
+// Toast notification system (non-blocking)
+function showToast(message, type = "info", duration = 3500) {
+  let toast = document.getElementById("global-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "global-toast";
+    toast.style.cssText = "position:fixed;top:16px;right:16px;z-index:9999;padding:12px 20px;border-radius:10px;font-size:0.82rem;font-weight:600;color:#fff;pointer-events:auto;max-width:420px;box-shadow:0 6px 30px rgba(0,0,0,0.45);opacity:0;transform:translateY(-8px);transition:opacity 0.25s,transform 0.25s;";
+    document.body.appendChild(toast);
+  }
+  const bg = type === "success" ? "#10b981" : type === "warn" ? "#f59e0b" : type === "error" ? "#ef4444" : "#0ea5e9";
+  toast.style.background = bg;
+  toast.textContent = message;
+  toast.style.opacity = "1";
+  toast.style.transform = "translateY(0)";
+  clearTimeout(toast._timeout);
+  toast._timeout = setTimeout(() => {
+    toast.style.opacity = "0";
+    toast.style.transform = "translateY(-8px)";
+  }, duration);
+}
+
 // Default System & Strategy Settings
 const DEFAULT_SETTINGS = {
   maker_fee_pct: 0.05,
@@ -24,8 +45,10 @@ const DEFAULT_SETTINGS = {
   trend_ema_max: 250,
   volume_multiplier_min: 0.8,
   volume_multiplier_max: 3.5,
-  atr_multiplier_min: 1.0,
-  atr_multiplier_max: 6.0,
+  atr_multiplier_min: 2.0,
+  atr_multiplier_max: 5.0,
+  trailing_stop_min: 1.0,
+  trailing_stop_max: 3.0,
   risk_reward_min: 1.0,
   risk_reward_max: 6.0,
   vwap_slope_max_bound: 0.003,
@@ -41,14 +64,18 @@ const DEFAULT_SETTINGS = {
     val_wf_efficiency: 50,
     val_profitable_windows: 50,
     val_min_oos_return: 0.0,
+    val_trials: 250,
+    val_rigor_preset: "standard",
     val_max_ruin: 5.0,
     val_max_mc_drawdown: 35.0,
   mc_sims: 500,
   confidence_levels: [5.0, 50.0, 95.0],
   val_max_ruin: 5.0,
     default_capital: 10000,
-  default_risk_pct: 1.0,
-  // Crypto Exchange Credentials
+    default_risk_pct: 1.0,
+    min_warmup_bars: 250,
+    market_hours: "crypto_24_7",
+    // Crypto Exchange Credentials
   gemini_api_key: "",
   gemini_secret_key: "",
   gemini_sandbox: true,
@@ -65,14 +92,58 @@ const DEFAULT_SETTINGS = {
   alpaca_paper: true,
   polygon_api_key: "",
   tiingo_api_token: "",
+  // Administrator API Auth
+  app_api_key: "",
 };
+
+// Cached settings for synchronous access (populated at startup)
+let cachedSettings = { ...DEFAULT_SETTINGS };
+let cachedSettingsLoaded = false;
+
+
+// Sensitive fields that should NOT be stored in localStorage
+const SENSITIVE_FIELDS = new Set([
+  "app_api_key",
+  "gemini_api_key", "gemini_secret_key",
+  "kucoin_api_key", "kucoin_secret_key", "kucoin_passphrase",
+  "robinhood_api_key", "robinhood_private_key",
+  "alpaca_api_key_id", "alpaca_secret_key",
+  "polygon_api_key", "tiingo_api_token",
+]);
+
+async function loadSensitiveSettings() {
+  console.log('[DEBUG] loadSensitiveSettings ENTERED');
+  try {
+    const headers = getAuthHeaders();
+    console.log('[DEBUG] loadSensitiveSettings headers:', headers);
+    const resp = await fetch("/api/settings/sensitive", { headers });
+    console.log('[DEBUG] loadSensitiveSettings response:', resp.status, resp.statusText);
+    if (resp.ok) {
+      const sensitive = await resp.json();
+      console.log('[DEBUG] loadSensitiveSettings data:', sensitive);
+      cachedSettings = { ...cachedSettings, ...sensitive };
+      cachedSettingsLoaded = true;
+    } else {
+      const errText = await resp.text();
+      console.warn('[DEBUG] loadSensitiveSettings error body:', errText);
+    }
+  } catch (e) {
+    console.error("[DEBUG] loadSensitiveSettings CAUGHT ERROR:", e, e.message, e.stack);
+  }
+}
 
 function getSettings() {
   try {
     const saved = localStorage.getItem("ema_vwap_settings");
+    let settings = { ...DEFAULT_SETTINGS };
     if (saved) {
-      return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+      settings = { ...settings, ...JSON.parse(saved) };
     }
+    // Merge in sensitive settings from the startup cache (loaded once from backend)
+    settings = { ...settings, ...Object.fromEntries(Object.entries(cachedSettings).filter(([k]) => SENSITIVE_FIELDS.has(k))) };
+    cachedSettings = { ...cachedSettings, ...settings };
+    cachedSettingsLoaded = true;
+    return settings;
   } catch (e) {
     console.warn("Could not load settings from localStorage:", e);
   }
@@ -81,7 +152,27 @@ function getSettings() {
 
 function saveSettings(settings) {
   try {
-    localStorage.setItem("ema_vwap_settings", JSON.stringify(settings));
+    // Filter out sensitive fields before saving to localStorage
+    const safeSettings = { ...settings };
+    for (const key of SENSITIVE_FIELDS) {
+      delete safeSettings[key];
+    }
+    localStorage.setItem("ema_vwap_settings", JSON.stringify(safeSettings));
+    
+    // Send sensitive settings to backend
+    const sensitiveSettings = {};
+    for (const key of SENSITIVE_FIELDS) {
+      if (settings[key] !== undefined && settings[key] !== "") {
+        sensitiveSettings[key] = settings[key];
+      }
+    }
+    if (Object.keys(sensitiveSettings).length > 0) {
+      fetch("/api/settings/sensitive", {
+        method: "POST",
+        headers: getAuthHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(sensitiveSettings),
+      }).catch(err => console.warn("Failed to save sensitive settings:", err));
+    }
   } catch (e) {
     console.warn("Could not save settings to localStorage:", e);
   }
@@ -137,6 +228,8 @@ function initSettingsUI() {
     setVal("setting-val-wf-efficiency", s.val_wf_efficiency);
     setVal("setting-val-profitable-windows", s.val_profitable_windows);
     setVal("setting-val-min-oos-return", s.val_min_oos_return);
+    setVal("setting-val-trials", s.val_trials || 250);
+    setVal("setting-val-rigor-preset", s.val_rigor_preset || "standard");
     setVal("setting-val-max-ruin", s.val_max_ruin);
     setVal("setting-val-max-mc-drawdown", s.val_max_mc_drawdown);
     setVal("mc-sims-input", s.mc_sims);
@@ -167,6 +260,7 @@ function initSettingsUI() {
   if (alpacaPaperEl) alpacaPaperEl.checked = s.alpaca_paper !== false;
   setVal("setting-polygon-api-key", s.polygon_api_key || "");
   setVal("setting-tiingo-api-token", s.tiingo_api_token || "");
+  setVal("setting-app-api-key", s.app_api_key || "");
 
   // Asynchronously fetch backend masked settings to hydrate stored server keys
   fetch("/api/settings")
@@ -214,7 +308,10 @@ function setupSettingsModalEvents() {
   const resetBtn = document.getElementById("reset-settings-btn");
 
   if (openBtn && modal) {
-    openBtn.addEventListener("click", () => {
+    openBtn.addEventListener("click", async () => {
+      if (!cachedSettingsLoaded) {
+        await loadSensitiveSettings();
+      }
       initSettingsUI();
       modal.style.display = "flex";
     });
@@ -236,6 +333,9 @@ function setupSettingsModalEvents() {
       const targetId = btn.getAttribute("data-modal-tab");
       const targetContent = document.getElementById(targetId);
       if (targetContent) targetContent.classList.add("active");
+      if (targetId === "settings-tab-db") {
+        loadDatabaseMaintenanceInfo();
+      }
     });
   });
 
@@ -274,6 +374,8 @@ function setupSettingsModalEvents() {
         volume_multiplier_max: getNum("setting-opt-vol-max", DEFAULT_SETTINGS.volume_multiplier_max),
         atr_multiplier_min: getNum("setting-opt-atr-min", DEFAULT_SETTINGS.atr_multiplier_min),
         atr_multiplier_max: getNum("setting-opt-atr-max", DEFAULT_SETTINGS.atr_multiplier_max),
+        trailing_stop_min: getNum("setting-opt-tsl-min", DEFAULT_SETTINGS.trailing_stop_min),
+        trailing_stop_max: getNum("setting-opt-tsl-max", DEFAULT_SETTINGS.trailing_stop_max),
         risk_reward_min: getNum("setting-opt-rr-min", DEFAULT_SETTINGS.risk_reward_min),
         risk_reward_max: getNum("setting-opt-rr-max", DEFAULT_SETTINGS.risk_reward_max),
         vwap_slope_max_bound: getNum("setting-opt-slope-max", DEFAULT_SETTINGS.vwap_slope_max_bound),
@@ -281,21 +383,23 @@ function setupSettingsModalEvents() {
         n_jobs: nJobsVal,
         n_startup_trials: startupVal,
         seed_base_params: seedVal,
-                default_capital: getNum("setting-default-capital", DEFAULT_SETTINGS.default_capital),
-                default_risk_pct: getNum("setting-default-risk", DEFAULT_SETTINGS.default_risk_pct),
-                val_min_sharpe: getNum("setting-val-min-sharpe", DEFAULT_SETTINGS.val_min_sharpe),
-                val_max_drawdown: getNum("setting-val-max-drawdown", DEFAULT_SETTINGS.val_max_drawdown),
-                val_min_return: getNum("setting-val-min-return", DEFAULT_SETTINGS.val_min_return),
-                val_min_trades: getInt("setting-val-min-trades", DEFAULT_SETTINGS.val_min_trades),
-                val_wf_efficiency: getNum("setting-val-wf-efficiency", DEFAULT_SETTINGS.val_wf_efficiency),
-                val_profitable_windows: getNum("setting-val-profitable-windows", DEFAULT_SETTINGS.val_profitable_windows),
-                val_min_oos_return: getNum("setting-val-min-oos-return", DEFAULT_SETTINGS.val_min_oos_return),
-                val_max_ruin: getNum("setting-val-max-ruin", DEFAULT_SETTINGS.val_max_ruin),
-                val_max_mc_drawdown: getNum("setting-val-max-mc-drawdown", DEFAULT_SETTINGS.val_max_mc_drawdown),
-        confidence_levels: [getNum("setting-val-max-ruin", DEFAULT_SETTINGS.confidence_levels[0]), getNum("setting-val-median-mc-drawdown", DEFAULT_SETTINGS.confidence_levels[1])],
+        default_capital: getNum("setting-default-capital", DEFAULT_SETTINGS.default_capital),
+        default_risk_pct: getNum("setting-default-risk", DEFAULT_SETTINGS.default_risk_pct),
+        min_warmup_bars: getInt("setting-min-warmup-bars", DEFAULT_SETTINGS.min_warmup_bars),
+        market_hours: document.getElementById("setting-market-hours")?.value || DEFAULT_SETTINGS.market_hours,
+        val_min_sharpe: getNum("setting-val-min-sharpe", DEFAULT_SETTINGS.val_min_sharpe),
+        val_max_drawdown: getNum("setting-val-max-drawdown", DEFAULT_SETTINGS.val_max_drawdown),
+        val_min_return: getNum("setting-val-min-return", DEFAULT_SETTINGS.val_min_return),
+        val_min_trades: getInt("setting-val-min-trades", DEFAULT_SETTINGS.val_min_trades),
+        val_wf_efficiency: getNum("setting-val-wf-efficiency", DEFAULT_SETTINGS.val_wf_efficiency),
+        val_profitable_windows: getNum("setting-val-profitable-windows", DEFAULT_SETTINGS.val_profitable_windows),
+        val_min_oos_return: getNum("setting-val-min-oos-return", DEFAULT_SETTINGS.val_min_oos_return),
+        val_trials: getInt("setting-val-trials", DEFAULT_SETTINGS.val_trials),
+        val_rigor_preset: document.getElementById("setting-val-rigor-preset")?.value || "standard",
         val_max_ruin: getNum("setting-val-max-ruin", DEFAULT_SETTINGS.val_max_ruin),
-    setting_val_max_ruin: getNum("setting-val-max-ruin", DEFAULT_SETTINGS.val_max_ruin),
-                gemini_api_key: (document.getElementById("setting-gemini-api-key")?.value || "").trim(),
+        val_max_mc_drawdown: getNum("setting-val-max-mc-drawdown", DEFAULT_SETTINGS.val_max_mc_drawdown),
+        confidence_levels: [getNum("setting-val-max-ruin", DEFAULT_SETTINGS.confidence_levels[0]), getNum("setting-val-median-mc-drawdown", DEFAULT_SETTINGS.confidence_levels[1])],
+        gemini_api_key: (document.getElementById("setting-gemini-api-key")?.value || "").trim(),
         gemini_secret_key: (document.getElementById("setting-gemini-secret-key")?.value || "").trim(),
         gemini_sandbox: document.getElementById("setting-gemini-sandbox")?.checked ?? true,
         kucoin_api_key: (document.getElementById("setting-kucoin-api-key")?.value || "").trim(),
@@ -310,6 +414,7 @@ function setupSettingsModalEvents() {
         alpaca_paper: document.getElementById("setting-alpaca-paper")?.checked ?? true,
         polygon_api_key: (document.getElementById("setting-polygon-api-key")?.value || "").trim(),
         tiingo_api_token: (document.getElementById("setting-tiingo-api-token")?.value || "").trim(),
+        app_api_key: (document.getElementById("setting-app-api-key")?.value || "").trim(),
       };
 
       saveSettings(updated);
@@ -317,9 +422,14 @@ function setupSettingsModalEvents() {
       // Persist to backend database
       fetch("/api/settings", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(updated),
       }).catch((err) => console.warn("Could not persist settings to server:", err));
+
+      // Re-initialize WebSocket so it uses the newly saved API key immediately
+      if (typeof initWebSocketDashboard === "function") {
+        initWebSocketDashboard();
+      }
 
       modal.style.display = "none";
       alert("Settings saved successfully.");
@@ -334,9 +444,326 @@ function setupSettingsModalEvents() {
       }
     });
   }
+
+  setupDatabaseMaintenanceEvents();
 }
 
-document.addEventListener("DOMContentLoaded", () => {
+// -------------------------------------------------------------
+// Database Maintenance & Multi-DB Management Handlers
+// -------------------------------------------------------------
+
+function getAuthHeaders(extraHeaders = {}) {
+  const inputKey = document.getElementById("setting-app-api-key")?.value;
+  const key = (inputKey !== undefined && inputKey.trim() !== "" ? inputKey : 
+               (typeof window.BOOTSTRAP_API_KEY !== "undefined" && window.BOOTSTRAP_API_KEY) || 
+               (cachedSettings.app_api_key || "")).trim();
+  const headers = { ...extraHeaders };
+  if (key) {
+    headers["X-API-Key"] = key;
+  }
+  return headers;
+}
+
+function logDbMaintenance(msg, type = "info") {
+  const logEl = document.getElementById("db-maintenance-log");
+  if (!logEl) return;
+  const time = new Date().toLocaleTimeString();
+  const prefix = type === "error" ? "❌ [ERROR]" : type === "warn" ? "⚠️ [WARN]" : "ℹ️ [INFO]";
+  logEl.textContent += `\n[${time}] ${prefix} ${msg}`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0 || bytes === undefined || bytes === null) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+}
+
+async function loadDatabaseMaintenanceInfo() {
+  logDbMaintenance("Inspecting multi-database domain status and file integrity...");
+  try {
+    const res = await fetch("/api/db/info", {
+      headers: getAuthHeaders()
+    });
+    if (res.status === 403) {
+      logDbMaintenance("Authentication failed: HTTP 403 Forbidden. Check your Administrator API Key.", "error");
+      showToast("DB Maintenance: 403 Forbidden. Check API Key.", "error");
+      return;
+    }
+    if (!res.ok) {
+      throw new Error(`Server returned HTTP ${res.status}`);
+    }
+    const json = await res.json();
+    const data = json.data || {};
+    const perDb = data.per_db || {};
+
+    const dbKeys = ["candles", "batch_results", "paper_trading", "system"];
+    dbKeys.forEach((key) => {
+      const dbInfo = perDb[key];
+      const sizeEl = document.getElementById(`val-db-${key}-size`);
+      const recordsEl = document.getElementById(`val-db-${key}-records`);
+      const modeEl = document.getElementById(`val-db-${key}-mode`);
+      const integrityEl = document.getElementById(`val-db-${key}-integrity`);
+      const badgeEl = document.getElementById(`badge-db-${key}`);
+
+      if (!dbInfo || dbInfo.status === "unreachable") {
+        if (sizeEl) sizeEl.textContent = "Unreachable";
+        if (integrityEl) {
+          integrityEl.textContent = "Error";
+          integrityEl.style.color = "#ff007a";
+        }
+        if (badgeEl) {
+          badgeEl.textContent = "ERR";
+          badgeEl.style.background = "rgba(255, 0, 122, 0.2)";
+          badgeEl.style.color = "#ff007a";
+          badgeEl.style.borderColor = "#ff007a";
+        }
+        return;
+      }
+
+      if (sizeEl) sizeEl.textContent = formatBytes(dbInfo.file_size_bytes || 0);
+      if (modeEl) modeEl.textContent = (dbInfo.journal_mode || "delete").toUpperCase();
+
+      let recordDisplay = "--";
+      if (key === "candles") {
+        recordDisplay = (dbInfo.candle_record_count !== undefined)
+          ? Number(dbInfo.candle_record_count).toLocaleString()
+          : (dbInfo.tables ? `${dbInfo.tables.length} tables` : "--");
+      } else if (key === "batch_results") {
+        recordDisplay = dbInfo.tables ? `${dbInfo.tables.length} tables` : "Active";
+      } else if (key === "paper_trading") {
+        recordDisplay = dbInfo.tables ? `${dbInfo.tables.length} tables` : "Active";
+      } else if (key === "system") {
+        recordDisplay = dbInfo.tables ? `${dbInfo.tables.length} tables` : "Active";
+      }
+      if (recordsEl) recordsEl.textContent = recordDisplay;
+
+      const isOk = dbInfo.integrity_check === "ok";
+      if (integrityEl) {
+        integrityEl.textContent = isOk ? "Clean (ok)" : String(dbInfo.integrity_check);
+        integrityEl.style.color = isOk ? "#00f5a0" : "#ff007a";
+      }
+      if (badgeEl) {
+        badgeEl.textContent = isOk ? "OK" : "CORRUPT";
+        badgeEl.style.background = isOk ? "rgba(0, 245, 160, 0.2)" : "rgba(255, 0, 122, 0.2)";
+        badgeEl.style.color = isOk ? "#00f5a0" : "#ff007a";
+        badgeEl.style.borderColor = isOk ? "#00f5a0" : "#ff007a";
+      }
+    });
+
+    logDbMaintenance("All 4 database domains verified. Integrity checks passed.");
+  } catch (err) {
+    logDbMaintenance(`Failed to inspect database health: ${err.message}`, "error");
+  }
+}
+
+async function runDatabaseVacuum() {
+  const btn = document.getElementById("btn-db-vacuum-run");
+  if (btn) btn.disabled = true;
+  logDbMaintenance("Initiating multi-database VACUUM and disk compaction across all domains...");
+  try {
+    const res = await fetch("/api/db/vacuum", {
+      method: "POST",
+      headers: getAuthHeaders({ "Content-Type": "application/json" })
+    });
+    if (res.status === 403) {
+      logDbMaintenance("Vacuum failed: HTTP 403 Forbidden. Check Administrator API Key.", "error");
+      showToast("Vacuum failed: 403 Forbidden", "error");
+      return;
+    }
+    const data = await res.json();
+    if (data.status === "success" || data.status === "partial_failure") {
+      logDbMaintenance(`Vacuum complete: ${data.data?.message || data.status}`);
+      showToast("Database vacuum and compaction completed successfully.", "success");
+      // Small delay to allow DB file handles to settle before re-inspecting
+      await new Promise(r => setTimeout(r, 800));
+      await loadDatabaseMaintenanceInfo();
+    } else {
+      logDbMaintenance(`Vacuum returned status: ${data.status}`, "warn");
+    }
+  } catch (err) {
+    logDbMaintenance(`Vacuum error: ${err.message}`, "error");
+    showToast(`Vacuum error: ${err.message}`, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function runDatabaseRepair() {
+  if (!confirm("Quarantine any corrupted database and rebuild clean SQLite schemas?\n\nThis will isolate malformed database files with a timestamp suffix and recreate intact SQLite tables.")) {
+    return;
+  }
+  const btn = document.getElementById("btn-db-repair-run");
+  if (btn) btn.disabled = true;
+  logDbMaintenance("Initiating database repair & quarantine check across all domains...");
+  try {
+    const res = await fetch("/api/db/repair", {
+      method: "POST",
+      headers: getAuthHeaders({ "Content-Type": "application/json" })
+    });
+    if (res.status === 403) {
+      logDbMaintenance("Repair failed: HTTP 403 Forbidden. Check Administrator API Key.", "error");
+      showToast("Repair failed: 403 Forbidden", "error");
+      return;
+    }
+    const data = await res.json();
+    logDbMaintenance(`Repair finished: ${data.data?.message || data.status}`);
+    if (data.data?.any_quarantined) {
+      logDbMaintenance("⚠️ Notice: One or more corrupt database files were quarantined and re-initialized.", "warn");
+    }
+    showToast("Database integrity inspection and repair finished.", "success");
+    // Small delay to allow DB file handles to settle before re-inspecting
+    await new Promise(r => setTimeout(r, 800));
+    await loadDatabaseMaintenanceInfo();
+  } catch (err) {
+    logDbMaintenance(`Repair error: ${err.message}`, "error");
+    showToast(`Repair error: ${err.message}`, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function exportCandlesData(format = "csv") {
+  const exchange = document.getElementById("db-export-exchange")?.value || "all";
+  const symbol = (document.getElementById("db-export-symbol")?.value || "BTC/USD").trim();
+  const timeframe = document.getElementById("db-export-timeframe")?.value || "5m";
+  const limit = parseInt(document.getElementById("db-export-limit")?.value, 10) || 500;
+
+  const btn = document.getElementById(format === "csv" ? "btn-db-export-csv" : "btn-db-export-json");
+  if (btn) btn.disabled = true;
+
+  logDbMaintenance(`Exporting candles (${format.toUpperCase()}) for ${exchange} / ${symbol} / ${timeframe} (limit: ${limit})...`);
+  try {
+    const params = new URLSearchParams({
+      exchange: exchange,
+      symbol: symbol,
+      timeframe: timeframe,
+      limit: String(limit)
+    });
+    const url = `/api/db/export/${format}?${params.toString()}`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: getAuthHeaders()
+    });
+
+    if (res.status === 403) {
+      logDbMaintenance("Export failed: HTTP 403 Forbidden. Check Administrator API Key.", "error");
+      showToast("Export failed: 403 Forbidden", "error");
+      return;
+    }
+    if (!res.ok) {
+      throw new Error(`Export returned HTTP ${res.status}`);
+    }
+
+    const blob = await res.blob();
+    const cleanSym = symbol.replace("/", "_");
+    const filename = `candles_${exchange}_${cleanSym}_${timeframe}.${format}`;
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = downloadUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(downloadUrl);
+
+    logDbMaintenance(`Candles export downloaded: ${filename} (${blob.size} bytes).`);
+    showToast(`Downloaded ${filename}`, "success");
+  } catch (err) {
+    logDbMaintenance(`Export error: ${err.message}`, "error");
+    showToast(`Export error: ${err.message}`, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function clearCandleCacheFromModal() {
+  if (!confirm("Are you sure you want to clear the local SQLite candle cache?\n\nCached market candles will be deleted from candles.db.")) {
+    return;
+  }
+  const btn = document.getElementById("btn-db-clear-cache-modal");
+  if (btn) btn.disabled = true;
+  logDbMaintenance("Flushing candle cache in candles.db...");
+  try {
+    const res = await fetch("/api/clear_cache", {
+      method: "POST",
+      headers: getAuthHeaders({ "Content-Type": "application/json" })
+    });
+    if (res.status === 403) {
+      logDbMaintenance("Cache clear failed: HTTP 403 Forbidden. Check Administrator API Key.", "error");
+      showToast("Cache clear failed: 403 Forbidden", "error");
+      return;
+    }
+    const data = await res.json();
+    logDbMaintenance(data.message || "Candle cache cleared.");
+    showToast(data.message || "Candle cache cleared.", "success");
+    await loadDatabaseMaintenanceInfo();
+  } catch (err) {
+    logDbMaintenance(`Cache clear error: ${err.message}`, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function setupDatabaseMaintenanceEvents() {
+  const refreshBtn = document.getElementById("btn-db-refresh-info");
+  const integrityBtn = document.getElementById("btn-db-integrity-run");
+  const vacuumBtn = document.getElementById("btn-db-vacuum-run");
+  const repairBtn = document.getElementById("btn-db-repair-run");
+  const clearCacheBtn = document.getElementById("btn-db-clear-cache-modal");
+  const exportCsvBtn = document.getElementById("btn-db-export-csv");
+  const exportJsonBtn = document.getElementById("btn-db-export-json");
+  const clearLogBtn = document.getElementById("btn-db-clear-log");
+  const saveKeyBtn = document.getElementById("btn-save-api-key");
+
+  if (refreshBtn) refreshBtn.addEventListener("click", loadDatabaseMaintenanceInfo);
+  if (integrityBtn) integrityBtn.addEventListener("click", loadDatabaseMaintenanceInfo);
+  if (vacuumBtn) vacuumBtn.addEventListener("click", runDatabaseVacuum);
+  if (repairBtn) repairBtn.addEventListener("click", runDatabaseRepair);
+  if (clearCacheBtn) clearCacheBtn.addEventListener("click", clearCandleCacheFromModal);
+  if (exportCsvBtn) exportCsvBtn.addEventListener("click", () => exportCandlesData("csv"));
+  if (exportJsonBtn) exportJsonBtn.addEventListener("click", () => exportCandlesData("json"));
+
+  if (clearLogBtn) {
+    clearLogBtn.addEventListener("click", () => {
+      const logEl = document.getElementById("db-maintenance-log");
+      if (logEl) logEl.textContent = "[System] Activity log cleared.";
+    });
+  }
+
+  if (saveKeyBtn) {
+    saveKeyBtn.addEventListener("click", () => {
+      const inputEl = document.getElementById("setting-app-api-key");
+      const keyVal = (inputEl?.value || "").trim();
+      const currentSettings = getSettings();
+      currentSettings.app_api_key = keyVal;
+      saveSettings(currentSettings);
+      showToast("Administrator API Key saved.", "success");
+      logDbMaintenance("Administrator API Key updated and saved to client storage.");
+    });
+  }
+}
+
+// Global error handlers for debugging
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('[GLOBAL] Unhandled rejection:', event.reason, event.reason?.stack);
+});
+window.addEventListener('error', (event) => {
+  console.error('[GLOBAL] Error:', event.message, event.filename, event.lineno, event.colno, event.error);
+});
+
+document.addEventListener("DOMContentLoaded", async () => {
+  console.log('[DEBUG] DOMContentLoaded fired, starting loadSensitiveSettings');
+  // Load sensitive settings (API keys) from backend at startup
+  await loadSensitiveSettings();
+  
+  // Initialize WebSocket dashboard with API key from cached settings
+  if (typeof initWebSocketDashboard === "function") {
+    initWebSocketDashboard();
+  }
+  
   const runBtn = document.getElementById("run-backtest-btn");
   const syncBtn = document.getElementById("sync-db-btn");
   const clearBtn = document.getElementById("clear-db-btn");
@@ -351,6 +778,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const deployOptBtn = document.getElementById("deploy-opt-paper-btn");
   const deployBacktestBtn = document.getElementById("deploy-backtest-paper-btn");
   const resetMainBtn = document.getElementById("reset-main-defaults-btn");
+
+  if (deployOptBtn) {
+    deployOptBtn.addEventListener("click", () => deployOptunaToPaper());
+  }
+  if (deployBacktestBtn) {
+    deployBacktestBtn.addEventListener("click", () => deployCurrentBacktestToPaper());
+  }
+
   const optObjectiveModeEl = document.getElementById("optuna-objective-mode-select");
   const batchObjectiveModeEl = document.getElementById("batch-objective-mode-select");
 
@@ -391,14 +826,6 @@ document.addEventListener("DOMContentLoaded", () => {
       const group = document.getElementById("batch-max-hold-group");
       if (group) group.style.display = e.target.checked ? "block" : "none";
     });
-  }
-
-  if (deployOptBtn) {
-    deployOptBtn.addEventListener("click", () => deployOptunaToPaper());
-  }
-
-  if (deployBacktestBtn) {
-    deployBacktestBtn.addEventListener("click", () => deployCurrentBacktestToPaper());
   }
 
   // Tab Navigation Handler
@@ -491,7 +918,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setInterval(updateNyseStatusBadge, 30000);
 
   // Initialize Global Portfolio NAV pill
-  fetch("/api/portfolio/snapshot?include_synthetic=true")
+  fetch("/api/portfolio/snapshot?include_synthetic=true", { headers: getAuthHeaders() })
     .then((r) => r.json())
     .then((d) => {
       if (d && d.snapshot) updateGlobalNavPill(d.snapshot.total_nav_usd);
@@ -657,7 +1084,10 @@ async function clearDatabase() {
   clearBtn.disabled = true;
 
   try {
-    const response = await fetch("/api/clear_cache", { method: "POST" });
+    const response = await fetch("/api/clear_cache", {
+      method: "POST",
+      headers: getAuthHeaders({ "Content-Type": "application/json" })
+    });
     const data = await response.json();
     alert(data.message || "Database cache cleared.");
     runBacktest();
@@ -671,99 +1101,102 @@ async function clearDatabase() {
 async function syncDatabase() {
   const syncBtn = document.getElementById("sync-db-btn");
   syncBtn.disabled = true;
-  syncBtn.innerHTML = `<span class="btn-icon">⏳</span> Fetching 180 Days...`;
+  syncBtn.innerHTML = `<span class="btn-icon">⏳</span> Fetching adaptive lookback...`;
+
+  const { days, limit, timeframe, barsPerDay } = getDataRangeParams();
+  const warmWarnings = checkWarmupAndFetchLimits(limit, timeframe, barsPerDay);
+  if (warmWarnings.length) {
+    warmWarnings.forEach(w => showToast(w, "warn"));
+  }
 
   const payload = {
     exchange: document.getElementById("exchange-select").value,
     symbol: document.getElementById("symbol-input").value.trim(),
     timeframe: document.getElementById("timeframe-select").value,
-    days: 180,
+    days: days,
+    limit: limit,
   };
 
   try {
     const response = await fetch("/api/sync_history", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
 
     const data = await response.json();
     if (response.ok) {
-      alert(`Success: ${data.message}`);
+      showToast(`Success: ${data.message}`, "success");
       runBacktest();
     } else {
-      alert(`Sync Error: ${data.detail || "Failed to sync historical candles."}`);
+      showToast(`Sync Error: ${data.detail || "Failed to sync historical candles."}`, "error");
     }
   } catch (error) {
-    alert(`Sync Error: ${error.message}`);
+    showToast(`Sync Error: ${error.message}`, "error");
   } finally {
     syncBtn.disabled = false;
-    syncBtn.innerHTML = `<span class="btn-icon">📥</span> Sync 180-Day Database`;
+    syncBtn.innerHTML = `<span class="btn-icon">📥</span> Sync Database`;
   }
 }
 
 async function runBacktest() {
   const runBtn = document.getElementById("run-backtest-btn");
+  if (!runBtn) return;
   runBtn.disabled = true;
   runBtn.innerHTML = `<span class="btn-icon">⏳</span> Running Simulation...`;
 
-  const rangeVal = document.getElementById("data-range-select").value;
-  const settings = getSettings();
-  let limit = 500;
-  let days = null;
-
-  if (rangeVal === "30_days") {
-    days = 30;
-    limit = 9000;
-  } else if (rangeVal === "90_days") {
-    days = 90;
-    limit = 26000;
-  } else if (rangeVal === "180_days") {
-    days = 180;
-    limit = 52000;
-  } else {
-    limit = parseInt(rangeVal, 10);
-  }
-
-  const payload = {
-    exchange: document.getElementById("exchange-select").value,
-    symbol: document.getElementById("symbol-input").value.trim(),
-    timeframe: document.getElementById("timeframe-select").value,
-    limit: limit,
-    days: days,
-    ...(lastAppliedParams || {}),
-    ...(lastBatchParams || {}),
-    strategy_mode: document.getElementById("strategy-mode-select").value,
-    trade_direction: document.getElementById("trade-direction-select").value,
-    fast_ema: parseInt(document.getElementById("fast-ema-input").value, 10),
-    slow_ema: parseInt(document.getElementById("slow-ema-input").value, 10),
-    trend_ema: parseInt(document.getElementById("trend-ema-input").value, 10),
-    asset_type: document.getElementById("asset-type-select")?.value || "crypto",
-    session_mode: document.getElementById("session-mode-select")?.value || "all",
-    vwap_anchor: document.getElementById("vwap-anchor-select")?.value || "D",
-    allow_fractional_shares: document.getElementById("fractional-shares-select")?.value === "true",
-    enforce_margin_calls: document.getElementById("margin-calls-checkbox")?.checked || false,
-    min_margin_equity: parseFloat(document.getElementById("min-margin-input")?.value || 2000),
-    long_buying_power_ratio: 4.0,
-    short_buying_power_ratio: 2.0,
-    vwap_slope_min: parseFloat(document.getElementById("vwap-slope-input").value),
-    volume_filter_enabled: document.getElementById("volume-filter-toggle").value === "true",
-    volume_multiplier: parseFloat(document.getElementById("vol-mult-input").value),
-    stop_loss_type: document.getElementById("stop-loss-type-select").value,
-    risk_per_trade_pct: parseFloat(document.getElementById("risk-per-trade-input").value),
-    risk_reward_ratio: parseFloat(document.getElementById("rr-ratio-input").value),
-    initial_capital: parseFloat(document.getElementById("capital-input").value),
-    maker_fee_pct: settings.maker_fee_pct,
-    taker_fee_pct: settings.taker_fee_pct,
-    slippage_pct: settings.slippage_pct,
-  };
-
   try {
+    const settings = getSettings();
+    const { days, limit, timeframe, barsPerDay } = getDataRangeParams();
+    const warmWarnings = checkWarmupAndFetchLimits(limit, timeframe, barsPerDay);
+    if (warmWarnings.length) {
+      warmWarnings.forEach((w) => showToast(w, "warn"));
+    }
+
+    const payload = {
+      exchange: document.getElementById("exchange-select").value,
+      symbol: document.getElementById("symbol-input").value.trim(),
+      timeframe: document.getElementById("timeframe-select").value,
+      limit: limit,
+      days: days,
+      ...(lastAppliedParams || {}),
+      ...(lastBatchParams || {}),
+      strategy_mode: document.getElementById("strategy-mode-select").value,
+      trade_direction: document.getElementById("trade-direction-select").value,
+      fast_ema: parseInt(document.getElementById("fast-ema-input").value, 10),
+      slow_ema: parseInt(document.getElementById("slow-ema-input").value, 10),
+      trend_ema: parseInt(document.getElementById("trend-ema-input").value, 10),
+      asset_type: document.getElementById("asset-type-select")?.value || "crypto",
+      session_mode: document.getElementById("session-mode-select")?.value || "all",
+      vwap_anchor: document.getElementById("vwap-anchor-select")?.value || "D",
+      allow_fractional_shares: document.getElementById("fractional-shares-select")?.value === "true",
+      enforce_margin_calls: document.getElementById("margin-calls-checkbox")?.checked || false,
+      min_margin_equity: parseFloat(document.getElementById("min-margin-input")?.value || 2000),
+      long_buying_power_ratio: 4.0,
+      short_buying_power_ratio: 2.0,
+      vwap_slope_min: parseFloat(document.getElementById("vwap-slope-input").value),
+      volume_filter_enabled: document.getElementById("volume-filter-toggle").value === "true",
+      volume_multiplier: parseFloat(document.getElementById("vol-mult-input").value),
+      stop_loss_type: document.getElementById("stop-loss-type-select").value,
+      trailing_stop_pct: parseFloat(document.getElementById("tsl-distance-input").value) || 1.5,
+          risk_per_trade_pct: parseFloat(document.getElementById("risk-per-trade-input").value),
+      risk_reward_ratio: parseFloat(document.getElementById("rr-ratio-input").value),
+      initial_capital: parseFloat(document.getElementById("capital-input").value),
+      maker_fee_pct: settings.maker_fee_pct,
+      taker_fee_pct: settings.taker_fee_pct,
+      slippage_pct: settings.slippage_pct,
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s — large datasets (e.g. 90d 5m) can take time to queue
+    runBtn.innerHTML = `<span class="btn-icon">⏳</span> Queuing request...`;
     const response = await fetch("/api/backtest", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const err = await response.json();
@@ -772,7 +1205,49 @@ async function runBacktest() {
     }
 
     const data = await response.json();
+
+    // Background-mode: backend returns task_id for real exchanges; poll until done.
+    if (data.status === "started" && data.task_id) {
+      const taskId = data.task_id;
+      let attempts = 0;
+      const maxAttempts = 300; // ~5 min at 1s intervals
+      let lastStep = "";
+      while (attempts < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 1000));
+        attempts += 1;
+        const pollResp = await fetch(`/api/tasks/${taskId}`);
+        const pollData = await pollResp.json();
+        const task = pollData.task || {};
+        if (task.status === "completed" || task.status === "success") {
+          Object.assign(data, task.result || task.result_json || {});
+          break;
+        }
+        if (task.status === "failed" || task.status === "error") {
+          alert(
+            `Backtest task failed: ${task.error || task.step_description || "Unknown error"}`
+          );
+          return;
+        }
+        const step = task.step_description || "";
+        if (step && step !== lastStep) {
+          lastStep = step;
+          runBtn.innerHTML = `<span class="btn-icon">⏳</span> ${step}…`;
+        }
+      }
+      if (attempts >= maxAttempts) {
+        runBtn.innerHTML = `<span class="btn-icon">⏳</span> Running Simulation...`;
+        alert("Backtest is taking longer than expected. It may still be running — refresh the page to check.");
+        return;
+      }
+    }
+
+    if (!data.metrics) {
+      alert("Backtest returned no results.");
+      return;
+    }
+
     currentTrades = data.metrics.trades || [];
+    window._lastBacktestMetrics = data.metrics;
     updateKPIs(data.metrics);
     renderPriceChart(data.chart_data, payload.symbol, payload.fast_ema, payload.slow_ema, payload.trend_ema);
     renderEquityChart(data.metrics.equity_curve);
@@ -782,16 +1257,34 @@ async function runBacktest() {
     tradesCurrentPage = 1;
     renderTradeTable(currentTrades);
   } catch (error) {
-    console.error("Backtest request failed:", error);
-    alert(`Request error: ${error.message}`);
+    if (error.name === "AbortError") {
+      console.warn("Backtest request timed out after 20s — server may still be running.");
+      alert("Backtest request timed out (60s). The server may be overloaded or the dataset is very large.\n\nTry: reducing the day range, or refreshing to check if the task is still running.");
+    } else {
+      console.error("Backtest request failed:", error);
+      alert(`Request error: ${error.message}`);
+    }
   } finally {
     runBtn.disabled = false;
     runBtn.innerHTML = `<span class="btn-icon">▶</span> Run Strategy Backtest`;
   }
 }
 
-function updateKPIs(metrics) {
+    function updateKPIs(metrics) {
   if (!metrics) return;
+
+  // SQLite cache hit/coverage badge
+  const kpiCache = document.getElementById("kpi-cache");
+  const kpiCacheSource = document.getElementById("kpi-cache-source");
+  if (kpiCache && kpiCacheSource && metrics.cache_info) {
+    const ci = metrics.cache_info;
+    const pct = ci.coverage_pct || 0;
+    const requested = ci.requested_bars || 0;
+    const cached = ci.cached_bars || 0;
+    kpiCache.textContent = `${pct.toFixed(1)}%`;
+    kpiCacheSource.textContent = `${cached.toLocaleString()} / ${requested.toLocaleString()} bars cached`;
+    kpiCache.style.color = pct >= 70 ? "#00f5a0" : pct >= 30 ? "#ffaa00" : "#ff007a";
+  }
 
   const kpiReturn = document.getElementById("kpi-return");
   const kpiProfit = document.getElementById("kpi-profit");
@@ -1291,24 +1784,79 @@ function exportTradesCSV() {
   link.remove();
 }
 
+function getBatchDataRangeDays() {
+  const rangeVal = document.getElementById("batch-data-range-select")?.value || "365_days";
+
+  // "auto" → let the backend decide (send days: null)
+  if (rangeVal === "auto") {
+    return null;
+  }
+
+  if (rangeVal === "30_days") return 30;
+  if (rangeVal === "90_days") return 90;
+  if (rangeVal === "180_days") return 180;
+  if (rangeVal === "365_days") return 365;
+
+  // Numeric candle counts (500/1500) have no clean per-TF day mapping in a
+  // multi-timeframe sweep; fall back to backend default (days: null → limit 500).
+  return null;
+}
+
 function getDataRangeParams() {
-  const rangeVal = document.getElementById("data-range-select").value;
-  let limit = 500;
+  const rangeVal = document.getElementById("data-range-select")?.value || "500";
+  const timeframe = document.getElementById("timeframe-select")?.value || "5m";
+  const barsPerDay =
+    {
+      "1m": 1440,
+      "3m": 480,
+      "5m": 288,
+      "15m": 96,
+      "30m": 48,
+      "1h": 24,
+      "2h": 12,
+      "4h": 6,
+      "6h": 4,
+      "1d": 1,
+    }[timeframe] || 288;
+
+  // "auto" → let the backend decide (send days: null, limit: default 500 so backend auto-resolves)
+  if (rangeVal === "auto") {
+    return { limit: 500, days: null, timeframe, barsPerDay };
+  }
+
   let days = null;
+  let limit = 500;
 
   if (rangeVal === "30_days") {
     days = 30;
-    limit = 9000;
+    limit = Math.min(Math.round(30 * barsPerDay), 50000);
   } else if (rangeVal === "90_days") {
     days = 90;
-    limit = 26000;
+    limit = Math.min(Math.round(90 * barsPerDay), 50000);
   } else if (rangeVal === "180_days") {
     days = 180;
-    limit = 52000;
+    limit = Math.min(Math.round(180 * barsPerDay), 50000);
+  } else if (rangeVal === "365_days") {
+    days = 365;
+    limit = Math.min(Math.round(365 * barsPerDay), 50000);
   } else {
-    limit = parseInt(rangeVal, 10);
+    // Numeric value: treat as number of candles
+    limit = Math.max(parseInt(rangeVal, 10) || 500, 50);
   }
-  return { limit, days };
+
+  return { limit, days, timeframe, barsPerDay };
+}
+
+function checkWarmupAndFetchLimits(limit, timeframe, barsPerDay) {
+  const warnings = [];
+  const totalBars = limit || (barsPerDay ? Math.round(200 * barsPerDay) : 0);
+  if (totalBars < 250) {
+    warnings.push(`<strong>Warmup Alert:</strong> Only ${totalBars.toLocaleString()} bars selected (need ≥ 250 for reliable indicator warmup).`);
+  }
+  if (totalBars > 50000) {
+    warnings.push(`<strong>Over-fetch Warning:</strong> ${totalBars.toLocaleString()} bars requested (> 50,000) — high-frequency load; consider reducing range.`);
+  }
+  return warnings;
 }
 
 function getStrategyParamsFromUI() {
@@ -1335,7 +1883,8 @@ function getStrategyParamsFromUI() {
     vwap_stop_offset_pct: parseFloat(document.getElementById("vwap-stop-input")?.value || "0.1"),
     atr_period: 14,
     atr_multiplier: parseFloat(document.getElementById("atr-mult-input")?.value || "2.0"),
-    risk_per_trade_pct: parseFloat(document.getElementById("risk-per-trade-input")?.value || "1.0"),
+    trailing_stop_pct: 1.5,
+          risk_per_trade_pct: parseFloat(document.getElementById("risk-per-trade-input")?.value || "1.0"),
     risk_reward_ratio: parseFloat(document.getElementById("rr-ratio-input")?.value || "2.0"),
     max_holding_bars: maxHoldingBarsVal,
     initial_capital: parseFloat(document.getElementById("capital-input")?.value || "10000"),
@@ -1375,10 +1924,69 @@ function syncBatchObjectiveModeUI() {
   const isMulti = modeEl.value === "multi";
   if (targetGroup) targetGroup.style.display = isMulti ? "none" : "block";
   if (multiGroup) multiGroup.style.display = isMulti ? "block" : "none";
+  syncBatchMetricUI();
+}
+
+function syncBatchMetricUI() {
+  const objectiveModeEl = document.getElementById("batch-objective-mode-select");
+  const isSingle = !objectiveModeEl || objectiveModeEl.value === "single";
+  const metricVal = document.getElementById("batch-metric-select")?.value;
+  const multiVal = document.getElementById("batch-multi-metric-select")?.value;
+  const tfChecked = [...document.querySelectorAll(".batch-tf-check:checked")].length;
+  const singleHint = document.getElementById("batch-all-metrics-hint");
+  const multiHint = document.getElementById("batch-all-multi-hint");
+  const runBtn = document.getElementById("batch-run-btn");
+
+  if (isSingle) {
+    if (multiHint) multiHint.style.display = "none";
+    if (metricVal === "all_metrics") {
+      if (singleHint) singleHint.style.display = "block";
+      if (tfChecked !== 1) {
+        if (singleHint) {
+          singleHint.textContent = "⛔ All Metrics requires exactly ONE timeframe. Please select only 1 timeframe.";
+          singleHint.style.color = "var(--accent-red, #ff007a)";
+        }
+        if (runBtn) runBtn.disabled = true;
+      } else {
+        if (singleHint) {
+          singleHint.textContent = "★ All Metrics: will run 10 sweeps (one per ranking metric) for the selected timeframe.";
+          singleHint.style.color = "var(--accent-amber, #ffaa00)";
+        }
+        if (runBtn) runBtn.disabled = false;
+      }
+    } else {
+      if (singleHint) singleHint.style.display = "none";
+      if (runBtn) runBtn.disabled = false;
+    }
+  } else {
+    // Multi-objective mode
+    if (singleHint) singleHint.style.display = "none";
+    if (multiVal === "all_combinations") {
+      if (multiHint) multiHint.style.display = "block";
+      if (tfChecked !== 1) {
+        if (multiHint) {
+          multiHint.textContent = "⛔ All Combinations requires exactly ONE timeframe. Please select only 1 timeframe.";
+          multiHint.style.color = "var(--accent-red, #ff007a)";
+        }
+        if (runBtn) runBtn.disabled = true;
+      } else {
+        if (multiHint) {
+          multiHint.textContent = "★ All Combinations: will run 12 curated Pareto sweeps for the selected timeframe.";
+          multiHint.style.color = "var(--accent-amber, #ffaa00)";
+        }
+        if (runBtn) runBtn.disabled = false;
+      }
+    } else {
+      if (multiHint) multiHint.style.display = "none";
+      if (runBtn) runBtn.disabled = false;
+    }
+  }
 }
 
 async function runOptunaOptimization() {
   const btn = document.getElementById("run-optuna-btn");
+  const deployBtn = document.getElementById("deploy-opt-paper-btn");
+  if (deployBtn) deployBtn.disabled = true;
   btn.disabled = true;
   btn.innerHTML = `<span class="btn-icon">⏳</span> Optimizing Parameters...`;
 
@@ -1432,7 +2040,7 @@ async function runOptunaOptimization() {
   try {
     const response = await fetch("/api/optimize", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
 
@@ -1443,8 +2051,68 @@ async function runOptunaOptimization() {
     }
 
     const data = await response.json();
+
+    // Background-mode: backend returns task_id for real exchanges; poll until done.
+    if (data.status === "started" && data.task_id) {
+      const taskId = data.task_id;
+      let attempts = 0;
+      const maxAttempts = 600; // ~10 min at 1s intervals — real-exchange
+      // optimizations with n_trials=90 can take several minutes.
+      let progressShown = false;
+      while (attempts < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const pollResp = await fetch(`/api/tasks/${taskId}`);
+        const pollData = await pollResp.json();
+        const task = pollData.task || {};
+        if (task.status === "completed" || task.status === "success") {
+          data.results = task.result || task.result_json || {};
+          break;
+        }
+        if (task.status === "failed" || task.status === "error") {
+          alert(`Optuna background task failed: ${task.error || "Unknown"}`);
+          return;
+        }
+        // Non-blocking progress hint so the user knows it's still running.
+        if (!progressShown && task.step_description) {
+          showToast(`Optuna running: ${task.step_description}`, "info");
+          progressShown = true;
+        }
+        attempts++;
+      }
+      if (!data.results) {
+        alert("Optuna Request error: Background optimization did not complete in time.");
+        return;
+      }
+    }
+
     const res = data.results;
+    if (!res || typeof res !== "object") {
+      alert("Optuna Request error: Unexpected server response (missing results).");
+      return;
+    }
+    if (res.best_value_valid === false) {
+      lastBestOptunaParams = null;
+      window._lastOptunaValidationReport = null;
+      window._lastOptunaValidatedParams = null;
+      document.getElementById("opt-best-val").textContent = "N/A";
+      document.getElementById("opt-status-badge").textContent = "No valid trial";
+      document.getElementById("opt-summary-desc").textContent =
+        "No valid in-sample candidate met the optimization requirements.";
+      for (const id of [
+        "apply-opt-params-btn",
+        "deploy-opt-paper-btn",
+        "validate-opt-params-btn",
+      ]) {
+        const element = document.getElementById(id);
+        if (element) element.style.display = "none";
+      }
+      window._lastOptimizationResult = res;
+      renderOptunaTrials(res.top_trials || []);
+      return;
+    }
     lastBestOptunaParams = res.best_params;
+    window._lastOptunaValidationReport = null;
+    window._lastOptunaValidatedParams = null;
     const bp = res.best_params;
     const winningMode = bp.strategy_mode || baseParams.strategy_mode;
     const slType = baseParams.stop_loss_type;
@@ -1515,19 +2183,24 @@ async function runOptunaOptimization() {
     const statusBadge = document.getElementById("opt-status-badge");
     const summaryDesc = document.getElementById("opt-summary-desc");
     if (statusBadge) {
-      statusBadge.textContent = optScope === "auto" ? `Winning Setup: ${modeLabels[winningMode] || winningMode}` : "Optimal Setup Discovered";
+      statusBadge.textContent = optScope === "auto"
+        ? `IN-SAMPLE ONLY | ${modeLabels[winningMode] || winningMode}`
+        : "IN-SAMPLE ONLY | Optimal Setup";
       statusBadge.className = "badge badge-long";
     }
     if (summaryDesc) {
       if (res.optimization_mode === "multi_objective") {
         const objStr = res.pareto_objectives ? res.pareto_objectives.join(" / ") : "multi-objective";
-        summaryDesc.textContent = `Optimal Score: ${res.best_metric_value !== null ? res.best_metric_value : "N/A"} (${objStr})`;
+        summaryDesc.textContent = `In-sample score: ${res.best_metric_value !== null ? res.best_metric_value : "N/A"} (${objStr})`;
       } else {
-        summaryDesc.textContent = `Optimal Score: ${res.best_value} (${res.target_metric.replace('_', ' ')})`;
+        summaryDesc.textContent = `In-sample score: ${res.best_value} (${res.target_metric.replace('_', ' ')})`;
       }
     }
     if (applyBtn) applyBtn.style.display = "inline-flex";
-    if (deployBtn) deployBtn.style.display = "inline-flex";
+    if (deployBtn) {
+      deployBtn.style.display = "inline-flex";
+      deployBtn.disabled = true;
+    }
     if (validateBtn) {
       validateBtn.style.display = "inline-flex";
       validateBtn.innerHTML = `🔬 Validate Best`;
@@ -1554,6 +2227,8 @@ async function runOptunaOptimization() {
           const targetMet = isMulti ? (multiMetrics ? multiMetrics[0] : "sharpe_ratio") : (res.target_metric || targetMetric);
           const report = await validateStrategyConfig(sym, tf, ex, lastBestOptunaParams, targetMet, isMulti, multiMetrics);
           window._lastOptunaValidationReport = report;
+          window._lastOptunaValidatedParams = JSON.stringify(lastBestOptunaParams);
+          if (deployBtn) deployBtn.disabled = false;
           const cacheKey = "optuna_trial_0";
           window._validationReportCache[cacheKey] = report;
           window._validationContextCache[cacheKey] = {
@@ -1625,6 +2300,8 @@ async function runOptunaOptimization() {
       validateStrategyConfig(sym, tf, ex, bp, targetMet, isMulti, multiMetrics)
         .then((report) => {
           window._lastOptunaValidationReport = report;
+          window._lastOptunaValidatedParams = JSON.stringify(bp);
+          if (deployBtn) deployBtn.disabled = false;
           const cacheKey = "optuna_trial_0";
           window._validationReportCache[cacheKey] = report;
           window._validationContextCache[cacheKey] = {
@@ -1692,6 +2369,17 @@ async function deployOptunaToPaper(params = null, score = null, validationReport
 
   // Safety Guardrail Check
   const valRep = validationReport || (targetParams === lastBestOptunaParams ? window._lastOptunaValidationReport : null);
+  if (!valRep) {
+    alert("Run out-of-sample robustness validation before deploying Optuna parameters.");
+    return;
+  }
+  if (
+    targetParams === lastBestOptunaParams &&
+    window._lastOptunaValidatedParams !== JSON.stringify(targetParams)
+  ) {
+    alert("The validation report does not match the current Optuna parameters. Validate them again.");
+    return;
+  }
   if (valRep) {
     if (valRep.status === "FAIL") {
       const reasons = (valRep.reasons || []).map((r) => `• ${r}`).join("\n");
@@ -1724,7 +2412,7 @@ async function deployOptunaToPaper(params = null, score = null, validationReport
   try {
     const resp = await fetch("/api/paper/profiles/deploy", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         exchange: exchange,
         symbol: symbol,
@@ -1734,6 +2422,8 @@ async function deployOptunaToPaper(params = null, score = null, validationReport
         params: targetParams,
         optuna_score: optScore,
         is_active: true,
+        source: "optuna",
+        validation_report: valRep,
       }),
     });
 
@@ -1794,8 +2484,17 @@ function applyBestOptunaParams() {
     stop_loss_type: "stop-loss-type-select",
     vwap_stop_offset_pct: "vwap-stop-input",
     atr_multiplier: "atr-mult-input",
+    trailing_stop_pct: "tsl-distance-input",
     risk_per_trade_pct: "risk-per-trade-input",
     risk_reward_ratio: "rr-ratio-input",
+    max_holding_bars: "max-holding-bars-input",
+    initial_capital: "capital-input",
+    asset_type: "asset-type-select",
+    session_mode: "session-mode-select",
+    vwap_anchor: "vwap-anchor-select",
+    allow_fractional_shares: "fractional-shares-select",
+    enforce_margin_calls: "margin-calls-checkbox",
+    min_margin_equity: "min-margin-input",
   };
 
   const updatedIds = [];
@@ -1870,10 +2569,43 @@ function renderOptunaImportance(importanceMap) {
   Plotly.newPlot("optuna-importance-chart", [trace], layout, { responsive: true, displayModeBar: false });
 }
 
-async function validateStrategyConfig(symbol, timeframe, exchange, params, targetMetric = null, enableMulti = false, multiMetrics = null) {
-  const { limit, days } = getDataRangeParams();
+async function validateStrategyConfig(symbol, timeframe, exchange, params, targetMetric = null, enableMulti = false, multiMetrics = null, limitOverride = undefined, daysOverride = undefined) {
+  const rangeParams = getDataRangeParams();
+  const limit = limitOverride !== undefined ? limitOverride : rangeParams.limit;
+  const days = daysOverride !== undefined ? daysOverride : rangeParams.days;
+  const valTrialsEl = document.getElementById("setting-val-trials");
   const nTrialsEl = document.getElementById("optuna-trials-input");
-  const nTrials = nTrialsEl ? (parseInt(nTrialsEl.value, 10) || 30) : 30;
+  let nTrials = 250;
+  if (valTrialsEl && parseInt(valTrialsEl.value, 10)) {
+    nTrials = parseInt(valTrialsEl.value, 10);
+  } else if (nTrialsEl && parseInt(nTrialsEl.value, 10)) {
+    nTrials = parseInt(nTrialsEl.value, 10);
+  }
+
+  const getNum = (id, def) => {
+    const el = document.getElementById(id);
+    if (!el) return def;
+    const parsed = Number.parseFloat(el.value);
+    return Number.isFinite(parsed) ? parsed : def;
+  };
+  const getInt = (id, def) => {
+    const el = document.getElementById(id);
+    if (!el) return def;
+    const parsed = Number.parseInt(el.value, 10);
+    return Number.isFinite(parsed) ? parsed : def;
+  };
+
+  const criteria = {
+    min_backtest_sharpe: getNum("setting-val-min-sharpe", DEFAULT_SETTINGS.val_min_sharpe),
+    max_backtest_drawdown_pct: getNum("setting-val-max-drawdown", DEFAULT_SETTINGS.val_max_drawdown),
+    min_backtest_return_pct: getNum("setting-val-min-return", DEFAULT_SETTINGS.val_min_return),
+    min_trade_count: getInt("setting-val-min-trades", DEFAULT_SETTINGS.val_min_trades),
+    min_walk_forward_efficiency: getNum("setting-val-wf-efficiency", DEFAULT_SETTINGS.val_wf_efficiency),
+    min_profitable_windows_pct: getNum("setting-val-profitable-windows", DEFAULT_SETTINGS.val_profitable_windows),
+    min_oos_return_pct: getNum("setting-val-min-oos-return", DEFAULT_SETTINGS.val_min_oos_return),
+    max_monte_carlo_ruin_pct: getNum("setting-val-max-ruin", DEFAULT_SETTINGS.val_max_ruin),
+    max_monte_carlo_drawdown_pct: getNum("setting-val-max-mc-drawdown", DEFAULT_SETTINGS.val_max_mc_drawdown),
+  };
 
   // Resolve target_metric: use the explicit argument, fall back to the UI select, then sharpe_ratio.
   let resolvedMetric = targetMetric;
@@ -1884,14 +2616,16 @@ async function validateStrategyConfig(symbol, timeframe, exchange, params, targe
 
   const resp = await fetch("/api/strategy/validate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       exchange: exchange || document.getElementById("exchange-select").value,
       symbol: symbol || document.getElementById("symbol-input").value.trim(),
       timeframe: timeframe || document.getElementById("timeframe-select").value,
+      asset_type: document.getElementById("asset-type-select")?.value || "crypto",
       limit: limit,
       days: days,
       params: params,
+      criteria: criteria,
       n_trials: nTrials,
       target_metric: resolvedMetric,
       enable_multi_objective: enableMulti,
@@ -1968,40 +2702,48 @@ function showValidationDetailsModal(reportKey, title = "Strategy Robustness Audi
   if (g1Warn) g1Warn.innerHTML = (g1.warnings || []).map(w => `<div>⚠️ ${w}</div>`).join("");
 
   // Populate Gate 2
-  const g2 = (report.gate_results && report.gate_results.gate2_wfo) || {};
+  const g2 = report.gate_results ? report.gate_results.gate2_wfo : null;
   const g2Pill = document.getElementById("g2-status-pill");
-  if (g2Pill) g2Pill.innerHTML = getValidationBadgeHtml(g2.status || "PASS", null);
+  if (g2Pill) g2Pill.innerHTML = getValidationBadgeHtml(g2 ? g2.status : "SKIPPED", null);
   const g2Grid = document.getElementById("g2-metrics-grid");
-  if (g2Grid && g2.metrics) {
-    g2Grid.innerHTML = `
-      <div class="kpi-card glow-cyan" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">WFE Efficiency</div><div class="kpi-value" style="font-size:0.95rem; color:#00f2fe;">${g2.metrics.walk_forward_efficiency_pct}%</div></div>
-      <div class="kpi-card glow-green" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">Profitable Windows</div><div class="kpi-value" style="font-size:0.95rem;">${g2.metrics.profitable_windows_pct}%</div></div>
-      <div class="kpi-card glow-purple" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">OOS Return</div><div class="kpi-value" style="font-size:0.95rem; color:${g2.metrics.oos_total_return_pct >= 0 ? '#00f5a0' : '#ff007a'};">${g2.metrics.oos_total_return_pct > 0 ? '+' : ''}${g2.metrics.oos_total_return_pct}%</div></div>
-      <div class="kpi-card glow-blue" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">Consistency</div><div class="kpi-value" style="font-size:0.95rem;">${g2.metrics.consistency_score}</div></div>
-    `;
+  if (g2Grid) {
+    if (g2 && g2.metrics && Object.keys(g2.metrics).length > 0) {
+      g2Grid.innerHTML = `
+        <div class="kpi-card glow-cyan" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">WFE Efficiency</div><div class="kpi-value" style="font-size:0.95rem; color:#00f2fe;">${g2.metrics.walk_forward_efficiency_pct}%</div></div>
+        <div class="kpi-card glow-green" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">Profitable Windows</div><div class="kpi-value" style="font-size:0.95rem;">${g2.metrics.profitable_windows_pct}%</div></div>
+        <div class="kpi-card glow-purple" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">OOS Return</div><div class="kpi-value" style="font-size:0.95rem; color:${g2.metrics.oos_total_return_pct >= 0 ? '#00f5a0' : '#ff007a'};">${g2.metrics.oos_total_return_pct > 0 ? '+' : ''}${g2.metrics.oos_total_return_pct}%</div></div>
+        <div class="kpi-card glow-blue" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">Consistency</div><div class="kpi-value" style="font-size:0.95rem;">${g2.metrics.consistency_score}</div></div>
+      `;
+    } else {
+      g2Grid.innerHTML = `<div style="font-size: 0.82rem; color: var(--text-muted); padding: 4px 8px;">Gate 2 was skipped because Gate 1 did not meet viability criteria.</div>`;
+    }
   }
   const g2Details = document.getElementById("g2-details-text");
-  if (g2Details) g2Details.textContent = g2.details || "";
+  if (g2Details) g2Details.textContent = g2 ? (g2.details || "") : "";
   const g2Warn = document.getElementById("g2-warnings-list");
-  if (g2Warn) g2Warn.innerHTML = (g2.warnings || []).map(w => `<div>⚠️ ${w}</div>`).join("");
+  if (g2Warn) g2Warn.innerHTML = ((g2 && g2.warnings) || []).map(w => `<div>⚠️ ${w}</div>`).join("");
 
   // Populate Gate 3
-  const g3 = (report.gate_results && report.gate_results.gate3_monte_carlo) || {};
+  const g3 = report.gate_results ? report.gate_results.gate3_monte_carlo : null;
   const g3Pill = document.getElementById("g3-status-pill");
-  if (g3Pill) g3Pill.innerHTML = getValidationBadgeHtml(g3.status || "PASS", null);
+  if (g3Pill) g3Pill.innerHTML = getValidationBadgeHtml(g3 ? g3.status : "SKIPPED", null);
   const g3Grid = document.getElementById("g3-metrics-grid");
-  if (g3Grid && g3.metrics) {
-    g3Grid.innerHTML = `
-      <div class="kpi-card glow-red" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">Risk of Ruin</div><div class="kpi-value" style="font-size:0.95rem; color:${g3.metrics.risk_of_ruin_pct > 5 ? '#ff007a' : '#00f5a0'};">${g3.metrics.risk_of_ruin_pct}%</div></div>
-      <div class="kpi-card glow-amber" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">95% Max DD</div><div class="kpi-value" style="font-size:0.95rem; color:#f87171;">${g3.metrics.p95_max_drawdown_pct}%</div></div>
-      <div class="kpi-card glow-cyan" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">Median Net Profit</div><div class="kpi-value" style="font-size:0.95rem;">$${g3.metrics.median_return}</div></div>
-      <div class="kpi-card glow-blue" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">Simulations</div><div class="kpi-value" style="font-size:0.95rem;">${g3.metrics.simulations_count}</div></div>
-    `;
+  if (g3Grid) {
+    if (g3 && g3.metrics && Object.keys(g3.metrics).length > 0) {
+      g3Grid.innerHTML = `
+        <div class="kpi-card glow-red" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">Risk of Ruin</div><div class="kpi-value" style="font-size:0.95rem; color:${g3.metrics.risk_of_ruin_pct > 5 ? '#ff007a' : '#00f5a0'};">${g3.metrics.risk_of_ruin_pct}%</div></div>
+        <div class="kpi-card glow-amber" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">95% Max DD</div><div class="kpi-value" style="font-size:0.95rem; color:#f87171;">${g3.metrics.p95_max_drawdown_pct}%</div></div>
+        <div class="kpi-card glow-cyan" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">Median Net Profit</div><div class="kpi-value" style="font-size:0.95rem;">$${g3.metrics.median_return}</div></div>
+        <div class="kpi-card glow-blue" style="padding: 6px 10px;"><div class="kpi-label" style="font-size:0.7rem;">Simulations</div><div class="kpi-value" style="font-size:0.95rem;">${g3.metrics.simulations_count}</div></div>
+      `;
+    } else {
+      g3Grid.innerHTML = `<div style="font-size: 0.82rem; color: var(--text-muted); padding: 4px 8px;">Gate 3 was skipped because Gate 1 did not meet viability criteria.</div>`;
+    }
   }
   const g3Details = document.getElementById("g3-details-text");
-  if (g3Details) g3Details.textContent = g3.details || "";
+  if (g3Details) g3Details.textContent = g3 ? (g3.details || "") : "";
   const g3Warn = document.getElementById("g3-warnings-list");
-  if (g3Warn) g3Warn.innerHTML = (g3.warnings || []).map(w => `<div>⚠️ ${w}</div>`).join("");
+  if (g3Warn) g3Warn.innerHTML = ((g3 && g3.warnings) || []).map(w => `<div>⚠️ ${w}</div>`).join("");
 
   // Re-run validation button in modal
   const revalBtn = document.getElementById("val-modal-revalidate-btn");
@@ -2022,7 +2764,9 @@ function showValidationDetailsModal(reportKey, title = "Strategy Robustness Audi
           ctx.params,
           ctx.targetMetric,
           ctx.enableMulti || false,
-          ctx.multiMetrics || null
+          ctx.multiMetrics || null,
+          null, // limitOverride: null -> backend resolves full timeframe lookback
+          null  // daysOverride: null
         );
         window._validationReportCache[ctx.reportKey] = newReport;
         
@@ -2097,13 +2841,149 @@ function getValidationBadgeHtml(status, score = null, reportKey = null) {
     return `<span class="badge" ${clickAttr} style="background: rgba(255, 170, 0, 0.15); color: #ffaa00; border: 1px solid rgba(255, 170, 0, 0.3); font-size: 0.72rem; cursor: pointer;">🟡 CAUTION${scoreText}</span>`;
   } else if (s === "FAIL") {
     return `<span class="badge" ${clickAttr} style="background: rgba(255, 0, 122, 0.15); color: #ff007a; border: 1px solid rgba(255, 0, 122, 0.3); font-size: 0.72rem; cursor: pointer;">🔴 FAIL${scoreText}</span>`;
+  } else if (s === "SKIPPED" || s === "NOT_RUN") {
+    return `<span class="badge" style="background: rgba(138, 153, 173, 0.15); color: #8a99ad; border: 1px solid rgba(138, 153, 173, 0.3); font-size: 0.72rem;">⚪ SKIPPED</span>`;
   }
   return `<span class="badge" style="color: var(--text-muted); font-size: 0.72rem;">—</span>`;
+}
+
+// ---------------------------------------------------------------------------
+// Load an arbitrary trial into the top KPI panel (makes it the "active" trial
+// for Apply to Strategy / Deploy to Paper).
+// ---------------------------------------------------------------------------
+function loadTrialIntoPanel(trial, trialIdx) {
+  const p = trial.params || {};
+  const res = window._lastOptimizationResult || {};
+  const slType = res.stop_loss_type || (p.stop_loss_type) || "vwap";
+  const winningMode = p.strategy_mode || "crossover";
+
+  // Update global so Apply / Deploy use this trial
+  lastBestOptunaParams = p;
+
+  // --- KPI Card: Target Score ---
+  const scoreEl = document.getElementById("opt-best-val");
+  if (scoreEl) {
+    let valDisplay = "N/A";
+    if (typeof trial.value === "object" && trial.value !== null) {
+      valDisplay = Object.values(trial.value).map(v => (typeof v === "number" ? v.toFixed(4) : v)).join(" / ");
+    } else if (typeof trial.value === "number") {
+      valDisplay = trial.value.toFixed(4);
+    } else if (trial.value !== null && trial.value !== undefined) {
+      valDisplay = String(trial.value);
+    }
+    scoreEl.textContent = valDisplay;
+  }
+
+  // --- KPI Card: Core Parameters ---
+  const coreLabel = document.getElementById("opt-kpi-core-label");
+  const coreVal = document.getElementById("opt-best-emas");
+  const coreSub = document.getElementById("opt-trend-ema-sub");
+  if (winningMode === "multi_ema") {
+    if (coreLabel) coreLabel.textContent = "Best EMA Hierarchy";
+    if (coreVal) coreVal.textContent = `${p.fast_ema ?? "–"} / ${p.slow_ema ?? "–"}`;
+    if (coreSub) coreSub.textContent = `Trend EMA: ${p.trend_ema ?? "–"}`;
+  } else if (winningMode === "pullback") {
+    if (coreLabel) coreLabel.textContent = "Pullback Touch & Fast EMA";
+    if (coreVal) coreVal.textContent = `EMA ${p.fast_ema ?? "–"} / ${p.pullback_tolerance_pct ?? 0.3}%`;
+    if (coreSub) coreSub.textContent = `VWAP Touch Band: ${p.pullback_tolerance_pct ?? 0.3}%`;
+  } else {
+    if (coreLabel) coreLabel.textContent = "Crossover Momentum Core";
+    if (coreVal) coreVal.textContent = `Fast EMA: ${p.fast_ema ?? "–"}`;
+    if (coreSub) coreSub.textContent = `Setup 1: Fast EMA x VWAP`;
+  }
+
+  // --- KPI Card: Risk & Stop ---
+  const riskLabel = document.getElementById("opt-kpi-risk-label");
+  const riskVal = document.getElementById("opt-best-risk");
+  const riskSub = document.getElementById("opt-risk-sub");
+  if (slType === "vwap") {
+    if (riskLabel) riskLabel.textContent = "VWAP Structural Stop Loss";
+    if (riskVal) riskVal.textContent = `${p.vwap_stop_offset_pct ?? 0.1}% Offset`;
+    if (riskSub) riskSub.textContent = `Target R:R: ${p.risk_reward_ratio ?? "–"}x`;
+  } else {
+    if (riskLabel) riskLabel.textContent = "ATR Dynamic Trailing Stop";
+    if (riskVal) riskVal.textContent = `${p.atr_multiplier ?? "–"}x ATR`;
+    if (riskSub) riskSub.textContent = `Target R:R: ${p.risk_reward_ratio ?? "–"}x`;
+  }
+
+  // --- KPI Card: Filters & Gates ---
+  const filtersVal = document.getElementById("opt-best-filters");
+  const filtersSub = document.getElementById("opt-filters-sub");
+  if (filtersVal) filtersVal.textContent = `${p.volume_multiplier ?? "–"}x / ${p.vwap_slope_min ?? "–"}`;
+  if (filtersSub) filtersSub.textContent = p.volume_filter_enabled ? "Volume & Slope Gates Active" : "Slope Gate Active";
+
+  // --- Action bar: update badge to show selected trial number ---
+  const statusBadge = document.getElementById("opt-status-badge");
+  if (statusBadge) {
+    statusBadge.textContent = `Trial #${trial.trial_number} Selected`;
+    statusBadge.className = "badge badge-long";
+  }
+  const summaryDesc = document.getElementById("opt-summary-desc");
+  if (summaryDesc) {
+    const valStr = (typeof trial.value === "number") ? trial.value.toFixed(4) : "N/A";
+    summaryDesc.textContent = `Trial #${trial.trial_number} — Score: ${valStr}. Click ⚡ Apply to Strategy to run backtest.`;
+  }
+
+  // Ensure action buttons are visible
+  const applyBtn = document.getElementById("apply-opt-params-btn");
+  const deployBtn = document.getElementById("deploy-opt-paper-btn");
+  const validateBtn = document.getElementById("validate-opt-params-btn");
+  if (applyBtn) applyBtn.style.display = "inline-flex";
+  if (deployBtn) deployBtn.style.display = "inline-flex";
+  if (validateBtn) { validateBtn.style.display = "inline-flex"; validateBtn.innerHTML = "🔬 Validate Best"; validateBtn.disabled = false; }
+
+  // Highlight selected row in the trial table
+  document.querySelectorAll(".optuna-trial-row").forEach((r) => r.classList.remove("optuna-trial-row--selected"));
+  const selRow = document.getElementById(`optuna-trial-row-${trialIdx}`);
+  if (selRow) selRow.classList.add("optuna-trial-row--selected");
+
+  // Scroll the panel header into view smoothly
+  const panel = document.querySelector("#tab-optuna .optuna-action-bar");
+  if (panel) panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+// ---------------------------------------------------------------------------
+// Optuna trials table sort state
+// ---------------------------------------------------------------------------
+let _optunaSortKey = "value";
+let _optunaSortDir = "desc";
+
+function sortOptunaTrials(key) {
+  if (_optunaSortKey === key) {
+    _optunaSortDir = _optunaSortDir === "asc" ? "desc" : "asc";
+  } else {
+    _optunaSortKey = key;
+    // trial_number sorts asc by default; everything else desc
+    _optunaSortDir = key === "trial_number" ? "asc" : "desc";
+  }
+  const table = document.querySelector("#optuna-trials-body")?.closest("table");
+  if (table && table._cachedTrials) {
+    renderOptunaTrials(table._cachedTrials);
+  }
+}
+
+function _updateOptunaSortHeaders() {
+  document.querySelectorAll(".optuna-sortable-th").forEach((th) => {
+    const key = th.dataset.sort;
+    const indicator = th.querySelector(".sort-indicator");
+    if (!indicator) return;
+    if (key === _optunaSortKey) {
+      indicator.textContent = _optunaSortDir === "asc" ? " ↑" : " ↓";
+      th.style.color = "#00f2fe";
+    } else {
+      indicator.textContent = " ↕";
+      th.style.color = "";
+    }
+  });
 }
 
 function renderOptunaTrials(trials) {
   const tbody = document.getElementById("optuna-trials-body");
   const thead = document.getElementById("optuna-trials-head");
+
+  // Cache on table element for re-sort without re-fetch
+  const table = tbody?.closest("table");
+  if (table) table._cachedTrials = trials;
 
   if (!trials || trials.length === 0) {
     tbody.innerHTML = `<tr><td colspan="12" class="empty-msg">No trial results available.</td></tr>`;
@@ -2118,20 +2998,47 @@ function renderOptunaTrials(trials) {
   const hasVwapOffset = trials.some((t) => t.params && "vwap_stop_offset_pct" in t.params);
   const hasAtr = trials.some((t) => t.params && "atr_multiplier" in t.params);
 
-  let headCols = `<th>Trial #</th><th>Target Score</th>`;
+  // Sort before render — extract numeric value for comparison
+  const _trialNumericValue = (t) => {
+    if (typeof t.value === "number") return t.value;
+    if (typeof t.value === "object" && t.value !== null) return Object.values(t.value)[0] ?? 0;
+    return 0;
+  };
+  const sorted = [...trials].sort((a, b) => {
+    let aVal, bVal;
+    if (_optunaSortKey === "value") {
+      aVal = _trialNumericValue(a); bVal = _trialNumericValue(b);
+    } else if (_optunaSortKey === "trial_number") {
+      aVal = a.trial_number ?? 0; bVal = b.trial_number ?? 0;
+    } else {
+      // param key
+      aVal = (a.params || {})[_optunaSortKey] ?? "";
+      bVal = (b.params || {})[_optunaSortKey] ?? "";
+    }
+    const cmp = (typeof aVal === "number" && typeof bVal === "number")
+      ? aVal - bVal
+      : String(aVal).localeCompare(String(bVal), undefined, { numeric: true });
+    return _optunaSortDir === "asc" ? cmp : -cmp;
+  });
+
+  // Helper for sortable th
+  const sth = (label, sortKey, extra = "") =>
+    `<th class="optuna-sortable-th" data-sort="${sortKey}" style="cursor:pointer;user-select:none;white-space:nowrap;${extra}">${label} <span class="sort-indicator"></span></th>`;
+
+  let headCols = sth("Trial #", "trial_number") + sth("Target Score", "value");
   if (hasMode) headCols += `<th>Setup Mode</th>`;
-  headCols += `<th>Fast EMA</th>`;
-  if (hasSlow) headCols += `<th>Slow EMA</th>`;
-  if (hasTrend) headCols += `<th>Trend EMA</th>`;
-  if (hasPullback) headCols += `<th>Pullback Tol</th>`;
-  headCols += `<th>Vol Mult</th><th>VWAP Slope</th>`;
-  if (hasAtr) headCols += `<th>ATR Mult</th>`;
-  if (hasVwapOffset) headCols += `<th>VWAP Offset</th>`;
-  headCols += `<th>R:R Ratio</th><th>Validation</th><th>Actions</th>`;
+  headCols += sth("Fast EMA", "fast_ema");
+  if (hasSlow) headCols += sth("Slow EMA", "slow_ema");
+  if (hasTrend) headCols += sth("Trend EMA", "trend_ema");
+  if (hasPullback) headCols += sth("Pullback Tol", "pullback_tolerance_pct");
+  headCols += sth("Vol Mult", "volume_multiplier") + sth("VWAP Slope", "vwap_slope_min");
+  if (hasAtr) headCols += sth("ATR Mult", "atr_multiplier");
+  if (hasVwapOffset) headCols += sth("VWAP Offset", "vwap_stop_offset_pct");
+  headCols += sth("R:R Ratio", "risk_reward_ratio") + `<th>Validation</th><th>Actions</th>`;
 
   if (thead) thead.innerHTML = `<tr>${headCols}</tr>`;
 
-  tbody.innerHTML = trials
+  tbody.innerHTML = sorted
     .map((t, idx) => {
       const p = t.params || {};
       let rowHtml = `<td style="font-weight: 600;">#${t.trial_number}</td>`;
@@ -2173,15 +3080,17 @@ function renderOptunaTrials(trials) {
       const multiMetrics = isMulti ? lastRes.pareto_objectives : null;
       const targetMet = isMulti ? (multiMetrics ? multiMetrics[0] : "sharpe_ratio") : (lastRes?.target_metric || null);
 
-      const rowDataAttr = encodeURIComponent(JSON.stringify(p));
-      const cacheKey = `optuna_trial_${idx}`;
+      const fullTrialParams = { ...(window._lastOptimizationResult?.base_params || getStrategyParamsFromUI()), ...p };
+      const rowDataAttr = encodeURIComponent(JSON.stringify(fullTrialParams));
+      const trialNum = t.trial_number ?? idx;
+      const cacheKey = `optuna_trial_${trialNum}`;
       window._validationContextCache[cacheKey] = {
         reportKey: cacheKey,
         trialIdx: idx,
         symbol: document.getElementById("symbol-input")?.value?.trim() || "BTC/USD",
         timeframe: document.getElementById("timeframe-select")?.value || "5m",
         exchange: document.getElementById("exchange-select")?.value || "kucoin",
-        params: p,
+        params: fullTrialParams,
         targetMetric: targetMet,
         enableMulti: isMulti,
         multiMetrics: multiMetrics,
@@ -2189,11 +3098,11 @@ function renderOptunaTrials(trials) {
 
       const cachedReport = window._validationReportCache[cacheKey];
       if (cachedReport) {
-        rowHtml += `<td id="trial-val-cell-${idx}" style="text-align:center;">
+        rowHtml += `<td id="trial-val-cell-${trialNum}" style="text-align:center;">
           <div style="display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
             ${getValidationBadgeHtml(cachedReport.status, cachedReport.overall_score, cacheKey)}
             <button class="btn-secondary btn-xs revalidate-trial-row-btn"
-                    data-trial-idx="${idx}"
+                    data-trial-idx="${trialNum}"
                     data-params="${rowDataAttr}"
                     style="padding: 1px 5px; font-size: 0.68rem; cursor: pointer; border-color: rgba(0, 242, 254, 0.3); color: var(--accent-cyan);"
                     title="Re-run 3-Gate Robustness Check">
@@ -2202,12 +3111,16 @@ function renderOptunaTrials(trials) {
           </div>
         </td>`;
       } else {
-        rowHtml += `<td id="trial-val-cell-${idx}" style="text-align:center;">
-          <button class="btn-secondary btn-sm validate-trial-row-btn" data-trial-idx="${idx}" data-params="${rowDataAttr}" style="padding: 3px 8px; font-size: 0.72rem; cursor: pointer; border-color: rgba(0, 242, 254, 0.4); color: var(--accent-cyan);">🔬 Validate</button>
+        rowHtml += `<td id="trial-val-cell-${trialNum}" style="text-align:center;">
+          <button class="btn-secondary btn-sm validate-trial-row-btn" data-trial-idx="${trialNum}" data-params="${rowDataAttr}" style="padding: 3px 8px; font-size: 0.72rem; cursor: pointer; border-color: rgba(0, 242, 254, 0.4); color: var(--accent-cyan);">🔬 Validate</button>
         </td>`;
       }
-      rowHtml += `<td><button class="btn-success btn-sm deploy-trial-row-btn" data-trial-idx="${idx}" style="padding: 3px 8px; font-size: 0.72rem; cursor: pointer;">🚀 Deploy</button></td>`;
-      return `<tr>${rowHtml}</tr>`;
+      // Actions cell: Apply + Deploy buttons
+      rowHtml += `<td style="white-space:nowrap;">
+        <button class="btn-primary btn-sm apply-trial-row-btn" data-trial-idx="${trialNum}" style="padding: 3px 8px; font-size: 0.72rem; cursor: pointer; margin-right: 4px;" title="Load into top panel and Apply to Strategy">⚡ Apply</button>
+        <button class="btn-success btn-sm deploy-trial-row-btn" data-trial-idx="${trialNum}" style="padding: 3px 8px; font-size: 0.72rem; cursor: pointer;">🚀 Deploy</button>
+      </td>`;
+      return `<tr id="optuna-trial-row-${trialNum}" class="optuna-trial-row" style="cursor:pointer;" title="Click row to load Trial #${t.trial_number} into the panel">${rowHtml}</tr>`;
     })
     .join("");
 
@@ -2231,7 +3144,8 @@ function renderOptunaTrials(trials) {
           const isMulti = lastRes ? lastRes.optimization_mode === "multi_objective" : false;
           const multiMetrics = isMulti ? lastRes.pareto_objectives : null;
           const targetMet = isMulti ? (multiMetrics ? multiMetrics[0] : "sharpe_ratio") : (lastRes?.target_metric || null);
-          const report = await validateStrategyConfig(sym, tf, ex, p, targetMet, isMulti, multiMetrics);
+          const fullParams = { ...(window._lastOptimizationResult?.base_params || getStrategyParamsFromUI()), ...p };
+          const report = await validateStrategyConfig(sym, tf, ex, fullParams, targetMet, isMulti, multiMetrics);
           const cacheKey = `optuna_trial_${idx}`;
           window._validationReportCache[cacheKey] = report;
           window._validationContextCache[cacheKey] = {
@@ -2240,16 +3154,16 @@ function renderOptunaTrials(trials) {
             symbol: sym,
             timeframe: tf,
             exchange: ex,
-            params: p,
+            params: fullParams,
             targetMetric: targetMet,
             enableMulti: isMulti,
             multiMetrics: multiMetrics,
           };
-          const rowDataAttr = encodeURIComponent(JSON.stringify(p));
+          const rowDataAttr = encodeURIComponent(JSON.stringify(fullParams));
           cell.innerHTML = `<div style="display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
             ${getValidationBadgeHtml(report.status, report.overall_score, cacheKey)}
             <button class="btn-secondary btn-xs revalidate-trial-row-btn"
-                    data-trial-idx="${idx}"
+                    data-trial-idx="${trialNum}"
                     data-params="${rowDataAttr}"
                     style="padding: 1px 5px; font-size: 0.68rem; cursor: pointer; border-color: rgba(0, 242, 254, 0.3); color: var(--accent-cyan);"
                     title="Re-run 3-Gate Robustness Check">
@@ -2270,9 +3184,9 @@ function renderOptunaTrials(trials) {
   const rowBtns = tbody.querySelectorAll(".deploy-trial-row-btn");
   rowBtns.forEach((b) => {
     b.addEventListener("click", (e) => {
-      const idx = parseInt(e.target.getAttribute("data-trial-idx"), 10);
-      const trial = trials[idx];
-      const cacheKey = `optuna_trial_${idx}`;
+      const trialNum = parseInt(e.target.getAttribute("data-trial-idx"), 10);
+      const trial = trials.find(t => t.trial_number === trialNum);
+      const cacheKey = `optuna_trial_${trialNum}`;
       const report = window._validationReportCache[cacheKey];
       if (trial && trial.params) {
         e.target.innerHTML = "⏳";
@@ -2292,31 +3206,73 @@ function renderOptunaTrials(trials) {
       }
     });
   });
+
+  // --- Per-trial Apply buttons: load into panel then run backtest ---
+  const applyBtns = tbody.querySelectorAll(".apply-trial-row-btn");
+  applyBtns.forEach((b) => {
+    b.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't also fire row-click
+      const trialNum = parseInt(e.currentTarget.getAttribute("data-trial-idx"), 10);
+      const trial = trials.find(t => t.trial_number === trialNum);
+      if (!trial) return;
+      loadTrialIntoPanel(trial, idx);
+      // Brief flash on button then trigger Apply to Strategy
+      b.innerHTML = "⏳";
+      b.disabled = true;
+      setTimeout(() => {
+        b.innerHTML = "⚡ Apply";
+        b.disabled = false;
+        applyBestOptunaParams();
+      }, 150);
+    });
+  });
+
+  // --- Row-click: load trial into panel (ignore clicks on buttons) ---
+  tbody.querySelectorAll(".optuna-trial-row").forEach((row) => {
+    row.addEventListener("click", (e) => {
+      if (e.target.closest("button")) return; // let button handlers fire instead
+      const trialNum = parseInt(row.id.replace("optuna-trial-row-", ""), 10);
+      const trial = trials.find(t => t.trial_number === trialNum);
+      if (trial) loadTrialIntoPanel(trial, trialNum);
+    });
+  });
+
+  // Auto-highlight first row as the current "best" selection
+  const firstRow = document.getElementById("optuna-trial-row-0");
+  if (firstRow) firstRow.classList.add("optuna-trial-row--selected");
+
+  // Wire sort click handlers and update indicators
+  document.querySelectorAll(".optuna-sortable-th").forEach((th) => {
+    th.onclick = () => sortOptunaTrials(th.dataset.sort);
+  });
+  _updateOptunaSortHeaders();
 }
 
 async function runWalkForwardAnalysis() {
   const btn = document.getElementById("run-wfo-btn");
+  if (!btn) return;
   btn.disabled = true;
   btn.innerHTML = `<span class="btn-icon">⏳</span> Analyzing Windows...`;
 
-  const { limit, days } = getDataRangeParams();
-  const baseParams = getStrategyParamsFromUI();
-  const payload = {
-    exchange: document.getElementById("exchange-select").value,
-    symbol: document.getElementById("symbol-input").value.trim(),
-    timeframe: document.getElementById("timeframe-select").value,
-    limit: limit,
-    days: days,
-    ...baseParams,
-    num_windows: parseInt(document.getElementById("wfo-windows-input").value, 10),
-    trials_per_window: 0,  // 0 = auto-derive from n_trials_total / num_windows
-    n_trials_total: parseInt(document.getElementById("optuna-trials-input").value, 10),
-  };
-
   try {
+    const { limit, days } = getDataRangeParams();
+    const baseParams = getStrategyParamsFromUI();
+    const payload = {
+      exchange: document.getElementById("exchange-select").value,
+      symbol: document.getElementById("symbol-input").value.trim(),
+      timeframe: document.getElementById("timeframe-select").value,
+      limit: limit,
+      days: days,
+      ...baseParams,
+      num_windows: parseInt(document.getElementById("wfo-windows-input").value, 10),
+      trials_per_window: 0, // 0 = auto-derive from n_trials_total / num_windows
+      n_trials_total: parseInt(document.getElementById("optuna-trials-input").value, 10),
+      days: parseInt(document.getElementById("wfo-days-input").value, 10) || 365,
+    };
+
     const response = await fetch("/api/walk_forward", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
 
@@ -2420,25 +3376,26 @@ function renderWfoTable(windowDetails) {
 
 async function runMonteCarloSimulation() {
   const btn = document.getElementById("run-mc-btn");
+  if (!btn) return;
   btn.disabled = true;
   btn.innerHTML = `<span class="btn-icon">⏳</span> Simulating Paths...`;
 
-  const { limit, days } = getDataRangeParams();
-  const baseParams = getStrategyParamsFromUI();
-  const payload = {
-    exchange: document.getElementById("exchange-select").value,
-    symbol: document.getElementById("symbol-input").value.trim(),
-    timeframe: document.getElementById("timeframe-select").value,
-    limit: limit,
-    days: days,
-    ...baseParams,
-    num_simulations: parseInt(document.getElementById("mc-sims-input").value, 10),
-  };
-
   try {
+    const { limit, days } = getDataRangeParams();
+    const baseParams = getStrategyParamsFromUI();
+    const payload = {
+      exchange: document.getElementById("exchange-select").value,
+      symbol: document.getElementById("symbol-input").value.trim(),
+      timeframe: document.getElementById("timeframe-select").value,
+      limit: limit,
+      days: days,
+      ...baseParams,
+      num_simulations: parseInt(document.getElementById("mc-sims-input").value, 10),
+    };
+
     const response = await fetch("/api/monte_carlo", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
 
@@ -2570,6 +3527,20 @@ async function startBatchSweep() {
     return;
   }
 
+  if (objectiveMode === "single" && targetMetric === "all_metrics" && timeframes.length !== 1) {
+    alert("All Metrics mode requires exactly one timeframe. Please select only 1 timeframe.");
+    return;
+  }
+
+  if (objectiveMode === "multi" && multiMetricValue === "all_combinations" && timeframes.length !== 1) {
+    alert("All Combinations mode requires exactly one timeframe. Please select only 1 timeframe.");
+    return;
+  }
+
+  const isAllMulti = objectiveMode === "multi" && multiMetricValue === "all_combinations";
+  const payloadTargetMetric = objectiveMode === "multi" ? (isAllMulti ? "all_combinations" : multiMetricValue) : targetMetric;
+  const payloadMultiMetrics = objectiveMode === "multi" ? (isAllMulti ? ["all_combinations"] : multiMetricList) : undefined;
+
   const btn = document.getElementById("batch-run-btn");
   btn.disabled = true;
   btn.innerHTML = `<span class="btn-icon">⏳</span> Running...`;
@@ -2584,17 +3555,17 @@ async function startBatchSweep() {
   try {
     const resp = await fetch("/api/batch_optimize", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ symbols, timeframes, exchange, n_trials: nTrials,
-                             target_metric: objectiveMode === "multi" ? multiMetricValue : targetMetric,
+                             target_metric: payloadTargetMetric,
                              enable_multi_objective: objectiveMode === "multi",
-                             multi_objective_metrics: objectiveMode === "multi" ? multiMetricList : undefined,
+                             multi_objective_metrics: payloadMultiMetrics,
                              enable_hard_drawdown_constraint: document.getElementById("batch-enable-dd-constraint")?.checked || false,
                              max_drawdown_constraint_pct: parseFloat(document.getElementById("batch-dd-constraint-input")?.value || "25"),
                              enable_max_holding_bars: document.getElementById("batch-enable-max-hold")?.checked || false,
                              max_holding_bars_min: parseInt(document.getElementById("batch-max-hold-min")?.value || "4", 10),
                              max_holding_bars_max: parseInt(document.getElementById("batch-max-hold-max")?.value || "96", 10),
-                             days: 180,
+                             days: getBatchDataRangeDays(),
                              strategy_mode: document.getElementById("batch-strategy-mode-select")?.value || "auto",
                              min_trades: getSettings().min_trades,
                              fast_ema_min: getSettings().fast_ema_min,
@@ -2606,10 +3577,12 @@ async function startBatchSweep() {
                              volume_multiplier_min: getSettings().volume_multiplier_min,
                              volume_multiplier_max: getSettings().volume_multiplier_max,
                              atr_multiplier_min: getSettings().atr_multiplier_min,
-                             atr_multiplier_max: getSettings().atr_multiplier_max,
-                             risk_reward_min: getSettings().risk_reward_min,
+                                                         atr_multiplier_max: getSettings().atr_multiplier_max,
+                                                         trailing_stop_min: getSettings().trailing_stop_min,
+                                                         trailing_stop_max: getSettings().trailing_stop_max,
+                                                         risk_reward_min: getSettings().risk_reward_min,
                              risk_reward_max: getSettings().risk_reward_max,
-                             vwap_slope_max_bound: getSettings().vwap_slope_max,
+                             vwap_slope_max_bound: getSettings().vwap_slope_max_bound,
                              n_jobs: getSettings().n_jobs !== undefined ? getSettings().n_jobs : 1,
                              n_startup_trials: getSettings().n_startup_trials,
                              trade_direction: tradeDirection }),
@@ -2626,7 +3599,7 @@ async function startBatchSweep() {
     if (_batchPollTimer) clearInterval(_batchPollTimer);
     _batchPollTimer = setInterval(async () => {
       try {
-        const statusResp = await fetch("/api/batch_status");
+        const statusResp = await fetch("/api/batch_status", { headers: getAuthHeaders() });
         const state = await statusResp.json();
         const pct = state.total > 0
           ? Math.round((state.done / state.total) * 100)
@@ -2680,7 +3653,7 @@ async function autoValidateBatchResults() {
   try {
     const resp = await fetch("/api/batch_results/auto-validate", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({}),
     });
     if (!resp.ok) {
@@ -2701,7 +3674,7 @@ async function loadBatchResults() {
   try {
     // Loading saved results should not depend on the metric currently selected
     // for the next sweep. Persisted rows identify their own target metric.
-    const resp = await fetch("/api/batch_results?limit=100");
+    const resp = await fetch("/api/batch_results?limit=100", { headers: getAuthHeaders() });
     const data = await resp.json();
     renderBatchLeaderboard(data.results || []);
     const countEl = document.getElementById("batch-result-count");
@@ -2761,6 +3734,7 @@ function getBatchValidationCellHtml(r) {
 }
 
 async function validateBatchLeaderboardRow(resultId, symbol, timeframe, exchange, encodedParams, btn, targetMetric = null) {
+  console.log("[DEBUG] validateBatchLeaderboardRow called:", {resultId, symbol, timeframe, exchange, targetMetric});
   if (btn) {
     btn.innerHTML = "⏳";
     btn.disabled = true;
@@ -2790,7 +3764,7 @@ async function validateBatchLeaderboardRow(resultId, symbol, timeframe, exchange
     // Save to SQLite
     await fetch(`/api/batch_results/${resultId}/validation`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         status: report.status,
         report_json: JSON.stringify(report),
@@ -2827,14 +3801,88 @@ async function validateBatchLeaderboardRow(resultId, symbol, timeframe, exchange
   }
 }
 
+window.validateBatchLeaderboardRow = validateBatchLeaderboardRow;
+
+// ---------------------------------------------------------------------------
+// Leaderboard column sort state
+// ---------------------------------------------------------------------------
+let _batchSortKey = "best_value";
+let _batchSortDir = "desc"; // "asc" | "desc"
+
+function sortBatchLeaderboard(key) {
+  if (_batchSortKey === key) {
+    _batchSortDir = _batchSortDir === "asc" ? "desc" : "asc";
+  } else {
+    _batchSortKey = key;
+    // Numeric columns default desc (higher = better), text columns default asc
+    const textCols = new Set(["symbol", "timeframe", "target_metric", "run_timestamp"]);
+    _batchSortDir = textCols.has(key) ? "asc" : "desc";
+  }
+  // Re-render using the cached rows (stored on the table element)
+  const table = document.getElementById("batch-leaderboard-table");
+  if (table && table._cachedRows) {
+    renderBatchLeaderboard(table._cachedRows);
+  }
+}
+
+function _updateLeaderboardSortHeaders() {
+  document.querySelectorAll(".sortable-th").forEach((th) => {
+    const key = th.dataset.sort;
+    const indicator = th.querySelector(".sort-indicator");
+    if (!indicator) return;
+    if (key === _batchSortKey) {
+      indicator.textContent = _batchSortDir === "asc" ? " ↑" : " ↓";
+      th.style.color = "#00f2fe";
+    } else {
+      indicator.textContent = " ↕";
+      th.style.color = "";
+    }
+  });
+}
+
 function renderBatchLeaderboard(rows) {
+
   const tbody = document.getElementById("batch-leaderboard-body");
+  // Cache rows on the table element so re-sorting doesn't need a new fetch
+  const table = document.getElementById("batch-leaderboard-table");
+  if (table) table._cachedRows = rows;
+
   if (!rows || !rows.length) {
     tbody.innerHTML = `<tr><td colspan="15" style="padding:24px;text-align:center;color:var(--text-muted);">
       No results yet — run a Batch Sweep or click Load Saved Results.</td></tr>`;
     updateBatchSelectionState();
     return;
   }
+
+  // Sort rows according to current sort state
+  const sorted = [...rows].sort((a, b) => {
+    const isNumericKey = ["best_value", "validation_score", "sharpe_ratio", "total_return_pct", "win_rate", "max_drawdown_pct", "trade_count"].includes(_batchSortKey);
+    // For validation_score: fall back to parsing overall_score from validation_json if DB column is null
+    const getNumericVal = (r, key) => {
+      if (key === "validation_score") {
+        if (r.validation_score !== null && r.validation_score !== undefined) return r.validation_score;
+        try {
+          const rep = typeof r.validation_json === "string" ? JSON.parse(r.validation_json) : r.validation_json;
+          if (rep && typeof rep.overall_score === "number") return rep.overall_score;
+        } catch (_) {}
+        return null;
+      }
+      return r[key] ?? null;
+    };
+    const aVal = getNumericVal(a, _batchSortKey);
+    const bVal = getNumericVal(b, _batchSortKey);
+    let cmp = 0;
+    if (isNumericKey) {
+      const aN = (aVal === null || aVal === undefined || isNaN(aVal)) ? -Infinity : Number(aVal);
+      const bN = (bVal === null || bVal === undefined || isNaN(bVal)) ? -Infinity : Number(bVal);
+      cmp = aN - bN;
+    } else if (typeof aVal === "number" && typeof bVal === "number") {
+      cmp = aVal - bVal;
+    } else {
+      cmp = String(aVal).localeCompare(String(bVal), undefined, { numeric: true });
+    }
+    return _batchSortDir === "asc" ? cmp : -cmp;
+  });
 
   const formatBatchMetricLabel = (m) => {
     if (!m) return "--";
@@ -2857,7 +3905,7 @@ function renderBatchLeaderboard(rows) {
     return singleLabels[m] || m;
   };
 
-  tbody.innerHTML = rows.map((r, i) => {
+  tbody.innerHTML = sorted.map((r, i) => {
     const ts = r.run_timestamp
       ? new Date(r.run_timestamp).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })
       : "--";
@@ -2903,16 +3951,28 @@ function renderBatchLeaderboard(rows) {
             Apply
           </button>
           <button class="btn-success btn-sm glow-green"
-                  style="padding:4px 8px;font-size:0.78em; cursor:pointer;"
+                  style="padding:4px 8px;font-size:0.78em; cursor:pointer; margin-right: 4px;"
                   onclick="deployBatchRowToPaper('${r.symbol}','${r.timeframe}','${r.exchange}','${r.target_metric}',${bestValueNum},this.dataset.params,this)"
                   data-params="${rowDataAttr}"
                   title="Deploy directly to active Paper Trading Profile">
             🚀 Deploy
           </button>
+          <button class="btn-secondary btn-sm"
+                  style="padding:4px 8px;font-size:0.78em; cursor:pointer; color:#f87171; border-color:rgba(248,113,113,0.3);"
+                  onclick="deleteSingleBatchResult(${r.id}, '${r.symbol}', '${r.timeframe}')"
+                  title="Delete this result from database">
+            🗑
+          </button>
         </td>
       </tr>`;
   }).join("");
   updateBatchSelectionState();
+
+  // Wire sort click handlers and update indicators
+  document.querySelectorAll(".sortable-th").forEach((th) => {
+    th.onclick = () => sortBatchLeaderboard(th.dataset.sort);
+  });
+  _updateLeaderboardSortHeaders();
 }
 
 async function toggleBatchFavorite(resultId, favorite, button) {
@@ -2920,7 +3980,7 @@ async function toggleBatchFavorite(resultId, favorite, button) {
   try {
     const resp = await fetch(`/api/batch_results/${resultId}/favorite`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ favorite }),
     });
     const data = await resp.json();
@@ -2959,15 +4019,40 @@ function toggleAllBatchResults(checked) {
   updateBatchSelectionState();
 }
 
-async function deleteSelectedBatchResults() {
-  const ids = [...document.querySelectorAll(".batch-result-check:checked")]
-    .map((check) => Number(check.value));
-  if (!ids.length || !confirm(`Delete ${ids.length} selected batch result${ids.length === 1 ? "" : "s"}?`)) return;
+async function deleteSingleBatchResult(resultId, symbol, timeframe) {
+  console.log("[DEBUG] deleteSingleBatchResult called:", {resultId, symbol, timeframe});
+  const label = symbol && timeframe ? `${symbol} (${timeframe})` : `result #${resultId}`;
+  if (!confirm(`Delete batch result for ${label}? This cannot be undone.`)) return;
 
   try {
     const resp = await fetch("/api/batch_results", {
       method: "DELETE",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ ids: [Number(resultId)] }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || "Server error");
+    await loadBatchResults();
+  } catch (err) {
+    alert(`Could not delete batch result: ${err.message}`);
+  }
+}
+window.deleteSingleBatchResult = deleteSingleBatchResult;
+
+async function deleteSelectedBatchResults() {
+  const ids = [...document.querySelectorAll(".batch-result-check:checked")]
+    .map((check) => Number(check.value))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  if (!ids.length) {
+    alert("Please select at least one entry to delete.");
+    return;
+  }
+  if (!confirm(`Delete ${ids.length} selected batch result${ids.length === 1 ? "" : "s"}? This cannot be undone.`)) return;
+
+  try {
+    const resp = await fetch("/api/batch_results", {
+      method: "DELETE",
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ ids }),
     });
     const data = await resp.json();
@@ -2977,6 +4062,7 @@ async function deleteSelectedBatchResults() {
     alert(`Could not delete batch results: ${err.message}`);
   }
 }
+window.deleteSelectedBatchResults = deleteSelectedBatchResults;
 
 async function exportBatchToPortfolio() {
   const ids = [...document.querySelectorAll(".batch-result-check:checked")]
@@ -2991,7 +4077,7 @@ async function exportBatchToPortfolio() {
   try {
     const resp = await fetch("/api/batch_results/export_to_portfolio", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         result_ids: ids,
         weighting_method: weightingMethod,
@@ -3058,7 +4144,7 @@ async function purgeBatchResults() {
   try {
     const resp = await fetch("/api/batch_results/purge", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ older_than_days: days, target_metric: metric }),
     });
     const data = await resp.json();
@@ -3070,6 +4156,7 @@ async function purgeBatchResults() {
 }
 
 function applyBatchRow(symbol, timeframe, exchange, encodedParams) {
+  console.log("[DEBUG] applyBatchRow called:", {symbol, timeframe, exchange});
   // Set the symbol, timeframe, and exchange in the sidebar
   const symEl = document.getElementById("symbol-input");
   const tfEl  = document.getElementById("timeframe-select");
@@ -3100,7 +4187,8 @@ function applyBatchRow(symbol, timeframe, exchange, encodedParams) {
       stop_loss_type:         "stop-loss-type-select",
       vwap_stop_offset_pct:   "vwap-stop-input",
       atr_multiplier:         "atr-mult-input",
-      risk_per_trade_pct:     "risk-per-trade-input",
+      trailing_stop_pct: 1.5,
+          risk_per_trade_pct:     "risk-per-trade-input",
       risk_reward_ratio:      "rr-ratio-input",
     };
     const updatedIds = [];
@@ -3125,8 +4213,12 @@ function applyBatchRow(symbol, timeframe, exchange, encodedParams) {
           : "";
       updatedIds.push("max-holding-bars-input");
     }
+    // Sync the main backtest data-range to "auto" so the backend uses
+    // get_optimal_lookback_days(timeframe) — the same lookback the batch
+    // sweep used — ensuring trade counts are comparable across all three
+    // contexts (sweep leaderboard, validation, main backtest).
     const rangeEl = document.getElementById("data-range-select");
-    if (rangeEl) rangeEl.value = "180_days";
+    if (rangeEl) rangeEl.value = "auto";
 
     updatedIds.forEach((id) => {
       const el = document.getElementById(id);
@@ -3146,8 +4238,10 @@ function applyBatchRow(symbol, timeframe, exchange, encodedParams) {
     alert("Could not parse params: " + e.message);
   }
 }
+window.applyBatchRow = applyBatchRow;
 
 async function deployBatchRowToPaper(symbol, timeframe, exchange, metric, score, encodedParams, button) {
+  console.log("[DEBUG] deployBatchRowToPaper called:", {symbol, timeframe, exchange, metric, score});
   try {
     const params = JSON.parse(decodeURIComponent(encodedParams));
 
@@ -3180,7 +4274,7 @@ async function deployBatchRowToPaper(symbol, timeframe, exchange, metric, score,
 
     const resp = await fetch("/api/paper/profiles/deploy", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         exchange: exchange,
         symbol: symbol,
@@ -3225,14 +4319,52 @@ async function deployCurrentBacktestToPaper() {
   const timeframe = document.getElementById("timeframe-select").value;
   const baseParams = getStrategyParamsFromUI();
   const mergedParams = Object.assign({}, lastAppliedParams || {}, baseParams);
-  const returnText = document.getElementById("kpi-return") ? document.getElementById("kpi-return").textContent : "0.00%";
-  const score = parseFloat(returnText.replace("%", "").replace("+", "")) || 0.0;
 
   // Use the target metric from the last optimization result if available
   const lastRes = window._lastOptimizationResult;
   const isMulti = lastRes ? lastRes.optimization_mode === "multi_objective" : false;
   const multiMetrics = isMulti ? lastRes.pareto_objectives : null;
   const targetMetric = isMulti ? (multiMetrics ? multiMetrics[0] : "sharpe_ratio") : (lastRes?.target_metric || "total_return");
+
+  // Use the actual target metric value from the last backtest results
+  // instead of total_return_pct (which is not the optimization metric)
+  const metrics = window._lastBacktestMetrics || {};
+  let score = 0.0;
+  if (metrics && metrics[targetMetric] !== undefined) {
+    score = metrics[targetMetric];
+  } else {
+    // Fallback to total_return_pct if target metric not available
+    const returnText = document.getElementById("kpi-return") ? document.getElementById("kpi-return").textContent : "0.00%";
+    score = parseFloat(returnText.replace("%", "").replace("+", "")) || 0.0;
+  }
+
+  // Validation guardrail check (same as deployOptunaToPaper)
+  const valRep = window._lastBacktestValidationReport;
+  if (!valRep) {
+    alert("Run out-of-sample robustness validation before deploying backtest parameters.");
+    return;
+  }
+  if (
+    window._lastBacktestValidatedParams !== JSON.stringify(mergedParams)
+  ) {
+    alert("The validation report does not match the current backtest parameters. Validate them again.");
+    return;
+  }
+  if (valRep) {
+    if (valRep.status === "FAIL") {
+      const reasons = (valRep.reasons || []).map((r) => `• ${r}`).join("\n");
+      const ok = confirm(
+        `⚠️ DEPLOYMENT GUARDRAIL ALERT:\n\nThis strategy FAILED multi-stage robustness validation (Score: ${valRep.overall_score}/100).\n\nFailure Reasons:\n${reasons || "• Negative return or overfit detected"}\n\nDeploying an unprofitable or curve-fitted configuration into paper trading will risk capital.\n\nDo you still want to proceed with deployment?`
+      );
+      if (!ok) return;
+    } else if (valRep.status === "CAUTION") {
+      const reasons = (valRep.reasons || []).map((r) => `• ${r}`).join("\n");
+      const ok = confirm(
+        `⚠️ CAUTIONARY DEPLOYMENT:\n\nThis strategy passed validation with CAUTION (Score: ${valRep.overall_score}/100).\n\nObservations:\n${reasons || "• Low out-of-sample consistency"}\n\nProceed with deployment to paper trading?`
+      );
+      if (!ok) return;
+    }
+  }
 
   const btn = document.getElementById("deploy-backtest-paper-btn");
   if (btn) {
@@ -3243,7 +4375,7 @@ async function deployCurrentBacktestToPaper() {
   try {
     const resp = await fetch("/api/paper/profiles/deploy", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         exchange: exchange,
         symbol: symbol,
@@ -3253,6 +4385,8 @@ async function deployCurrentBacktestToPaper() {
         params: mergedParams,
         optuna_score: score,
         is_active: true,
+        deployed: true,
+        validation_report: valRep,
       }),
     });
 
@@ -3290,6 +4424,8 @@ async function deployCurrentBacktestToPaper() {
   }
 }
 
+window.deployBatchRowToPaper = deployBatchRowToPaper;
+
 // Wire up batch buttons
 document.addEventListener("DOMContentLoaded", () => {
   const runBtn  = document.getElementById("batch-run-btn");
@@ -3310,6 +4446,15 @@ document.addEventListener("DOMContentLoaded", () => {
     document.querySelector('[data-tab="tab-batch"]').click();
     startBatchSweep();
   });
+
+  const batchMetricSelect = document.getElementById("batch-metric-select");
+  if (batchMetricSelect) batchMetricSelect.addEventListener("change", syncBatchMetricUI);
+  const batchMultiMetricSelect = document.getElementById("batch-multi-metric-select");
+  if (batchMultiMetricSelect) batchMultiMetricSelect.addEventListener("change", syncBatchMetricUI);
+  document.querySelectorAll(".batch-tf-check").forEach((el) => {
+    el.addEventListener("change", syncBatchMetricUI);
+  });
+  syncBatchMetricUI();
 });
 
 // =========================================================================
@@ -3322,12 +4467,12 @@ let isPaperRunnerActive = false;
 async function loadPaperTradingData() {
   try {
     const [statusRes, posRes, profRes, tradesRes, txRes, perfRes] = await Promise.all([
-      fetch("/api/paper/engine/status").then((r) => r.json()),
-      fetch("/api/paper/positions").then((r) => r.json()),
+      fetch("/api/paper/engine/status", { headers: getAuthHeaders() }).then((r) => r.json()),
+      fetch("/api/paper/positions", { headers: getAuthHeaders() }).then((r) => r.json()),
       fetch("/api/paper/profiles").then((r) => r.json()),
-      fetch("/api/paper/trades/history?limit=50").then((r) => r.json()),
-      fetch("/api/paper/ledger/transactions?limit=50").then((r) => r.json()),
-      fetch("/api/paper/performance").then((r) => r.json()),
+      fetch("/api/paper/trades/history?limit=50", { headers: getAuthHeaders() }).then((r) => r.json()),
+      fetch("/api/paper/ledger/transactions?limit=50", { headers: getAuthHeaders() }).then((r) => r.json()),
+      fetch("/api/paper/performance", { headers: getAuthHeaders() }).then((r) => r.json()),
     ]);
 
     isPaperRunnerActive = statusRes.is_running;
@@ -3513,7 +4658,7 @@ async function saveEditSLTP() {
   try {
     const resp = await fetch(`/api/paper/positions/${ex}/${encodeURIComponent(sym)}/sl_tp`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
 
@@ -3535,6 +4680,7 @@ async function closePaperPosition(exchange, symbol) {
   try {
     const resp = await fetch(`/api/paper/positions/${exchange}/${encodeURIComponent(symbol)}/close`, {
       method: "POST",
+      headers: getAuthHeaders(),
     });
     if (!resp.ok) {
       const err = await resp.json();
@@ -3610,7 +4756,7 @@ async function togglePaperProfileActive(profileId, isActive) {
   try {
     await fetch(`/api/paper/profiles/${profileId}/toggle-active`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ is_active: isActive }),
     });
     await loadPaperTradingData();
@@ -3623,7 +4769,7 @@ async function updateProfileTradeDirection(profileId, tradeDirection) {
   try {
     const resp = await fetch(`/api/paper/profiles/${profileId}/trade-direction`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ trade_direction: tradeDirection }),
     });
     if (!resp.ok) {
@@ -3641,6 +4787,7 @@ async function deletePaperProfile(profileId) {
   try {
     await fetch(`/api/paper/profiles/${profileId}`, {
       method: "DELETE",
+      headers: getAuthHeaders(),
     });
     await loadPaperTradingData();
   } catch (err) {
@@ -3872,11 +5019,11 @@ document.addEventListener("DOMContentLoaded", () => {
       toggleRunnerBtn.disabled = true;
       try {
         if (isPaperRunnerActive) {
-          await fetch("/api/paper/engine/stop", { method: "POST" });
+          await fetch("/api/paper/engine/stop", { method: "POST", headers: getAuthHeaders() });
         } else {
           await fetch("/api/paper/engine/start", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: getAuthHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify({ interval_seconds: 15 }),
           });
         }
@@ -3896,7 +5043,7 @@ document.addEventListener("DOMContentLoaded", () => {
       try {
         const resp = await fetch("/api/paper/engine/step", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: getAuthHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({}),
         });
         const data = await resp.json();
@@ -3923,7 +5070,132 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (depositBtn) {
     depositBtn.addEventListener("click", () => {
-      alert("Paper trading account initialized with $10,000 USD default capital.");
+      // Build the deposit/reinitialize modal
+      const existingModal = document.getElementById("paper-deposit-modal");
+      if (existingModal) existingModal.remove();
+
+      const modal = document.createElement("div");
+      modal.id = "paper-deposit-modal";
+      modal.style.cssText = `
+        position: fixed; inset: 0; z-index: 9999;
+        background: rgba(0,0,0,0.72); backdrop-filter: blur(4px);
+        display: flex; align-items: center; justify-content: center;
+      `;
+      modal.innerHTML = `
+        <div style="
+          background: var(--bg-card, #1a1a2e);
+          border: 1px solid rgba(255,170,0,0.35);
+          border-radius: 12px; padding: 28px 32px;
+          min-width: 360px; max-width: 440px;
+          box-shadow: 0 0 40px rgba(255,170,0,0.12);
+        ">
+          <h3 style="margin: 0 0 6px; color: var(--accent-amber, #ffaa00); font-size: 1.1rem;">
+            💵 Deposit Cash
+          </h3>
+          <p style="margin: 0 0 20px; color: var(--text-muted, #888); font-size: 0.85rem;">
+            Add funds to your paper account, or reset and reinitialize it to a clean state.
+          </p>
+
+          <label style="display: block; font-size: 0.82rem; color: var(--text-muted, #888); margin-bottom: 4px;">
+            Amount (USD)
+          </label>
+          <input id="deposit-amount-input" type="number" min="1" step="1000" value="10000"
+            style="
+              width: 100%; box-sizing: border-box;
+              background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15);
+              color: #fff; border-radius: 6px; padding: 9px 12px; font-size: 1rem;
+              margin-bottom: 16px; outline: none;
+            " />
+
+          <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; margin-bottom: 20px; font-size: 0.88rem; color: var(--text-muted, #888);">
+            <input type="checkbox" id="deposit-reset-chk"
+              style="width: 16px; height: 16px; accent-color: #ff007a; cursor: pointer;" />
+            <span>
+              <strong style="color: #ff007a;">Reset account first</strong> — clears all ledger transactions,
+              open positions &amp; trade history, then deposits the amount.
+            </span>
+          </label>
+
+          <div id="deposit-error-msg" style="color: #ff007a; font-size: 0.82rem; margin-bottom: 12px; display: none;"></div>
+
+          <div style="display: flex; gap: 10px; justify-content: flex-end;">
+            <button id="deposit-cancel-btn" style="
+              background: transparent; border: 1px solid rgba(255,255,255,0.15);
+              color: var(--text-muted, #888); border-radius: 6px;
+              padding: 8px 18px; cursor: pointer; font-size: 0.9rem;
+            ">Cancel</button>
+            <button id="deposit-confirm-btn" style="
+              background: linear-gradient(135deg, rgba(255,170,0,0.18), rgba(255,170,0,0.08));
+              border: 1px solid rgba(255,170,0,0.5);
+              color: var(--accent-amber, #ffaa00); border-radius: 6px;
+              padding: 8px 22px; cursor: pointer; font-size: 0.9rem; font-weight: 600;
+            ">💵 Deposit</button>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(modal);
+
+      // Close on backdrop click
+      modal.addEventListener("click", (e) => { if (e.target === modal) modal.remove(); });
+      document.getElementById("deposit-cancel-btn").addEventListener("click", () => modal.remove());
+
+      document.getElementById("deposit-confirm-btn").addEventListener("click", async () => {
+        const amountInput = document.getElementById("deposit-amount-input");
+        const resetChk = document.getElementById("deposit-reset-chk");
+        const errMsg = document.getElementById("deposit-error-msg");
+        const confirmBtn = document.getElementById("deposit-confirm-btn");
+
+        const amount = parseFloat(amountInput.value);
+        if (!isFinite(amount) || amount <= 0) {
+          errMsg.textContent = "Please enter a valid positive amount.";
+          errMsg.style.display = "block";
+          return;
+        }
+
+        const doReset = resetChk.checked;
+        const confirmText = doReset
+          ? `Reset account and deposit $${amount.toLocaleString()}? This will permanently clear all ledger history, positions, and trade records.`
+          : `Deposit $${amount.toLocaleString()} into the paper account?`;
+
+        if (!confirm(confirmText)) return;
+
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = "⏳ Processing...";
+        errMsg.style.display = "none";
+
+        try {
+          const resp = await fetch("/api/paper/ledger/deposit", {
+            method: "POST",
+            headers: getAuthHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ amount, notes: doReset ? "Account reset + deposit" : "Manual deposit", reset: doReset }),
+          });
+          const data = await resp.json();
+          if (!resp.ok) {
+            errMsg.textContent = data.detail || "Deposit failed.";
+            errMsg.style.display = "block";
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = "💵 Deposit";
+            return;
+          }
+          modal.remove();
+          await loadPaperTradingData();
+          // Brief success banner
+          const desc = document.getElementById("paper-summary-desc");
+          if (desc) {
+            const msg = doReset
+              ? `✅ Account reset. New balance: $${data.balance_after.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : `✅ Deposited $${amount.toLocaleString("en-US", { minimumFractionDigits: 2 })}. New balance: $${data.balance_after.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            desc.textContent = msg;
+            setTimeout(() => { desc.textContent = "Virtual live execution engine with real-time mark-to-market and SL/TP management."; }, 5000);
+          }
+        } catch (err) {
+          errMsg.textContent = "Network error: " + err.message;
+          errMsg.style.display = "block";
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = "💵 Deposit";
+        }
+      });
     });
   }
 
@@ -3945,7 +5217,7 @@ document.addEventListener("DOMContentLoaded", () => {
       refreshPortBtn.disabled = true;
       refreshPortBtn.innerHTML = `⏳ Refreshing...`;
       try {
-        await fetch("/api/portfolio/refresh?include_synthetic=true", { method: "POST" });
+        await fetch("/api/portfolio/refresh?include_synthetic=true", { method: "POST", headers: getAuthHeaders() });
         await loadPortfolioDashboard();
       } catch (err) {
         console.warn("Portfolio refresh error:", err);
@@ -4212,9 +5484,9 @@ let currentHistoryLookbackDays = 30;
 async function loadPortfolioDashboard() {
   try {
     const [snapResp, corrResp, varResp] = await Promise.all([
-      fetch("/api/portfolio/snapshot?include_synthetic=true").then((r) => r.json()),
-      fetch("/api/portfolio/correlation").then((r) => r.json()),
-      fetch("/api/portfolio/var?include_synthetic=true").then((r) => r.json()),
+      fetch("/api/portfolio/snapshot?include_synthetic=true", { headers: getAuthHeaders() }).then((r) => r.json()),
+      fetch("/api/portfolio/correlation", { headers: getAuthHeaders() }).then((r) => r.json()),
+      fetch("/api/portfolio/var?include_synthetic=true", { headers: getAuthHeaders() }).then((r) => r.json()),
     ]);
 
     if (snapResp && snapResp.snapshot) {
@@ -4675,8 +5947,9 @@ async function calculateRebalancePlan() {
 
   try {
     const resp = await fetch("/api/portfolio/rebalance/plan", {
+        headers: getAuthHeaders(),
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         target_weights: targetWeightsNormalized,
         drift_threshold_pct: driftThresh,
@@ -4742,8 +6015,9 @@ async function executePortfolioRebalance(dryRun) {
 
   try {
     const resp = await fetch("/api/portfolio/rebalance/execute", {
+        headers: getAuthHeaders(),
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         target_weights: targetWeightsNormalized,
         drift_threshold_pct: driftThresh,
@@ -4816,6 +6090,17 @@ document.addEventListener("DOMContentLoaded", () => {
         addCustomTargetAsset(sym, 10);
         addAssetInput.value = "";
       }
+    });
+  }
+
+  const rigorPresetSelect = document.getElementById("setting-val-rigor-preset");
+  const valTrialsInput = document.getElementById("setting-val-trials");
+  if (rigorPresetSelect && valTrialsInput) {
+    rigorPresetSelect.addEventListener("change", () => {
+      const val = rigorPresetSelect.value;
+      if (val === "fast") valTrialsInput.value = 150;
+      else if (val === "standard") valTrialsInput.value = 250;
+      else if (val === "thorough") valTrialsInput.value = 500;
     });
   }
 });

@@ -21,7 +21,7 @@ def test_secret_key_detection_and_masking():
 
 def test_crypto_exchange_credentials_storage(tmp_path):
     """Verify storing and retrieving Gemini, KuCoin, and Robinhood credentials."""
-    db_path = str(tmp_path / "test_settings.db")
+    db_path = str(tmp_path / "system_test_settings.db")
     db = CandleDatabase(db_path=db_path)
     sm = SettingsManager(db=db)
 

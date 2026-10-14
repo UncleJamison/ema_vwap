@@ -1,0 +1,28 @@
+{
+  "audit": [
+    "REGIME DETECTION STRUCTURE COMPLETE: src/regime.py implements ADX(14)+ER(10)+ATR%(14 vs 60d median), 3-bar hysteresis, REGIME_MAP, classify_regime, get_current_regime. 16 tests in tests/test_regime.py pass. Reference spec at references/regime-classifier.md confirms indicator/threshold design.",
+    "ROOT CAUSE 1 \u2014 AUTOMATIC STRATEGY SWITCHING MISSING (spec requires 'automatic strategy switching'). StrategyParams.strategy_mode supports 'auto' but EmaVwapStrategy.generate_signals (src/strategy.py L124-157) has only 3 branches (multi_ema/pullback/else=crossover) \u2014 no 'auto' handling, no classify_regime call, no REGIME_MAP usage. BacktestEngine ignores regime entirely.",
+    "ROOT CAUSE 2 \u2014 LIVE REGIME STUB (src/app.py L698-710 /api/regime/current). Hardcodes 'regime': 'trending' with comment 'default for demo; replace with live classify_regime(df)'. classify_regime imported but never invoked for the endpoint.",
+    "ROOT CAUSE 3 \u2014 REGIME-SPECIFIC PARAM SETS UNUSED (src/config.py L200-203 regime_sweep_enabled/days/n_jobs = False/180/1 never read by optimizer/batch_optimizer). OptunaConfig has no RegimeConfig fields. BatchOptimizer builds fixed StrategyParams never using classify_regime.",
+    "ROOT CAUSE 4 \u2014 TRANSITION PROBABILITY MODELING ABSENT (spec requires 'transition probability modeling'). Zero HMM/Markov/transition-matrix code across repo. No HMM libraries in requirements.txt (fastapi/uvicorn/pandas/numpy/scipy/requests/optuna only).",
+    "ROOT CAUSE 5 \u2014 REGIME-AWARE RISK LIMITS MISSING (spec requires 'regime-aware risk limits'). RiskManager uses static params with no regime-conditioned sizing. No risk-limit map by regime label.",
+    "ROOT CAUSE 6 \u2014 HYSTERESIS WORKS BUT HAS NO DOWNSTREAM CONSUMER. apply_hysteresis and classify_regime function correctly but output is never fed into strategy selection, parameter loading, or risk adjustment.",
+    "REGIME CONFIG DUPLICATED: RegimeConfig defined identically in src/regime.py (L39-51) AND src/config.py (L266-281). The config.py copy is never imported or used anywhere.",
+    "INTEGRATION POINTS \u2014 strategy.py L131-136 (mode branches); backtester.py L100-105 (signal generation ignores regime); app.py L258-327 (backtest endpoint ignores strategy_mode='auto'); optimizer.py L283-424 (objective builds candidate_params with fixed strategy_mode).",
+    "VERIFICATION: repository clean (git master no commits); 16 regime tests pass; grep confirms classify_regime never called inside strategy/backtester/optimizer loops; no HMM lib in requirements.txt."
+  ],
+  "priority_fixes": [
+    "src/strategy.py L131: add 'auto' branch using get_current_regime(df) + regime_to_strategy_mode(regime) to dynamically select strategy mode.",
+    "src/app.py L698-710: replace hardcoded 'trending' with live classify_regime on DataLoader-loaded candles.",
+    "src/risk_manager.py: add regime-conditioned multipliers (e.g., high_vol 0.7x risk_per_trade, ranging tighter stops, trending wider).",
+    "src/config.py + src/optimizer.py + src/batch_optimizer.py: wire regime_sweep_enabled to pass RegimeConfig into Optuna objective when sweeping thresholds.",
+    "Create optional transition-probability module (separate file) for Markov regime transitions \u2014 only after user approves adding a dependency or using scipy.stats"
+  ],
+  "verification": [
+    "tests/test_regime.py: 16 passed (pytest -q); ADX/ER/ATR indicators + hysteresis + REGIME_MAP correct.",
+    "grep over src/ confirmed: classify_regime present only in src/regime.py and src/app.py imports; never invoked inside strategy/backtester/optimizer.",
+    "src/app.py L703 literal 'regime': 'trending' confirmed hardcoded.",
+    "requirements.txt contains no HMM/Markov library.",
+    "No edits made \u2014 audit only."
+  ]
+}

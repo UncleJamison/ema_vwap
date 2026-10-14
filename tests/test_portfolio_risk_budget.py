@@ -290,7 +290,7 @@ def test_export_batch_to_portfolio_risk_budget():
     from src.database import CandleDatabase
 
     client = TestClient(app)
-    db = CandleDatabase()
+    db = CandleDatabase(db_path="system_test_portfolio_risk_budget.db")
 
     all_rows = db.load_batch_results(limit=5)
     if not all_rows:

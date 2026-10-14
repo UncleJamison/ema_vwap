@@ -30,9 +30,12 @@ class FillResult:
 
 class BaseExecutionAlgorithm:
     """Base for all smart-order-routing algorithms."""
+
     name: str = "base"
 
-    def execute(self, order: ExecutionOrder, market_context: dict[str, Any] | None = None) -> FillResult:
+    def execute(
+        self, order: ExecutionOrder, market_context: dict[str, Any] | None = None
+    ) -> FillResult:
         market_context = market_context or {}
         # Default deterministic fill at target with zero impact/slippage
         return FillResult(
@@ -46,12 +49,15 @@ class BaseExecutionAlgorithm:
 
 class TWAPAlgorithm(BaseExecutionAlgorithm):
     """Time-Weighted Average Price — slice large order across time windows."""
+
     name = "TWAP"
 
     def __init__(self, windows: int = 4) -> None:
         self.windows = windows
 
-    def execute(self, order: ExecutionOrder, market_context: dict[str, Any] | None = None) -> FillResult:
+    def execute(
+        self, order: ExecutionOrder, market_context: dict[str, Any] | None = None
+    ) -> FillResult:
         market_context = market_context or {}
         base = order.target_price or 100.0
         vol = market_context.get("volatility", 0.02)
@@ -74,9 +80,12 @@ class TWAPAlgorithm(BaseExecutionAlgorithm):
 
 class VWAPAlgorithm(BaseExecutionAlgorithm):
     """Volume-Weighted Average Price — slice against volume profile."""
+
     name = "VWAP"
 
-    def execute(self, order: ExecutionOrder, market_context: dict[str, Any] | None = None) -> FillResult:
+    def execute(
+        self, order: ExecutionOrder, market_context: dict[str, Any] | None = None
+    ) -> FillResult:
         market_context = market_context or {}
         base = order.target_price or 100.0
         vol_r = market_context.get("volume_ratio", 1.0)
@@ -103,12 +112,15 @@ class VWAPAlgorithm(BaseExecutionAlgorithm):
 
 class POVAlgorithm(BaseExecutionAlgorithm):
     """Percentage of Volume (POV) — trade at fixed % of observed volume."""
+
     name = "POV"
 
     def __init__(self, pov_pct: float = 10.0) -> None:
         self.pov_pct = pov_pct
 
-    def execute(self, order: ExecutionOrder, market_context: dict[str, Any] | None = None) -> FillResult:
+    def execute(
+        self, order: ExecutionOrder, market_context: dict[str, Any] | None = None
+    ) -> FillResult:
         market_context = market_context or {}
         base = order.target_price or 100.0
         vol = market_context.get("volatility", 0.02)
@@ -134,12 +146,15 @@ class POVAlgorithm(BaseExecutionAlgorithm):
 
 class ImplementationShortfallAlgorithm(BaseExecutionAlgorithm):
     """Implementation Shortfall (IS) — minimizes cost vs arrival price."""
+
     name = "IS"
 
     def __init__(self, risk_aversion: float = 1.0) -> None:
         self.risk_aversion = risk_aversion
 
-    def execute(self, order: ExecutionOrder, market_context: dict[str, Any] | None = None) -> FillResult:
+    def execute(
+        self, order: ExecutionOrder, market_context: dict[str, Any] | None = None
+    ) -> FillResult:
         market_context = market_context or {}
         base = order.target_price or 100.0
         vol = market_context.get("volatility", 0.02)

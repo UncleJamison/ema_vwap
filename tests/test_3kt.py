@@ -30,7 +30,9 @@ def test_ab_runner_runs_both():
     challenger = StrategyVersion.from_config(
         name="challenger", params=StrategyParams(strategy_mode="pullback")
     )
-    runner = AbTestRunner(champion, challenger, df, warmup_bars=50, metric="sharpe_ratio")
+    runner = AbTestRunner(
+        champion, challenger, df, warmup_bars=50, metric="sharpe_ratio"
+    )
     result = runner.run()
     assert "champion" in result
     assert "challenger" in result
@@ -39,4 +41,8 @@ def test_ab_runner_runs_both():
     assert result["analysis"]["p_value"] >= 0.0
     assert result["recommendation"] == "manual_promotion_required"
     # Winner must be either champion, challenger, or inconclusive
-    assert result["analysis"]["winner"] in {champion.name, challenger.name, "inconclusive"}
+    assert result["analysis"]["winner"] in {
+        champion.name,
+        challenger.name,
+        "inconclusive",
+    }

@@ -8,6 +8,7 @@ from typing import ClassVar
 import pandas as pd
 import requests
 
+from src.config import get_optimal_lookback_days
 from src.providers.base import BaseDataProvider, normalize_symbol
 
 
@@ -30,10 +31,13 @@ class GeminiAdapter(BaseDataProvider):
         self,
         symbol: str = "BTC/USD",
         timeframe: str = "5m",
-        days: int = 180,
+        days: int | None = None,
         limit: int | None = None,
     ) -> pd.DataFrame:
         """Fetch historical candles from Gemini REST API."""
+        if days is None:
+            days = get_optimal_lookback_days(timeframe, "crypto")
+
         gemini_symbol = self.format_symbol(symbol)
         gemini_tf_map = {
             "1m": "1m",
@@ -104,13 +108,16 @@ class KuCoinAdapter(BaseDataProvider):
         self,
         symbol: str = "BTC/USDT",
         timeframe: str = "5m",
-        days: int = 180,
+        days: int | None = None,
         limit: int | None = None,
     ) -> pd.DataFrame:
         """
         Fetch up to `days` of historical intraday candles from KuCoin using paginated requests.
         KuCoin API returns up to 1,500 candles per call in reverse chronological order.
         """
+        if days is None:
+            days = get_optimal_lookback_days(timeframe, "crypto")
+
         kucoin_symbol = self.format_symbol(symbol)
         tf_map = {
             "1m": "1min",

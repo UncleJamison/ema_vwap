@@ -10,6 +10,7 @@ from typing import Any
 from src.portfolio.aggregator import portfolio_aggregator
 from src.portfolio.models import UnifiedPortfolioSnapshot
 from src.portfolio.order_router import VenueOrder, order_router
+from src.price_estimates import get_estimated_price
 
 
 @dataclass
@@ -117,13 +118,13 @@ class PortfolioRebalancingEngine:
             curr_price = current_holdings.get(sym, {}).get("current_price", 100.0)
             if curr_price <= 0:
                 if "BTC" in sym:
-                    curr_price = 65000.0
+                    curr_price = get_estimated_price("BTC")
                 elif "ETH" in sym:
-                    curr_price = 3500.0
+                    curr_price = get_estimated_price("ETH")
                 elif "AAPL" in sym:
-                    curr_price = 225.0
+                    curr_price = get_estimated_price("ZEC")
                 elif "SPY" in sym:
-                    curr_price = 550.0
+                    curr_price = get_estimated_price("SOL")
                 else:
                     curr_price = 100.0
 

@@ -14,6 +14,8 @@ from typing import ClassVar
 
 import pandas as pd
 
+from src.config import get_optimal_lookback_days
+from src.db_connection_manager import get_database
 from src.providers.base import BaseDataProvider
 from src.settings import SettingsManager
 
@@ -55,7 +57,7 @@ class AlpacaStockAdapter(BaseDataProvider):
     base_url: ClassVar[str] = "https://data.alpaca.markets/v2/stocks"
 
     def __init__(self, settings_manager: SettingsManager | None = None):
-        self.settings = settings_manager or SettingsManager()
+        self.settings = settings_manager or SettingsManager(get_database("system"))
 
     def format_symbol(self, symbol: str) -> str:
         """Strip quote currency and special characters (e.g., 'AAPL/USD' -> 'AAPL')."""
@@ -82,7 +84,7 @@ class AlpacaStockAdapter(BaseDataProvider):
         self,
         symbol: str = "AAPL",
         timeframe: str = "5m",
-        days: int = 180,
+        days: int | None = None,
         limit: int | None = None,
         adjustment: str = "split",
     ) -> pd.DataFrame:
@@ -90,6 +92,9 @@ class AlpacaStockAdapter(BaseDataProvider):
         Fetch historical stock candles from Alpaca Markets API v2.
         Supports multi-page token pagination up to requested limit/days.
         """
+        if days is None:
+            days = get_optimal_lookback_days(timeframe, "stock")
+
         ticker = self.format_symbol(symbol)
         tf_mapped = ALPACA_TIMEFRAMES.get(timeframe.lower(), "5Min")
         headers = self._get_headers()

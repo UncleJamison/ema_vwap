@@ -1,0 +1,40 @@
+#version: "3.8"
+
+services:
+  ema-vwap-daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ema_vwap_trading_daemon
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persistent SQLite WAL database and cache directory
+      - ./data:/app/data
+      # Persistent logs directory
+      - ./logs:/app/logs
+      # Mount application source code
+      - ./src:/app/src
+      # Mount entrypoint script
+      - ./entrypoint.sh:/app/entrypoint.sh
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HOST=0.0.0.0
+      - PORT=8080
+      - IN_DOCKER=1
+      - DB_JOURNAL_MODE=DELETE
+      # API key intentionally NOT set here. Configure via Settings UI
+      # (stored encrypted in data/system.db) or via API_KEY env at runtime.
+      # Never commit a real key to docker-compose.yml.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ && curl -f http://localhost:8080/api/paper/engine/status || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"

@@ -121,7 +121,7 @@ async function generateTearSheet() {
     if (format === 'pdf') {
       response = await fetch('/api/tear-sheet/pdf', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
@@ -133,7 +133,7 @@ async function generateTearSheet() {
     } else if (format === 'html') {
       response = await fetch('/api/tear-sheet/html', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
@@ -146,7 +146,7 @@ async function generateTearSheet() {
     } else if (format === 'json') {
       response = await fetch('/api/tear-sheet/json', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload),
       });
       if (!response.ok) {

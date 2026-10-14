@@ -11,6 +11,7 @@ from typing import Any, ClassVar
 import numpy as np
 import pandas as pd
 
+from src.price_estimates import get_estimated_price
 from src.providers.base import BaseDataProvider
 
 
@@ -37,7 +38,7 @@ class SyntheticStockAdapter(BaseDataProvider):
     # Standard stock base prices
     DEFAULT_PRICES: ClassVar[dict[str, float]] = {
         "AAPL": 220.0,
-        "SPY": 550.0,
+        "SPY": get_estimated_price("SOL"),
         "TSLA": 210.0,
         "NVDA": 125.0,
         "QQQ": 480.0,

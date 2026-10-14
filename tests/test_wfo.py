@@ -4,7 +4,12 @@ import pytest
 
 from src.config import OptunaConfig, StrategyParams, WFOConfig
 from src.data_loader import DataLoader
-from src.wfo import WalkForwardEngine, compute_wfo_auto_params
+from src.wfo import (
+    WalkForwardEngine,
+    compute_wfo_auto_params,
+    derive_bars_per_day,
+    get_default_target_oos_days,
+)
 
 
 def test_walk_forward_engine_basic():
@@ -83,10 +88,23 @@ def test_walk_forward_insufficient_data():
 
 
 def test_wfo_auto_trials_do_not_exceed_budget():
-    params = compute_wfo_auto_params(n_bars=5000, n_trials=12)
+    # With minimum 25 trials per window and 3 windows, minimum total is 75
+    params = compute_wfo_auto_params(n_bars=5000, n_trials=100)
 
-    assert params["trials_per_window"] >= 1
-    assert params["trials_per_window"] * params["num_windows"] <= 12
+    assert params["trials_per_window"] >= 25
+    assert params["trials_per_window"] * params["num_windows"] <= 100
+
+
+def test_wfo_auto_trials_with_increased_budget():
+    # With 250 trial budget, trials per window should be >= 50
+    params = compute_wfo_auto_params(n_bars=5000, n_trials=250)
+    assert params["trials_per_window"] >= 50
+    assert params["trials_per_window"] * params["num_windows"] <= 250
+
+    # With 500 trial budget (thorough preset)
+    params_thorough = compute_wfo_auto_params(n_bars=5000, n_trials=500)
+    assert params_thorough["trials_per_window"] >= 100
+    assert params_thorough["trials_per_window"] * params_thorough["num_windows"] <= 500
 
 
 # --- New tests for regime-aware WFO ---
@@ -201,6 +219,62 @@ def test_wfo_trigger_reoptimize_logic():
 
 
 # --- Auto-scaled tests ---
+def test_wfo_aggregate_and_average_oos_returns_are_distinct(monkeypatch):
+    """WFO must report both average and aggregate OOS return, not a single conflated metric."""
+    df = DataLoader.generate_synthetic_candles(num_bars=500, seed=42)
+    params = StrategyParams()
+    wfo_config = WFOConfig(num_windows=2, trials_per_window=1)
+
+    oos_values = iter([12.5, -8.0])
+
+    def fake_optimize(self, df_is):
+        return {
+            "best_params": {
+                "fast_ema": 10,
+                "slow_ema": 20,
+                "trend_ema": 30,
+                "volume_multiplier": 1.0,
+                "atr_multiplier": 2.0,
+                "risk_reward_ratio": 1.5,
+            },
+            "best_backtest_result": {
+                "total_return_pct": 5.0,
+                "win_rate": 0.5,
+                "sharpe_ratio": 1.0,
+            },
+            "best_value": 1.0,
+        }
+
+    class DummyOOSResult:
+        def __init__(self, total_return_pct):
+            self.total_return_pct = total_return_pct
+            self.win_rate = 0.5
+            self.profit_factor = 1.2
+            self.max_drawdown_pct = 10.0
+            self.sharpe_ratio = 0.8
+            self.total_trades = 1
+            self.trades = []
+
+    def fake_backtest_run(self, df_window, warmup_bars=None):
+        return DummyOOSResult(next(oos_values))
+
+    monkeypatch.setattr("src.wfo.OptunaOptimizer.optimize", fake_optimize)
+    monkeypatch.setattr("src.wfo.BacktestEngine.run", fake_backtest_run)
+
+    wfo_engine = WalkForwardEngine(base_params=params, wfo_config=wfo_config)
+    res = wfo_engine.run(df)
+
+    assert "avg_out_of_sample_return_pct" in res
+    assert "oos_total_return_pct" in res
+    assert "window_details" in res
+
+    expected_avg = 2.25
+    expected_total = (1.125 * 0.92 - 1.0) * 100.0
+    assert abs(res["avg_out_of_sample_return_pct"] - expected_avg) < 1e-6
+    assert abs(res["oos_total_return_pct"] - expected_total) < 1e-6
+    assert abs(res["oos_total_return_pct"] - res["avg_out_of_sample_return_pct"]) > 1e-6
+
+
 def test_wfo_auto_scaling_with_regime():
     """Auto-scaled WFO should still populate regime-aware fields."""
     df = DataLoader.generate_synthetic_candles(num_bars=1000, seed=42)
@@ -224,3 +298,132 @@ def test_wfo_auto_scaling_with_regime():
     # Regime fields present regardless of scaling mode
     assert "window_regimes" in res
     assert len(res["window_regimes"]) == res["window_count"]
+
+
+def test_wfo_time_normalized_efficiency(monkeypatch):
+    """Verify WFE is time-normalized by the ratio of IS bars to OOS bars."""
+    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=42)
+    params = StrategyParams()
+    wfo_config = WFOConfig(num_windows=2, trials_per_window=1, in_sample_ratio=0.7)
+
+    class DummyOOSResult:
+        def __init__(self, ret):
+            self.total_return_pct = ret
+            self.win_rate = 50.0
+            self.profit_factor = 1.5
+            self.max_drawdown_pct = 5.0
+            self.sharpe_ratio = 1.2
+            self.total_trades = 5
+            self.trades = []
+
+    def fake_optimize(self, df_is):
+        return {
+            "best_params": params.to_dict(),
+            "best_backtest_result": {
+                "total_return_pct": 7.0,
+                "win_rate": 50.0,
+                "sharpe_ratio": 1.2,
+            },
+            "best_value": 1.2,
+        }
+
+    def fake_backtest(self, df_window, warmup_bars=None):
+        return DummyOOSResult(3.0)
+
+    monkeypatch.setattr("src.wfo.OptunaOptimizer.optimize", fake_optimize)
+    monkeypatch.setattr("src.wfo.BacktestEngine.run", fake_backtest)
+
+    wfo_engine = WalkForwardEngine(base_params=params, wfo_config=wfo_config)
+    res = wfo_engine.run(df)
+
+    # In 2 windows with 0.7 IS ratio:
+    # avg_is_bars / avg_oos_bars is time_scale > 1.5
+    # Raw ratio was 3.0 / 7.0 = 42.86%.
+    # Time-normalized WFE should be (3.0 / 7.0) * time_scale * 100 > 90%.
+    assert res["time_scale"] > 1.5
+    assert res["walk_forward_efficiency_pct"] > 90.0
+    assert "oos_cumulative_return_pct" in res
+
+
+def test_derive_bars_per_day():
+    # String lookups
+    assert derive_bars_per_day(timeframe="1m") == 1440.0
+    assert derive_bars_per_day(timeframe="3m") == 480.0
+    assert derive_bars_per_day(timeframe="5m") == 288.0
+    assert derive_bars_per_day(timeframe="15m") == 96.0
+    assert derive_bars_per_day(timeframe="1h") == 24.0
+    assert derive_bars_per_day(timeframe="4h") == 6.0
+    assert derive_bars_per_day(timeframe="6h") == 4.0
+    assert derive_bars_per_day(timeframe="12h") == 2.0
+    assert derive_bars_per_day(timeframe="1d") == 1.0
+
+    # Default fallback
+    assert derive_bars_per_day() == 288.0
+
+    # DataFrame timestamp diff derivation
+    import pandas as pd
+
+    # 1h spaced timestamps
+    ts_1h = pd.date_range("2025-01-01", periods=10, freq="1h")
+    df_1h = pd.DataFrame({"timestamp": ts_1h, "close": [100.0] * 10})
+    assert derive_bars_per_day(df=df_1h) == 24.0
+
+    # 15m spaced timestamps
+    ts_15m = pd.date_range("2025-01-01", periods=10, freq="15min")
+    df_15m = pd.DataFrame({"timestamp": ts_15m, "close": [100.0] * 10})
+    assert derive_bars_per_day(df=df_15m) == 96.0
+
+
+def test_get_default_target_oos_days():
+    assert get_default_target_oos_days(timeframe="5m") == 15.0
+    assert get_default_target_oos_days(timeframe="15m") == 25.0
+    assert get_default_target_oos_days(timeframe="1h") == 45.0
+    assert get_default_target_oos_days(timeframe="4h") == 60.0
+    assert get_default_target_oos_days(timeframe="1d") == 120.0
+
+    # Test via bars_per_day
+    assert get_default_target_oos_days(bars_per_day=288.0) == 15.0
+    assert get_default_target_oos_days(bars_per_day=96.0) == 25.0
+    assert get_default_target_oos_days(bars_per_day=24.0) == 45.0
+    assert get_default_target_oos_days(bars_per_day=6.0) == 60.0
+
+
+def test_compute_wfo_auto_params_timeframe_scaling():
+    # 5m dataset with 20,000 bars
+    res_5m = compute_wfo_auto_params(n_bars=20000, n_trials=300, timeframe="5m")
+    assert res_5m["num_windows"] >= 3
+    assert res_5m["trials_per_window"] >= 25
+
+    # 15m dataset with 10,000 bars
+    res_15m = compute_wfo_auto_params(n_bars=10000, n_trials=300, timeframe="15m")
+    assert res_15m["num_windows"] >= 3
+    assert res_15m["trials_per_window"] >= 25
+
+    # 1h dataset with 10,000 bars
+    res_1h = compute_wfo_auto_params(n_bars=10000, n_trials=300, timeframe="1h")
+    assert res_1h["num_windows"] == 6
+    assert res_1h["trials_per_window"] == 50
+
+    # 4h dataset with 3,000 bars
+    res_4h = compute_wfo_auto_params(n_bars=3000, n_trials=300, timeframe="4h")
+    assert res_4h["num_windows"] == 6
+    assert res_4h["trials_per_window"] == 50
+
+
+def test_walk_forward_engine_timeframe_awareness():
+    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=42)
+    params = StrategyParams()
+    wfo_config = WFOConfig(num_windows=3, trials_per_window=3)
+    opt_config = OptunaConfig(n_trials=3)
+
+    # With explicit timeframe="1h"
+    engine = WalkForwardEngine(
+        base_params=params,
+        wfo_config=wfo_config,
+        opt_config=opt_config,
+        timeframe="1h",
+    )
+    assert engine.bars_per_day == 24.0
+    res = engine.run(df)
+    assert res["bars_per_day"] == 24.0
+    assert res["timeframe"] == "1h"

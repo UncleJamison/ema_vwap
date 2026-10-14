@@ -97,3 +97,22 @@ def test_monte_carlo_permutation_mode():
     expected_final = initial_capital + 100.0 - 50.0 + 75.0
     assert res["final_equity_percentiles"]["p5"] == expected_final
     assert res["final_equity_percentiles"]["p95"] == expected_final
+
+
+def test_monte_carlo_accepts_oos_return_path_for_tail_risk():
+    """Monte Carlo stress should support OOS relative-return paths instead of only fixed-dollar PnL trades."""
+    initial_capital = 10000.0
+    return_path = [-0.30, -0.25, -0.20, -0.15, -0.10]
+    mc_config = MonteCarloConfig(num_simulations=25, random_seed=7)
+
+    simulator = MonteCarloSimulator(
+        initial_capital,
+        trades=[],
+        config=mc_config,
+        return_series=return_path,
+    )
+    res = simulator.run()
+
+    assert res["trade_count"] == len(return_path)
+    assert res["risk_of_ruin_pct"] > 0.0
+    assert res["max_drawdown_percentiles"]["p95"] >= 50.0

@@ -2,6 +2,7 @@
 Unit tests for Virtual Execution Engine, Live Polling, and SL/TP Order Management.
 """
 
+import pandas as pd
 import pytest
 
 from src.config import StrategyParams
@@ -13,7 +14,7 @@ from src.providers import SyntheticAdapter
 
 @pytest.fixture
 def test_db(tmp_path):
-    db_file = str(tmp_path / "test_engine_candles.db")
+    db_file = str(tmp_path / "paper_trading_test_engine_candles.db")
     return CandleDatabase(db_path=db_file)
 
 
@@ -71,6 +72,67 @@ def test_paper_engine_entry_and_hold(test_db):
             force_candles=df_next,
         )
         assert res_hold["action"] == "HOLD"
+
+
+def test_paper_engine_respects_profile_risk_percentage_before_safety_cap(
+    test_db, monkeypatch
+):
+    engine = PaperTradingEngine(db=test_db)
+    engine.ledger.deposit(account_id="default", amount=100000.0, notes="Seed account")
+
+    rows = [
+        {
+            "timestamp": f"2024-01-01T00:{idx:02d}:00Z",
+            "close": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "vwap": 100.0,
+            "atr": 1.0,
+            "signal": 0,
+        }
+        for idx in range(20)
+    ]
+    rows[-1]["signal"] = 1
+
+    df_candles = pd.DataFrame(rows)
+
+    monkeypatch.setattr(
+        "src.paper.engine.EmaVwapStrategy.generate_signals",
+        lambda self, df: df.assign(signal=1),
+    )
+
+    params = StrategyParams(
+        strategy_mode="crossover",
+        fast_ema=9,
+        slow_ema=21,
+        volume_filter_enabled=False,
+        vwap_slope_min=0.0,
+        risk_per_trade_pct=3.0,
+        vwap_stop_offset_pct=0.1,
+        initial_capital=100000.0,
+    )
+    engine.registry.save_profile(
+        exchange="kucoin",
+        symbol="BTC/USDT",
+        timeframe="5m",
+        strategy_mode="crossover",
+        target_metric="sharpe_ratio",
+        params=params,
+        is_active=True,
+    )
+
+    res = engine.evaluate_symbol(
+        exchange="kucoin",
+        symbol="BTC/USDT",
+        timeframe="5m",
+        force_candles=df_candles,
+    )
+
+    assert res["action"].startswith("ENTER")
+    pos = engine.ledger.get_position("kucoin", "BTC/USDT")
+    assert pos is not None
+    assert pos.quantity * pos.current_price > 100000.0 * 0.25
+    assert pos.quantity * pos.current_price > 0.0
 
 
 def test_paper_engine_stop_loss_trigger(test_db):
@@ -203,17 +265,32 @@ def test_paper_engine_polling_runner_lifecycle(test_db):
 
 
 def test_paper_engine_runner_persistence(test_db):
-    engine = PaperTradingEngine(db=test_db)
-    # Start and persist
-    engine.start_polling(interval_seconds=20, persist=True)
-    assert engine.is_running is True
-    assert test_db.get_setting("paper_runner_enabled")["value"] == "true"
-    assert test_db.get_setting("paper_polling_interval")["value"] == "20"
+    import os
+    import tempfile
 
-    # Stop and persist
-    engine.stop_polling(persist=True)
-    assert engine.is_running is False
-    assert test_db.get_setting("paper_runner_enabled")["value"] == "false"
+    from src.settings import SettingsManager
+
+    tmp = tempfile.TemporaryDirectory()
+    settings_db_path = os.path.join(tmp.name, "system_settings_for_runner.db")
+    settings_db = CandleDatabase(db_path=settings_db_path)
+    settings_mgr = SettingsManager(settings_db)
+    try:
+        engine = PaperTradingEngine(db=test_db, settings_mgr=settings_mgr)
+        # Start and persist
+        engine.start_polling(interval_seconds=20, persist=True)
+        assert engine.is_running is True
+        assert settings_mgr.get("paper_runner_enabled") == "true"
+        assert settings_mgr.get("paper_polling_interval") == "20"
+
+        # Stop and persist
+        engine.stop_polling(persist=True)
+        assert engine.is_running is False
+        assert settings_mgr.get("paper_runner_enabled") == "false"
+    finally:
+        try:
+            tmp.cleanup()
+        except PermissionError:
+            pass
 
 
 def test_reconcile_positions_stop_loss_breach(test_db):

@@ -9,8 +9,10 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from src.db_connection_manager import get_database
 from src.paper.ledger import PaperLedger
 from src.portfolio.connectors import categorize_currency
+from src.price_estimates import get_estimated_price
 from src.settings import SettingsManager
 
 logger = logging.getLogger("ema_vwap.order_router")
@@ -47,7 +49,7 @@ class OrderRouter:
         settings: SettingsManager | None = None,
         paper_ledger: PaperLedger | None = None,
     ):
-        self.settings = settings or SettingsManager()
+        self.settings = settings or SettingsManager(get_database("system"))
         self.paper_ledger = paper_ledger or PaperLedger()
 
     def route_order(
@@ -188,13 +190,11 @@ class OrderRouter:
         )
         # If symbol is known crypto, use realistic price
         if "BTC" in order.symbol:
-            fill_price = 65000.0
+            fill_price = get_estimated_price("BTC")
         elif "ETH" in order.symbol:
-            fill_price = 3500.0
-        elif "AAPL" in order.symbol:
-            fill_price = 225.0
-        elif "SPY" in order.symbol:
-            fill_price = 550.0
+            fill_price = get_estimated_price("ETH")
+        elif "SPY" in order.symbol or "AAPL" in order.symbol:
+            fill_price = get_estimated_price("SOL")
 
         fee = round(order.quantity * fill_price * 0.00075, 2)
 

@@ -1,0 +1,13 @@
+[tool.ruff]
+extend-exclude = [
+    # Stale worktree copy from an earlier beads task; not part of the active tree.
+    ".worktrees",
+]
+
+[tool.ruff.lint]
+# BLE001 (blind except) is deliberately allowed: this codebase uses the
+# "catch, log, degrade gracefully" pattern throughout — API endpoints return
+# HTTP 500 with a generic message, best-effort caches fall back silently, and
+# per-profile poll loops isolate errors so one bad symbol can't kill the sweep.
+# Every broad catch in src/ logs the exception before handling it.
+ignore = ["BLE001", "B008"]

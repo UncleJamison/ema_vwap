@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 
 import requests
 
+from src.db_connection_manager import get_database
 from src.paper.engine import PaperTradingEngine
 from src.portfolio.models import AssetPosition, Balance, VenueBalance
 from src.settings import SettingsManager
@@ -43,7 +44,7 @@ class BaseVenueConnector(ABC):
     """Abstract base class for all exchange and broker balance connectors."""
 
     def __init__(self, settings: SettingsManager | None = None):
-        self.settings = settings or SettingsManager()
+        self.settings = settings or SettingsManager(get_database("system"))
 
     @abstractmethod
     def get_venue_name(self) -> str:
@@ -128,11 +129,9 @@ class GeminiBalanceConnector(BaseVenueConnector):
                 # Approximation or USD valuation
                 usd_price = 1.0
                 if cat == "crypto":
-                    usd_price = (
-                        65000.0
-                        if currency == "BTC"
-                        else (3500.0 if currency == "ETH" else 100.0)
-                    )
+                    from src.price_estimates import get_estimated_price
+
+                    usd_price = get_estimated_price(currency)
 
                 usd_val = amount * usd_price
                 b = Balance(
@@ -280,11 +279,9 @@ class KuCoinBalanceConnector(BaseVenueConnector):
                 cat = categorize_currency(currency)
                 usd_price = 1.0
                 if cat == "crypto":
-                    usd_price = (
-                        65000.0
-                        if currency == "BTC"
-                        else (3500.0 if currency == "ETH" else 150.0)
-                    )
+                    from src.price_estimates import get_estimated_price
+
+                    usd_price = get_estimated_price(currency)
 
                 usd_val = balance * usd_price
                 b = Balance(

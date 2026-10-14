@@ -81,12 +81,14 @@
             <div class="form-group">
               <label for="data-range-select">Historical Data Range</label>
               <select id="data-range-select" class="form-control">
-                <option value="500">Latest 500 Candles (~2 Days)</option>
-                <option value="1500">Latest 1,500 Candles (~5 Days)</option>
-                <option value="30_days">30 Days Historical (Cached DB)</option>
-                <option value="90_days">90 Days Historical (Cached DB)</option>
-                <option value="180_days" selected>180 Days Full History (Cached DB)</option>
-              </select>
+                              <option value="500">Latest 500 Candles (~2 Days)</option>
+                              <option value="1500">Latest 1,500 Candles (~5 Days)</option>
+                              <option value="30_days">30 Days Historical (Cached DB)</option>
+                              <option value="90_days">90 Days Historical (Cached DB)</option>
+                              <option value="180_days">180 Days Full History (Cached DB)</option>
+                              <option value="365_days">365 Days Full History (Cached DB)</option>
+                              <option value="auto" selected>Auto (Optimal Lookback)</option>
+                            </select>
             </div>
             <div class="form-row" style="margin-top: 10px;">
               <button id="sync-db-btn" class="btn-secondary" style="flex: 1;">
@@ -268,6 +270,11 @@
 
             <div class="form-row">
               <div class="form-group">
+                <label for="tsl-distance-input">TSL Distance (%)</label>
+                <input type="number" id="tsl-distance-input" value="1.5" step="0.1" min="0.5" max="5.0" class="form-control">
+                <span class="field-hint">Trailing stop % below current price</span>
+              </div>
+              <div class="form-group">
                 <label for="risk-per-trade-input">Risk % / Trade</label>
                 <input type="number" id="risk-per-trade-input" value="1.0" step="0.1" min="0.1" max="5.0" class="form-control">
               </div>
@@ -382,6 +389,10 @@
               </div>
             </div>
             <div class="form-group">
+              <label for="wfo-days-input">WFO Lookback Days <span style="opacity:0.6;font-size:0.8em">(default: 365)</span></label>
+              <input type="number" id="wfo-days-input" value="365" min="150" max="2000" class="form-control">
+            </div>
+            <div class="form-group">
               <label for="mc-sims-input">Monte Carlo Sims</label>
               <input type="number" id="mc-sims-input" value="500" min="50" max="2000" class="form-control">
             </div>
@@ -481,11 +492,16 @@
           <!-- Performance Metrics Grid -->
           <section class="kpi-grid">
             <div class="kpi-card glow-cyan">
-              <div class="kpi-label">Total Return</div>
-              <div class="kpi-value" id="kpi-return">0.00%</div>
-              <div class="kpi-sub" id="kpi-profit">$0.00 Net</div>
-            </div>
-            <div class="kpi-card glow-green">
+                          <div class="kpi-label">Total Return</div>
+                          <div class="kpi-value" id="kpi-return">0.00%</div>
+                          <div class="kpi-sub" id="kpi-profit">$0.00 Net</div>
+                        </div>
+                        <div class="kpi-card glow-green">
+                          <div class="kpi-label">Cache Hit/Coverage</div>
+                          <div class="kpi-value" id="kpi-cache">0%</div>
+                          <div class="kpi-sub" id="kpi-cache-source">No cache data available</div>
+                        </div>
+                        <div class="kpi-card glow-green">
               <div class="kpi-label">Win Rate</div>
               <div class="kpi-value" id="kpi-winrate">0.0%</div>
               <div class="kpi-sub" id="kpi-trades-count">0 Trades</div>
@@ -857,13 +873,25 @@
               </div>
 
               <div class="form-group">
-                <label for="batch-trade-direction-select">Trade Direction (Account Mode)</label>
-                <select id="batch-trade-direction-select" class="form-control">
-                  <option value="long_only" selected>Long Only (Spot Account)</option>
-                  <option value="long_short">Long & Short (Margin / Futures)</option>
-                  <option value="short_only">Short Only</option>
-                </select>
-              </div>
+                              <label for="batch-data-range-select">Historical Data Range</label>
+                              <select id="batch-data-range-select" class="form-control">
+                                <option value="500">Latest 500 Candles (~2 Days)</option>
+                                <option value="1500">Latest 1,500 Candles (~5 Days)</option>
+                                <option value="30_days">30 Days Historical (Cached DB)</option>
+                                <option value="90_days">90 Days Historical (Cached DB)</option>
+                                <option value="180_days">180 Days Full History (Cached DB)</option>
+                                <option value="365_days">365 Days Full History (Cached DB)</option>
+                                <option value="auto" selected>Auto (Optimal Lookback)</option>
+                              </select>
+                            </div>
+                            <div class="form-group">
+                              <label for="batch-trade-direction-select">Trade Direction (Account Mode)</label>
+                              <select id="batch-trade-direction-select" class="form-control">
+                                <option value="long_only" selected>Long Only (Spot Account)</option>
+                                <option value="long_short">Long & Short (Margin / Futures)</option>
+                                <option value="short_only">Short Only</option>
+                              </select>
+                            </div>
 
               <div class="form-group">
                 <label for="batch-objective-mode-select">Batch Optimization Objective</label>
@@ -884,6 +912,7 @@
               <div class="form-group" id="batch-target-group">
                 <label for="batch-metric-select">Batch Rank Metric</label>
                 <select id="batch-metric-select" class="form-control">
+                  <option value="all_metrics">★ All Metrics (Single Timeframe Only)</option>
                   <option value="sharpe_ratio" selected>Sharpe Ratio (Risk-Adjusted)</option>
                   <option value="drawdown_penalized_sharpe">Drawdown-Penalized Sharpe (Max Robustness)</option>
                   <option value="calmar_ratio">Calmar Ratio (Return / Max DD)</option>
@@ -895,16 +924,23 @@
                   <option value="total_return_pct">Total Return (%)</option>
                   <option value="win_rate">Win Rate (%)</option>
                 </select>
+                <small id="batch-all-metrics-hint" style="display:none; color: var(--accent-amber); margin-top: 4px; font-weight: 500;">
+                  ⚠ All Metrics mode runs one sweep per metric. Select exactly one timeframe.
+                </small>
               </div>
               <div class="form-group" id="batch-multi-metric-group" style="display:none;">
                 <label for="batch-multi-metric-select">Multi-Metric Objective Set</label>
                 <select id="batch-multi-metric-select" class="form-control">
+                  <option value="all_combinations">★ All Combinations (Single Timeframe Only)</option>
                   <option value="sharpe_ratio|max_drawdown_pct" selected>Sharpe + Max Drawdown</option>
                   <option value="sharpe_ratio|total_return_pct">Sharpe + Total Return</option>
                   <option value="sortino_ratio|max_drawdown_pct">Sortino + Max Drawdown</option>
                   <option value="profit_factor|total_return_pct">Profit Factor + Total Return</option>
                   <option value="calmar_ratio|max_drawdown_pct">Calmar + Max Drawdown</option>
                 </select>
+                <small id="batch-all-multi-hint" style="display:none; color: var(--accent-amber); margin-top: 4px; font-weight: 500;">
+                  ⚠ All Combinations mode runs 12 curated Pareto sweeps. Select exactly one timeframe.
+                </small>
               </div>
               <div class="form-group">
                 <label>
@@ -1023,21 +1059,21 @@
             <div style="overflow-x:auto;">
               <table id="batch-leaderboard-table" style="width:100%;border-collapse:collapse;font-size:0.85em;">
                 <thead>
-                  <tr style="border-bottom:1px solid rgba(255,255,255,0.1);color:var(--text-muted);text-align:left;">
+                  <tr id="batch-leaderboard-head" style="border-bottom:1px solid rgba(255,255,255,0.1);color:var(--text-muted);text-align:left;">
                     <th style="padding:8px 10px;"><input id="batch-select-all" type="checkbox" aria-label="Select all visible results"></th>
                     <th style="padding:8px 10px;">&#9733;</th>
                     <th style="padding:8px 10px;">#</th>
-                    <th style="padding:8px 10px;">Symbol</th>
-                    <th style="padding:8px 10px;">TF</th>
-                    <th style="padding:8px 10px;">Metric</th>
-                    <th style="padding:8px 10px;">Value</th>
-                    <th style="padding:8px 10px;">Trades</th>
-                    <th style="padding:8px 10px;">Sharpe</th>
-                    <th style="padding:8px 10px;">Return %</th>
-                    <th style="padding:8px 10px;">Win %</th>
-                    <th style="padding:8px 10px;">Max DD %</th>
-                    <th style="padding:8px 10px;">Run At</th>
-                    <th style="padding:8px 10px; text-align: center;">Validation</th>
+                    <th class="sortable-th" data-sort="symbol" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;">Symbol <span class="sort-indicator"></span></th>
+                    <th class="sortable-th" data-sort="timeframe" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;">TF <span class="sort-indicator"></span></th>
+                    <th class="sortable-th" data-sort="target_metric" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;">Metric <span class="sort-indicator"></span></th>
+                    <th class="sortable-th" data-sort="best_value" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;">Value <span class="sort-indicator"></span></th>
+                    <th class="sortable-th" data-sort="trade_count" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;">Trades <span class="sort-indicator"></span></th>
+                    <th class="sortable-th" data-sort="sharpe_ratio" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;">Sharpe <span class="sort-indicator"></span></th>
+                    <th class="sortable-th" data-sort="total_return_pct" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;">Return % <span class="sort-indicator"></span></th>
+                    <th class="sortable-th" data-sort="win_rate" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;">Win % <span class="sort-indicator"></span></th>
+                    <th class="sortable-th" data-sort="max_drawdown_pct" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;">Max DD % <span class="sort-indicator"></span></th>
+                    <th class="sortable-th" data-sort="run_timestamp" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;">Run At <span class="sort-indicator"></span></th>
+                    <th class="sortable-th" data-sort="validation_score" style="padding:8px 10px;cursor:pointer;user-select:none;white-space:nowrap;text-align:center;">Validation <span class="sort-indicator"></span></th>
                     <th style="padding:8px 10px; text-align: center;">Actions</th>
                   </tr>
                 </thead>
@@ -1538,13 +1574,14 @@
       </div>
       
       <div class="modal-tabs">
-              <button class="modal-tab-btn active" data-modal-tab="settings-tab-fees">Execution & Fees</button>
-              <button class="modal-tab-btn" data-modal-tab="settings-tab-optuna">Optuna Search Ranges</button>
-              <button class="modal-tab-btn" data-modal-tab="settings-tab-risk">Risk & Capital</button>
-              <button class="modal-tab-btn" data-modal-tab="settings-tab-validation">Validation Gates</button>
-              <button class="modal-tab-btn" data-modal-tab="settings-tab-crypto">🪙 Crypto Exchanges</button>
-              <button class="modal-tab-btn" data-modal-tab="settings-tab-stocks">🦙 US Equities & Providers</button>
-            </div>
+        <button class="modal-tab-btn active" data-modal-tab="settings-tab-fees">Execution & Fees</button>
+        <button class="modal-tab-btn" data-modal-tab="settings-tab-optuna">Optuna Search Ranges</button>
+        <button class="modal-tab-btn" data-modal-tab="settings-tab-risk">Risk & Capital</button>
+        <button class="modal-tab-btn" data-modal-tab="settings-tab-validation">Validation Gates</button>
+        <button class="modal-tab-btn" data-modal-tab="settings-tab-crypto">🪙 Crypto Exchanges</button>
+        <button class="modal-tab-btn" data-modal-tab="settings-tab-stocks">🦙 US Equities & Providers</button>
+        <button class="modal-tab-btn" data-modal-tab="settings-tab-db">🗄️ Database Maintenance</button>
+      </div>
 
       <div class="modal-body">
         <!-- Tab 1: Execution & Fees -->
@@ -1606,9 +1643,17 @@
             <div class="form-group">
               <label>ATR Multiplier (Min - Max)</label>
               <div class="range-inputs">
-                <input type="number" id="setting-opt-atr-min" value="1.0" step="0.5" min="0.5" max="4.0" class="form-control">
+                <input type="number" id="setting-opt-atr-min" value="2.0" step="0.5" min="1.0" max="4.0" class="form-control">
                 <span class="range-sep">to</span>
-                <input type="number" id="setting-opt-atr-max" value="6.0" step="0.5" min="2.0" max="10.0" class="form-control">
+                <input type="number" id="setting-opt-atr-max" value="5.0" step="0.5" min="2.0" max="8.0" class="form-control">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Trailing Stop % (Min - Max)</label>
+              <div class="range-inputs">
+                <input type="number" id="setting-opt-tsl-min" value="1.0" step="0.5" min="0.5" max="5.0" class="form-control">
+                <span class="range-sep">to</span>
+                <input type="number" id="setting-opt-tsl-max" value="3.0" step="0.5" min="1.0" max="8.0" class="form-control">
               </div>
             </div>
             <div class="form-group">
@@ -1629,19 +1674,32 @@
               <span class="field-hint">Penalizes overfitting on single-trade anomalies</span>
             </div>
             <div class="form-group">
-              <label for="setting-opt-n-jobs">Parallel CPU Workers</label>
+              <label for="setting-opt-n-jobs">Trial Concurrency</label>
               <select id="setting-opt-n-jobs" class="form-control">
-                <option value="1" selected>1 Core (Sequential)</option>
-                <option value="2">2 CPU Cores</option>
-                <option value="4">4 CPU Cores</option>
-                <option value="-1">All Available CPU Cores (-1)</option>
+                <option value="1" selected>Sequential (Recommended)</option>
+                <option value="2">2 Trial Threads</option>
+                <option value="4">4 Trial Threads</option>
+                <option value="-1">All Trial Threads (-1)</option>
               </select>
-              <span class="field-hint">Multiprocessing acceleration for 100-1000+ trial studies</span>
+              <span class="field-hint">Optuna uses threads; Python-heavy backtests may be slower with more than one.</span>
             </div>
             <div class="form-group">
               <label for="setting-opt-startup-trials">Startup (Warmup) Trials Override</label>
               <input type="number" id="setting-opt-startup-trials" placeholder="Auto (10% capped at 25)" min="3" max="100" class="form-control">
               <span class="field-hint">Leave blank for automatic adaptive warmup (recommended)</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-min-warmup-bars">Min Warmup Bars (Pre-Flight)</label>
+              <input type="number" id="setting-min-warmup-bars" value="250" min="50" max="1000" class="form-control">
+              <span class="field-hint">Indicator warmup threshold; alerts when selected range falls below this</span>
+            </div>
+            <div class="form-group">
+              <label for="setting-market-hours">Market Hours Mode</label>
+              <select id="setting-market-hours" class="form-control">
+                <option value="crypto_24_7" selected>Crypto 24/7 (All Hours)</option>
+                <option value="equity_rth">Equity RTH (Regular Trading Hours)</option>
+              </select>
+              <span class="field-hint">Crypto vs Equity session rules (affects session-mode filter)</span>
             </div>
             <div class="form-group" style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
               <input type="checkbox" id="setting-opt-seed-base" checked style="width: 18px; height: 18px; cursor: pointer;">
@@ -1760,9 +1818,8 @@
             </div>
           </div>
         </div>
-                </div>
 
-                <!-- Tab: Validation Gates -->
+        <!-- Tab: Validation Gates -->
                 <div id="settings-tab-validation" class="modal-tab-content">
                   <div class="settings-grid">
                     <div class="form-group" style="grid-column: 1 / -1;">
@@ -1807,6 +1864,20 @@
                       <input type="number" id="setting-val-min-oos-return" value="0" step="0.5" min="-50" max="500" class="form-control">
                       <span class="field-hint">Minimum acceptable out-of-sample return</span>
                     </div>
+                    <div class="form-group">
+                      <label for="setting-val-trials">Validation Trial Budget</label>
+                      <input type="number" id="setting-val-trials" value="250" step="25" min="50" max="1000" class="form-control">
+                      <span class="field-hint">Total Optuna trial budget for Gate 2 WFO (default: 250 trials)</span>
+                    </div>
+                    <div class="form-group">
+                      <label for="setting-val-rigor-preset">Validation Rigor Preset</label>
+                      <select id="setting-val-rigor-preset" class="form-control">
+                        <option value="fast">Fast (150 trials)</option>
+                        <option value="standard" selected>Standard (250 trials)</option>
+                        <option value="thorough">Thorough (500 trials)</option>
+                      </select>
+                      <span class="field-hint">Preset budget selector (Fast: 150, Standard: 250, Thorough: 500)</span>
+                    </div>
 
                     <div class="form-group" style="grid-column: 1 / -1; margin-top: 12px;">
                       <h4 style="margin: 0 0 8px 0; color: #ffaa00; font-size: 0.95rem;">Gate 3: Monte Carlo Stress & Tail Risk</h4>
@@ -1823,6 +1894,177 @@
                     </div>
                   </div>
                 </div>
+
+        <!-- Tab 7: Database Maintenance -->
+        <div id="settings-tab-db" class="modal-tab-content">
+          <!-- Administrator Authentication -->
+          <div class="glass-panel" style="padding: 14px 18px; margin-bottom: 16px; border-left: 4px solid var(--accent-cyan);">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+              <div>
+                <h4 style="margin: 0 0 4px 0; color: var(--accent-cyan); font-size: 0.95rem;">🔐 Administrator Authentication</h4>
+                <div style="font-size: 0.82rem; color: var(--text-muted);">Privileged maintenance commands (vacuum, repair, cache flush) require an authorized <code>X-API-Key</code>.</div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <input type="password" id="setting-app-api-key" placeholder="API Key (default: ema-vwap-admin-2026)" class="form-control" style="width: 260px; font-size: 0.85rem;" value="">
+                <button id="btn-save-api-key" class="btn-secondary btn-sm" title="Save API Key locally">💾 Save Key</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Multi-DB Domain Health Cards -->
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <h4 style="margin: 0; color: #fff; font-size: 0.95rem;">🗄️ Multi-Domain Database Health (Decomposed Architecture)</h4>
+            <button id="btn-db-refresh-info" class="btn-secondary btn-sm">
+              <span class="btn-icon">🔄</span> Refresh Health
+            </button>
+          </div>
+
+          <div id="db-health-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 20px;">
+            <!-- Candles DB -->
+            <div class="glass-panel db-card" id="db-card-candles" style="padding: 14px; border: 1px solid rgba(0, 242, 254, 0.2);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <strong style="color: var(--accent-cyan); font-size: 0.9rem;">candles.db</strong>
+                <span id="badge-db-candles" class="badge" style="background: rgba(0, 245, 160, 0.2); color: #00f5a0; border: 1px solid #00f5a0;">OK</span>
+              </div>
+              <div style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 6px;">Market Data &amp; OHLCV Cache</div>
+              <div style="font-size: 0.82rem; line-height: 1.6;">
+                <div>Size: <span id="val-db-candles-size" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Records: <span id="val-db-candles-records" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Mode: <span id="val-db-candles-mode" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Integrity: <span id="val-db-candles-integrity" style="color: #00f5a0;">Checking...</span></div>
+              </div>
+            </div>
+
+            <!-- Batch Results DB -->
+            <div class="glass-panel db-card" id="db-card-batch_results" style="padding: 14px; border: 1px solid rgba(121, 40, 202, 0.3);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <strong style="color: #b87cf8; font-size: 0.9rem;">batch_results.db</strong>
+                <span id="badge-db-batch_results" class="badge" style="background: rgba(0, 245, 160, 0.2); color: #00f5a0; border: 1px solid #00f5a0;">OK</span>
+              </div>
+              <div style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 6px;">Optuna &amp; Strategy Studies</div>
+              <div style="font-size: 0.82rem; line-height: 1.6;">
+                <div>Size: <span id="val-db-batch_results-size" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Studies: <span id="val-db-batch_results-records" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Mode: <span id="val-db-batch_results-mode" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Integrity: <span id="val-db-batch_results-integrity" style="color: #00f5a0;">Checking...</span></div>
+              </div>
+            </div>
+
+            <!-- Paper Trading DB -->
+            <div class="glass-panel db-card" id="db-card-paper_trading" style="padding: 14px; border: 1px solid rgba(255, 170, 0, 0.3);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <strong style="color: #ffaa00; font-size: 0.9rem;">paper_trading.db</strong>
+                <span id="badge-db-paper_trading" class="badge" style="background: rgba(0, 245, 160, 0.2); color: #00f5a0; border: 1px solid #00f5a0;">OK</span>
+              </div>
+              <div style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 6px;">Paper Portfolios &amp; Ledgers</div>
+              <div style="font-size: 0.82rem; line-height: 1.6;">
+                <div>Size: <span id="val-db-paper_trading-size" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Orders/Fills: <span id="val-db-paper_trading-records" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Mode: <span id="val-db-paper_trading-mode" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Integrity: <span id="val-db-paper_trading-integrity" style="color: #00f5a0;">Checking...</span></div>
+              </div>
+            </div>
+
+            <!-- System DB -->
+            <div class="glass-panel db-card" id="db-card-system" style="padding: 14px; border: 1px solid rgba(0, 245, 160, 0.3);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <strong style="color: #00f5a0; font-size: 0.9rem;">system.db</strong>
+                <span id="badge-db-system" class="badge" style="background: rgba(0, 245, 160, 0.2); color: #00f5a0; border: 1px solid #00f5a0;">OK</span>
+              </div>
+              <div style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 6px;">Settings, Config &amp; Alerts</div>
+              <div style="font-size: 0.82rem; line-height: 1.6;">
+                <div>Size: <span id="val-db-system-size" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Alert Rules: <span id="val-db-system-records" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Mode: <span id="val-db-system-mode" style="color: #fff; font-weight: 600;">--</span></div>
+                <div>Integrity: <span id="val-db-system-integrity" style="color: #00f5a0;">Checking...</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Maintenance Operations -->
+          <div class="glass-panel" style="padding: 16px; margin-bottom: 16px;">
+            <h4 style="margin: 0 0 12px 0; color: #fff; font-size: 0.95rem;">🛠️ Maintenance &amp; Optimization Actions</h4>
+            <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+              <button id="btn-db-integrity-run" class="btn-secondary">
+                <span class="btn-icon">🔍</span> Deep Integrity Check
+              </button>
+              <button id="btn-db-vacuum-run" class="btn-secondary" style="border-color: rgba(0, 242, 254, 0.4); color: var(--accent-cyan);">
+                <span class="btn-icon">🧹</span> Vacuum &amp; Compact All DBs
+              </button>
+              <button id="btn-db-repair-run" class="btn-secondary" style="border-color: rgba(255, 170, 0, 0.5); color: #ffaa00;">
+                <span class="btn-icon">🛡️</span> Repair / Quarantine Corrupted
+              </button>
+              <button id="btn-db-clear-cache-modal" class="btn-secondary" style="border-color: rgba(255, 0, 122, 0.4); color: #ff007a;">
+                <span class="btn-icon">🗑️</span> Clear Candle Cache
+              </button>
+            </div>
+            <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 10px;">
+              💡 <em>Vacuum reclaims unfragmented disk pages across isolated databases. Repair detects corrupt headers, quarantines the malformed file with a timestamp, and rebuilds fresh SQLite tables.</em>
+            </div>
+          </div>
+
+          <!-- Candle Data Export Tool -->
+          <div class="glass-panel" style="padding: 16px; margin-bottom: 16px;">
+            <h4 style="margin: 0 0 12px 0; color: #fff; font-size: 0.95rem;">📥 Historical Candles Data Export</h4>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 12px;">
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="db-export-exchange" style="font-size: 0.8rem;">Exchange</label>
+                <select id="db-export-exchange" class="form-control" style="font-size: 0.85rem;">
+                  <option value="all">All Exchanges</option>
+                  <option value="kucoin">KuCoin</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="alpaca">Alpaca</option>
+                  <option value="polygon">Polygon</option>
+                  <option value="synthetic">Synthetic</option>
+                </select>
+              </div>
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="db-export-symbol" style="font-size: 0.8rem;">Symbol</label>
+                <input type="text" id="db-export-symbol" value="BTC/USD" class="form-control" placeholder="All or BTC/USD" style="font-size: 0.85rem;">
+              </div>
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="db-export-timeframe" style="font-size: 0.8rem;">Timeframe</label>
+                <select id="db-export-timeframe" class="form-control" style="font-size: 0.85rem;">
+                  <option value="all">All Timeframes</option>
+                  <option value="1m">1m</option>
+                  <option value="3m">3m</option>
+                  <option value="5m" selected>5m</option>
+                  <option value="15m">15m</option>
+                  <option value="30m">30m</option>
+                  <option value="1h">1h</option>
+                  <option value="2h">2h</option>
+                  <option value="4h">4h</option>
+                  <option value="6h">6h</option>
+                  <option value="1d">1d</option>
+                </select>
+              </div>
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="db-export-limit" style="font-size: 0.8rem;">Limit (Bars)</label>
+                <input type="number" id="db-export-limit" value="500" min="10" max="5000" step="50" class="form-control" style="font-size: 0.85rem;">
+              </div>
+            </div>
+            <div style="display: flex; gap: 10px;">
+              <button id="btn-db-export-csv" class="btn-primary glow-cyan" style="font-size: 0.85rem;">
+                <span class="btn-icon">📄</span> Export as CSV
+              </button>
+              <button id="btn-db-export-json" class="btn-secondary" style="font-size: 0.85rem;">
+                <span class="btn-icon">📦</span> Export as JSON
+              </button>
+            </div>
+          </div>
+
+          <!-- Diagnostics Console Output -->
+          <div class="glass-panel" style="padding: 14px 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <h5 style="margin: 0; color: var(--text-muted); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.5px;">Activity &amp; Diagnostics Log</h5>
+              <button id="btn-db-clear-log" class="btn-secondary btn-sm" style="font-size: 0.75rem; padding: 2px 8px;">Clear Log</button>
+            </div>
+            <pre id="db-maintenance-log" style="background: rgba(0, 0, 0, 0.55); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 10px 12px; font-family: 'Courier New', monospace; font-size: 0.78rem; color: #00f2fe; max-height: 140px; overflow-y: auto; margin: 0; white-space: pre-wrap;">[System] Multi-DB maintenance panel ready. 4 isolated database domains active.</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer" style="padding: 16px 24px; border-top: 1px solid var(--border-glass); display: flex; justify-content: flex-end; gap: 10px; background: rgba(0, 0, 0, 0.2);">
         <button id="reset-settings-btn" class="btn-secondary">Reset to Defaults</button>
         <button id="save-settings-btn" class="btn-primary">Save Settings</button>
       </div>

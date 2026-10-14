@@ -133,7 +133,7 @@ def test_export_batch_to_portfolio():
     from src.database import CandleDatabase
 
     client = TestClient(app)
-    db = CandleDatabase()
+    db = CandleDatabase(db_path="system_test_portfolio_rebalancer.db")
 
     # First ensure we have some batch results by running a mini sweep
     # or by checking if any exist
@@ -249,7 +249,7 @@ def test_export_batch_to_portfolio_validation():
     # Test: Too high min_sharpe filters everything out
     from src.database import CandleDatabase
 
-    db = CandleDatabase()
+    db = CandleDatabase(db_path="system_test_portfolio_rebalancer.db")
     all_rows = db.load_batch_results(limit=1)
     if all_rows:
         result_id = all_rows[0]["id"]
@@ -415,7 +415,7 @@ def test_paper_trading_balance_connector():
     from src.settings import SettingsManager
 
     # Test 1: Connector instantiation
-    db = CandleDatabase()
+    db = CandleDatabase(db_path="system_test_paper_trading_balance.db")
     settings = SettingsManager(db=db)
     connector = PaperTradingBalanceConnector(settings)
 
@@ -451,7 +451,7 @@ def test_paper_trading_engine_get_balance_snapshot():
     from src.database import CandleDatabase
     from src.paper.engine import PaperTradingEngine
 
-    db = CandleDatabase()
+    db = CandleDatabase(db_path="system_test_paper_trading_engine.db")
     engine = PaperTradingEngine(db=db)
 
     # Test method exists and returns dict

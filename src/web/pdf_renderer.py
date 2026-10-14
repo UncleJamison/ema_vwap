@@ -18,7 +18,8 @@ class TearSheetRenderer:
 
     def __init__(self, template_dir: str | None = None):
         if template_dir is None:
-            template_dir = str(Path(__file__).parent / "web")
+            # Template is in the same directory as this file (src/web/)
+            template_dir = str(Path(__file__).parent)
         self.template_dir = Path(template_dir)
         self.env = Environment(
             loader=FileSystemLoader(str(self.template_dir)),

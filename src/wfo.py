@@ -16,12 +16,113 @@ from src.optimizer import OptunaOptimizer
 from src.regime import INSUFFICIENT_DATA, RegimeConfig, classify_regime
 
 
+def get_default_target_oos_days(
+    timeframe: str | None = None,
+    bars_per_day: float | None = None,
+) -> float:
+    """
+    Return recommended out-of-sample (OOS) window duration in calendar days.
+    Scales based on timeframe / candles-per-day to ensure sufficient trade count:
+    - <= 5m: 15 days
+    - 15m - 30m: 25 days
+    - 1h - 2h: 45 days
+    - 4h - 6h: 60 days
+    - 8h - 12h: 90 days
+    - 1d: 120 days
+    """
+    if timeframe:
+        tf = timeframe.lower().strip()
+        tf_oos = {
+            "1m": 10.0,
+            "3m": 15.0,
+            "5m": 15.0,
+            "15m": 25.0,
+            "30m": 25.0,
+            "1h": 45.0,
+            "2h": 45.0,
+            "4h": 60.0,
+            "6h": 60.0,
+            "8h": 90.0,
+            "12h": 90.0,
+            "1d": 120.0,
+        }
+        if tf in tf_oos:
+            return tf_oos[tf]
+
+    if bars_per_day is not None and bars_per_day > 0:
+        if bars_per_day >= 288.0:
+            return 15.0
+        elif bars_per_day >= 48.0:
+            return 25.0
+        elif bars_per_day >= 12.0:
+            return 45.0
+        elif bars_per_day >= 4.0:
+            return 60.0
+        elif bars_per_day > 1.0:
+            return 90.0
+        else:
+            return 120.0
+
+    return 15.0
+
+
+def derive_bars_per_day(
+    df: pd.DataFrame | None = None,
+    timeframe: str | None = None,
+    category: str = "crypto",
+) -> float:
+    """
+    Derive candles per day from timeframe name or dataframe timestamp diffs.
+    Falls back to 288.0 (5m crypto default) if cannot be determined.
+    """
+    if timeframe:
+        tf = timeframe.lower().strip()
+        tf_bars = {
+            "1m": 1440.0,
+            "3m": 480.0,
+            "5m": 288.0,
+            "15m": 96.0,
+            "30m": 48.0,
+            "1h": 24.0,
+            "2h": 12.0,
+            "4h": 6.0,
+            "6h": 4.0,
+            "8h": 3.0,
+            "12h": 2.0,
+            "1d": 1.0,
+        }
+        if tf in tf_bars:
+            return tf_bars[tf]
+
+    if df is not None and not df.empty and "timestamp" in df.columns and len(df) >= 2:
+        try:
+            ts_series = df["timestamp"].iloc[:50]
+            if pd.api.types.is_numeric_dtype(ts_series):
+                max_val = float(ts_series.max())
+                unit = "ms" if max_val > 1e11 else "s"
+                parsed_ts = pd.to_datetime(ts_series, unit=unit, utc=True)
+            else:
+                parsed_ts = pd.to_datetime(ts_series, utc=True)
+
+            diffs = parsed_ts.diff().dropna().dt.total_seconds()
+            med_sec = float(diffs.median())
+            if med_sec > 0:
+                bpd = round(86400.0 / med_sec, 2)
+                if bpd > 0:
+                    return bpd
+        except Exception:
+            pass
+
+    return 288.0
+
+
 def compute_wfo_auto_params(
     n_bars: int,
     n_trials: int,
     is_ratio: float = 0.7,
-    target_oos_days: float = 15.0,
-    bars_per_day: float = 288.0,
+    target_oos_days: float | None = None,
+    bars_per_day: float | None = None,
+    timeframe: str | None = None,
 ) -> dict[str, int]:
     """
     Derive optimal WFO num_windows and trials_per_window from dataset size and
@@ -30,7 +131,7 @@ def compute_wfo_auto_params(
     Strategy:
     - Target OOS window length of ``target_oos_days`` trading days.
     - num_windows = floor(n_bars * (1 - is_ratio) / oos_target_bars), clamped [3, 20].
-    - trials_per_window = floor(n_trials / num_windows), clamped [25, 150].
+    - trials_per_window = floor(n_trials / num_windows), clamped [25, n_trials].
 
     Args:
         n_bars: Total number of candles in the dataset.
@@ -38,10 +139,19 @@ def compute_wfo_auto_params(
         is_ratio: Fraction of each window allocated to in-sample training.
         target_oos_days: Desired OOS window length in trading days.
         bars_per_day: Candles per trading day (288 for 5m, 96 for 15m, 24 for 1h).
+        timeframe: Optional timeframe string (e.g. "5m", "15m", "1h", "4h").
 
     Returns:
         Dict with keys ``num_windows`` and ``trials_per_window``.
     """
+    if bars_per_day is None or bars_per_day <= 0:
+        bars_per_day = derive_bars_per_day(timeframe=timeframe)
+
+    if target_oos_days is None or target_oos_days <= 0:
+        target_oos_days = get_default_target_oos_days(
+            timeframe=timeframe, bars_per_day=bars_per_day
+        )
+
     oos_target_bars = max(15, int(target_oos_days * bars_per_day))
 
     # Mirror the formula used in generate_windows() so num_windows produces
@@ -53,7 +163,10 @@ def compute_wfo_auto_params(
     num_windows = max(3, min(20, raw_windows))
 
     raw_trials = math.floor(n_trials / num_windows)
-    trials_per_window = max(1, min(150, raw_trials))
+    # Ensure at least 50 trials per window when budget permits (n_trials >= num_windows * 50),
+    # otherwise clamp to at least 25 (or n_trials if budget < 25)
+    target_min = 50 if n_trials >= num_windows * 50 else min(25, raw_trials)
+    trials_per_window = max(min(n_trials, target_min), min(n_trials, raw_trials))
 
     return {"num_windows": num_windows, "trials_per_window": trials_per_window}
 
@@ -67,14 +180,22 @@ class WalkForwardEngine:
         wfo_config: WFOConfig | None = None,
         opt_config: OptunaConfig | None = None,
         n_trials_total: int = 0,
-        bars_per_day: float = 288.0,
+        bars_per_day: float | None = None,
+        timeframe: str | None = None,
     ):
         self.base_params = base_params
         self.wfo_config = wfo_config or WFOConfig()
         self.n_trials_total = (
             n_trials_total  # full Optuna budget from UI, used for auto-scaling
         )
-        self.bars_per_day = bars_per_day
+        self.timeframe = timeframe
+        if bars_per_day is not None and bars_per_day > 0:
+            self.bars_per_day = bars_per_day
+        elif timeframe:
+            self.bars_per_day = derive_bars_per_day(timeframe=timeframe)
+        else:
+            self.bars_per_day = 288.0
+
         # Guard: if trials_per_window is 0 (auto sentinel), use a safe fallback
         # until run() resolves the real value via compute_wfo_auto_params.
         effective_trials = self.wfo_config.trials_per_window or 30
@@ -171,6 +292,10 @@ class WalkForwardEngine:
                 "Insufficient candle data for Walk-Forward Optimization (minimum 100 bars required)."
             )
 
+        # Derive bars_per_day if not explicitly provided or if default 288.0 and timeframe is absent
+        if self.bars_per_day == 288.0 and self.timeframe is None:
+            self.bars_per_day = derive_bars_per_day(df=df, timeframe=self.timeframe)
+
         # Auto-scale num_windows / trials_per_window when sentinel value 0 is set
         auto_scaled: dict[str, int] = {}
         needs_auto = (
@@ -183,6 +308,7 @@ class WalkForwardEngine:
                 n_trials=budget,
                 is_ratio=max(0.5, min(0.9, self.wfo_config.in_sample_ratio)),
                 bars_per_day=self.bars_per_day,
+                timeframe=self.timeframe,
             )
             resolved_windows = (
                 auto_scaled["num_windows"]
@@ -228,7 +354,11 @@ class WalkForwardEngine:
             if len(window_regimes) > 1:
                 prev = window_regimes[-2]
                 cur = window_regimes[-1]
-                if prev != "insufficient_data" and cur != "insufficient_data" and prev != cur:
+                if (
+                    prev != "insufficient_data"
+                    and cur != "insufficient_data"
+                    and prev != cur
+                ):
                     regime_changes += 1
 
         # Re-optimization trigger: flag if regime changed significantly
@@ -290,17 +420,31 @@ class WalkForwardEngine:
                     "oos_sharpe": oos_result.sharpe_ratio,
                     "oos_trades_count": oos_result.total_trades,
                     # Regime tracking fields
-                    "window_regime": window_regimes[len(window_results)] if len(window_results) < len(window_regimes) else "insufficient_data",
+                    "window_regime": (
+                        window_regimes[len(window_results)]
+                        if len(window_results) < len(window_regimes)
+                        else "insufficient_data"
+                    ),
                     "regime_change_trigger": trigger_reoptimize,
                 }
             )
 
-        # Calculate Walk-Forward Efficiency (WFE) ratio
+        # Calculate Walk-Forward Efficiency (WFE) ratio with time normalization
         avg_is_ret = float(np.mean(is_returns)) if is_returns else 0.0
         avg_oos_ret = float(np.mean(oos_returns)) if oos_returns else 0.0
 
+        is_bars_list = [len(w["df_is"]) for w in windows]
+        oos_bars_list = [len(w["df_oos"]) for w in windows]
+        avg_is_bars = float(np.mean(is_bars_list)) if is_bars_list else 1.0
+        avg_oos_bars = float(np.mean(oos_bars_list)) if oos_bars_list else 1.0
+        time_scale = (avg_is_bars / avg_oos_bars) if avg_oos_bars > 0 else 1.0
+
         if avg_is_ret > 0:
-            wfe_ratio = round((avg_oos_ret / avg_is_ret) * 100.0, 2)
+            # Time-normalized WFE: scale by ratio of IS window bars to OOS window bars
+            # so that unequal IS/OOS durations (e.g. 70/30 split) do not depress efficiency
+            wfe_ratio = round(
+                ((avg_oos_ret / avg_oos_bars) / (avg_is_ret / avg_is_bars)) * 100.0, 2
+            )
         elif avg_is_ret < 0 and avg_oos_ret >= 0:
             # IS was negative but OOS recovered — treat as 100% efficient (beat negative baseline)
             wfe_ratio = 100.0
@@ -326,11 +470,24 @@ class WalkForwardEngine:
             if vals:
                 param_variance[param_key] = round(float(np.std(vals)), 4)
 
+        oos_cumulative_ret = (
+            round((np.prod([1 + r / 100.0 for r in oos_returns]) - 1) * 100.0, 2)
+            if oos_returns
+            else 0.0
+        )
+
         return {
             "window_count": len(window_results),
             "walk_forward_efficiency_pct": wfe_ratio,
             "avg_in_sample_return_pct": round(avg_is_ret, 2),
             "avg_out_of_sample_return_pct": round(avg_oos_ret, 2),
+            "oos_total_return_pct": oos_cumulative_ret,
+            "oos_cumulative_return_pct": oos_cumulative_ret,
+            "time_scale": round(time_scale, 2),
+            "avg_is_bars": round(avg_is_bars, 1),
+            "avg_oos_bars": round(avg_oos_bars, 1),
+            "bars_per_day": round(self.bars_per_day, 2),
+            "timeframe": self.timeframe,
             "param_stability_std": param_variance,
             "window_details": window_results,
             "combined_oos_trade_count": len(combined_oos_trades),
@@ -343,5 +500,3 @@ class WalkForwardEngine:
             "regime_change_ratio": round(regime_change_ratio, 2),
             "trigger_reoptimize": trigger_reoptimize,
         }
-
-

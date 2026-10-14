@@ -137,7 +137,7 @@ if __name__ == "__main__":
         print("✅ ALL TESTS PASSED!")
         print("=" * 50)
         sys.exit(0)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"\n❌ TEST FAILED: {e}")
         import traceback
 

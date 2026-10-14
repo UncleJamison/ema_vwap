@@ -29,7 +29,15 @@ class WebSocketManager:
         self.active_connections: list[WebSocket] = []
         self._lock = asyncio.Lock()
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, api_key: str | None = None):
+        # Verify API key before accepting connection
+        from src.auth.security import verify_api_key
+
+        if not api_key or not verify_api_key(api_key):
+            await websocket.close(code=4001, reason="Invalid or missing API key")
+            logger.warning("[WebSocket] Connection rejected: invalid API key")
+            return
+
         await websocket.accept()
         async with self._lock:
             self.active_connections.append(websocket)
@@ -46,19 +54,34 @@ class WebSocketManager:
         )
 
     async def broadcast(self, message: dict[str, Any]):
-        """Broadcast a message to all connected clients."""
+        """Broadcast a message to all connected clients concurrently (ema_vwap-uuid).
+
+        Sends fan out with asyncio.gather instead of sequential awaits, so one
+        slow client cannot stall broadcasts to the others.
+        """
         if not self.active_connections:
             return
 
         data = json.dumps(message)
         async with self._lock:
-            disconnected = []
-            for ws in self.active_connections:
-                try:
-                    await ws.send_text(data)
-                except RuntimeError:  # Connection closed
-                    disconnected.append(ws)
+            targets = list(self.active_connections)
 
+        async def _send(ws):
+            try:
+                await ws.send_text(data)
+                return None
+            except (RuntimeError, WebSocketDisconnect):  # Connection closed
+                return ws
+
+        # Concurrent fan-out; failed sockets collected for removal
+        results = await asyncio.gather(
+            *(_send(ws) for ws in targets), return_exceptions=True
+        )
+        disconnected = [
+            r for r in results if r is not None and not isinstance(r, BaseException)
+        ]
+
+        async with self._lock:
             for ws in disconnected:
                 if ws in self.active_connections:
                     self.active_connections.remove(ws)
@@ -91,7 +114,7 @@ async def ws_lifespan(app: FastAPI):
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
-            except Exception as e:  # Broadcast errors are non-critical
+            except Exception as e:
                 logger.error(f"[WebSocket] Periodic update error: {e}")
 
     task = asyncio.create_task(periodic_update())
@@ -114,9 +137,9 @@ def create_ws_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
+        allow_origins=["http://localhost:3000", "http://localhost:8080"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "UPDATE", "DELETE"],
         allow_headers=["*"],
     )
 
@@ -185,13 +208,12 @@ def create_ws_app() -> FastAPI:
                             },
                         )
                     elif msg_type == "step_engine":
-                        # Trigger a single engine step
-                        results = _paper_engine.step_all_active_profiles()
+                        # Step engine commands require API key authentication
                         await ws_manager.send_personal(
                             websocket,
                             {
-                                "type": "engine_step_result",
-                                "data": results,
+                                "type": "error",
+                                "data": "step_engine command disabled: WebSocket requires API key authentication via X-API-Key header.",
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                             },
                         )

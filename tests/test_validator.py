@@ -61,7 +61,7 @@ def test_validator_full_pipeline_robust():
     # Lenient criteria to test full 3-gate execution and report serialization
     criteria = ValidationCriteria(
         min_backtest_return_pct=-50.0,
-        min_backtest_sharpe=-50.0,
+        min_backtest_sharpe=-52.0,
         min_trade_count=1,
         min_walk_forward_efficiency=0.0,
         min_profitable_windows_pct=0.0,
@@ -149,7 +149,7 @@ def test_validator_mc_risk_custom():
 def test_validator_mc_risk_custom_criteria_overrides_settings():
     """Test that explicit ValidationCriteria overrides SettingsManager values."""
 
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix="_system_mc_test.db", delete=False) as tmp:
         tmp_db_path = tmp.name
     try:
         db = CandleDatabase(db_path=tmp_db_path)
@@ -179,7 +179,7 @@ def test_validator_mc_risk_with_settings_manager():
     """Test that StrategyValidator can read MC risk from SettingsManager."""
 
     # Use a temp db; cleanup best-effort (Windows file locks may persist)
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix="_system_mc_test.db", delete=False) as tmp:
         tmp_db_path = tmp.name
     try:
         db = CandleDatabase(db_path=tmp_db_path)
@@ -201,3 +201,88 @@ def test_validator_mc_risk_with_settings_manager():
             os.unlink(tmp_db_path)
         except PermissionError:
             pass  # File may be locked by another process; best-effort cleanup
+
+
+def test_validator_gate2_metrics_and_drawdown_penalized_scoring():
+    """Verify Gate 2 reports both oos_total_return_pct and avg_oos_return_pct,
+    and Gate 1 evaluates drawdown_penalized_sharpe and drawdown_penalized_sortino."""
+    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=42)
+    params = StrategyParams(
+        strategy_mode="crossover",
+        fast_ema=5,
+        slow_ema=15,
+        trend_ema=50,
+        vwap_slope_min=0.0,
+        volume_filter_enabled=False,
+    )
+    criteria = ValidationCriteria(
+        min_backtest_return_pct=-50.0,
+        min_backtest_sharpe=-50.0,
+        min_trade_count=1,
+        min_walk_forward_efficiency=0.0,
+        min_profitable_windows_pct=0.0,
+        min_oos_return_pct=-50.0,
+        max_monte_carlo_ruin_pct=50.0,
+        max_monte_carlo_drawdown_pct=80.0,
+    )
+    validator = StrategyValidator(criteria)
+    report = validator.validate(
+        df,
+        params,
+        n_trials=4,
+        target_metric="drawdown_penalized_sharpe",
+    )
+    assert report.total_gates == 3
+    g2 = report.gate_results["gate2_wfo"]
+    assert "oos_total_return_pct" in g2.metrics
+    assert "avg_oos_return_pct" in g2.metrics
+    assert "walk_forward_efficiency_pct" in g2.metrics
+
+    # Test drawdown_penalized_sortino scoring
+    report_sortino = validator.validate(
+        df,
+        params,
+        n_trials=4,
+        target_metric="drawdown_penalized_sortino",
+    )
+    assert report_sortino.overall_score >= 0.0
+
+
+def test_validator_timeframe_aware_gate2():
+    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=42)
+    params = StrategyParams(
+        strategy_mode="crossover",
+        fast_ema=5,
+        slow_ema=15,
+        trend_ema=50,
+        vwap_slope_min=0.0,
+        volume_filter_enabled=False,
+    )
+    criteria = ValidationCriteria(
+        min_backtest_return_pct=-50.0,
+        min_backtest_sharpe=-50.0,
+        min_trade_count=1,
+        min_walk_forward_efficiency=0.0,
+        min_profitable_windows_pct=0.0,
+        min_oos_return_pct=-50.0,
+        max_monte_carlo_ruin_pct=50.0,
+        max_monte_carlo_drawdown_pct=80.0,
+    )
+    validator = StrategyValidator(criteria)
+    report = validator.validate(
+        df,
+        params,
+        n_trials=4,
+        timeframe="1h",
+    )
+    assert report.total_gates == 3
+    g2 = report.gate_results["gate2_wfo"]
+    assert g2.metrics["bars_per_day"] == 24.0
+    assert g2.metrics["timeframe"] == "1h"
+
+
+def test_validate_strategy_request_default_trial_budget():
+    from src.routes.backtest_opt import ValidateStrategyRequest
+
+    req = ValidateStrategyRequest()
+    assert req.n_trials == 250

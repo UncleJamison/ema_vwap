@@ -38,6 +38,20 @@ class ValidationCriteria:
     max_monte_carlo_ruin_pct: float = (
         5.0  # Maximum acceptable probability of 50% account drawdown
     )
+
+    def __post_init__(self):
+        """Validate thresholds are within acceptable bounds."""
+        if self.min_trade_count < 1:
+            raise ValueError("min_trade_count must be at least 1")
+        if not 0.0 <= self.min_profitable_windows_pct <= 100.0:
+            raise ValueError("min_profitable_windows_pct must be between 0 and 100")
+        if not 0.0 <= self.max_monte_carlo_ruin_pct <= 100.0:
+            raise ValueError("max_monte_carlo_ruin_pct must be between 0 and 100")
+        if not 0.0 <= self.max_backtest_drawdown_pct <= 100.0:
+            raise ValueError("max_backtest_drawdown_pct must be between 0 and 100")
+        if self.min_walk_forward_efficiency < 0:
+            raise ValueError("min_walk_forward_efficiency must be non-negative")
+
     max_monte_carlo_drawdown_pct: float = (
         35.0  # Maximum 95th percentile simulated drawdown
     )
@@ -107,6 +121,26 @@ class StrategyValidator:
                 self.criteria.max_monte_carlo_drawdown_pct = (
                     settings_mgr.get_monte_carlo_drawdown_pct()
                 )
+        # Gate 1 backtest cache (ema_vwap-bwss): repeated validate() calls with the
+        # same candles + params (deploy flows re-validate a just-validated profile)
+        # skip the redundant in-sample backtest.
+        self._gate1_cache: dict[tuple, Any] = {}
+        self._gate1_cache_max = 32
+
+    @staticmethod
+    def _df_fingerprint(df: pd.DataFrame) -> tuple:
+        """Cheap fingerprint for caching backtest results against a candle frame."""
+        try:
+            if df is None or df.empty:
+                return ("empty",)
+            return (
+                len(df),
+                str(df["timestamp"].iloc[0]),
+                str(df["timestamp"].iloc[-1]),
+                round(float(df["close"].sum()), 6),
+            )
+        except Exception:
+            return ("unknown",)
 
     @staticmethod
     def _summarize_regimes(regimes: list[str]) -> dict[str, Any]:
@@ -128,11 +162,13 @@ class StrategyValidator:
         params: StrategyParams,
         wfo_config: WFOConfig | None = None,
         mc_config: MonteCarloConfig | None = None,
-        n_trials: int = 30,
+        n_trials: int = 500,
         target_metric: str = "sharpe_ratio",
         best_optuna_value: float | None = None,
         enable_multi_objective: bool = False,
         multi_objective_metrics: list[str] | None = None,
+        timeframe: str | None = None,
+        bars_per_day: float | None = None,
     ) -> ValidationReport:
         """
         Execute full validation pipeline against historical candles.
@@ -166,9 +202,21 @@ class StrategyValidator:
         # =========================================================================
         # Gate 1: In-Sample Backtest Viability
         # =========================================================================
-        logger.info("[StrategyValidator] Running Gate 1: In-Sample Backtest...")
-        engine = BacktestEngine(params)
-        bt_res = engine.run(df_candles)
+        g1_key = (
+            self._df_fingerprint(df_candles),
+            tuple(sorted(params.to_dict().items())),
+        )
+        cached_bt = self._gate1_cache.get(g1_key)
+        if cached_bt is not None:
+            bt_res = cached_bt
+            logger.debug("[StrategyValidator] Gate 1 cache hit — skipping backtest")
+        else:
+            logger.info("[StrategyValidator] Running Gate 1: In-Sample Backtest...")
+            engine = BacktestEngine(params)
+            bt_res = engine.run(df_candles)
+            if len(self._gate1_cache) >= self._gate1_cache_max:
+                self._gate1_cache.clear()
+            self._gate1_cache[g1_key] = bt_res
 
         g1_metrics = {
             "total_return_pct": round(bt_res.total_return_pct, 2),
@@ -248,8 +296,14 @@ class StrategyValidator:
         # =========================================================================
         logger.info("[StrategyValidator] Running Gate 2: Walk-Forward Analysis...")
         wfe = 0.0
-        oos_return = 0.0
+        oos_cumulative_return = 0.0
         try:
+            effective_bpd = bars_per_day
+            if effective_bpd is None or effective_bpd <= 0:
+                from src.wfo import derive_bars_per_day
+
+                effective_bpd = derive_bars_per_day(df=df_candles, timeframe=timeframe)
+
             wfo_cfg = wfo_config or WFOConfig(
                 num_windows=0,
                 in_sample_ratio=0.7,
@@ -257,6 +311,11 @@ class StrategyValidator:
                 trials_per_window=0,
             )
             wfo_opt_cfg = OptunaConfig(
+                # Per-window trial budget (ema_vwap-p3d3): n_trials is the FULL
+                # sweep budget; WalkForwardEngine.run() auto-derives per-window
+                # trials when trials_per_window=0 (auto) and syncs via
+                # replace(opt_config, n_trials=trials_per_window). Passing the
+                # full budget here is intentional — it is the auto-scale input.
                 n_trials=n_trials,
                 target_metric=target_metric,
                 enable_multi_objective=enable_multi_objective,
@@ -268,6 +327,8 @@ class StrategyValidator:
                 wfo_config=wfo_cfg,
                 opt_config=wfo_opt_cfg,
                 n_trials_total=n_trials,
+                bars_per_day=effective_bpd,
+                timeframe=timeframe,
             )
             wfo_report = wfo_engine.run(df_candles)
 
@@ -286,11 +347,14 @@ class StrategyValidator:
                 if n_windows > 0
                 else 0.0
             )
-            oos_return = float(
+            oos_cumulative_return = float(
                 wfo_report.get(
-                    "avg_out_of_sample_return_pct",
+                    "oos_cumulative_return_pct",
                     wfo_report.get("oos_total_return_pct", 0.0),
                 )
+            )
+            avg_oos_return = float(
+                wfo_report.get("avg_out_of_sample_return_pct", oos_cumulative_return)
             )
             consistency_score = round(
                 float(
@@ -305,9 +369,12 @@ class StrategyValidator:
             g2_metrics = {
                 "walk_forward_efficiency_pct": round(wfe, 1),
                 "profitable_windows_pct": round(profitable_pct, 1),
-                "oos_total_return_pct": round(oos_return, 2),
+                "oos_total_return_pct": round(oos_cumulative_return, 2),
+                "avg_oos_return_pct": round(avg_oos_return, 2),
                 "n_windows": n_windows,
                 "consistency_score": consistency_score,
+                "bars_per_day": round(effective_bpd, 2),
+                "timeframe": timeframe,
                 # Regime-aware WFO fields (ema_vwap-z1v extension)
                 "regime_change_count": wfo_report.get("regime_change_count", 0),
                 "regime_change_ratio": wfo_report.get("regime_change_ratio", 0.0),
@@ -323,7 +390,7 @@ class StrategyValidator:
 
             if wfe < self.criteria.min_walk_forward_efficiency:
                 g2_passed = False
-                g2_status = "CAUTION" if oos_return > 0 else "FAIL"
+                g2_status = "CAUTION" if oos_cumulative_return > 0 else "FAIL"
                 msg = f"Low Walk-Forward Efficiency ({wfe:.1f}% < {self.criteria.min_walk_forward_efficiency}%). Indicates in-sample overfitting."
                 g2_warnings.append(msg)
                 failure_reasons.append(msg)
@@ -333,10 +400,10 @@ class StrategyValidator:
                 msg = f"Low out-of-sample window consistency ({profitable_pct:.0f}% < {self.criteria.min_profitable_windows_pct}% profitable windows)."
                 g2_warnings.append(msg)
 
-            if oos_return < self.criteria.min_oos_return_pct:
+            if oos_cumulative_return < self.criteria.min_oos_return_pct:
                 g2_passed = False
                 g2_status = "FAIL"
-                msg = f"Negative out-of-sample aggregate return ({oos_return:.2f}%)."
+                msg = f"Negative out-of-sample aggregate return ({oos_cumulative_return:.2f}%)."
                 g2_warnings.append(msg)
                 failure_reasons.append(msg)
 
@@ -345,7 +412,7 @@ class StrategyValidator:
                 passed=g2_passed,
                 status=g2_status,
                 metrics=g2_metrics,
-                details=f"WFE: {wfe:.1f}%, Profitable Windows: {profitable_pct:.0f}%, OOS Return: {oos_return:+.2f}%",
+                details=f"WFE: {wfe:.1f}%, Profitable Windows: {profitable_pct:.0f}%, Cumulative OOS Return: {oos_cumulative_return:+.2f}%, Avg Window: {avg_oos_return:+.2f}%",
                 warnings=g2_warnings,
             )
             all_warnings.extend(g2_warnings)
@@ -425,23 +492,23 @@ class StrategyValidator:
             all_warnings.extend(g3_warnings)
 
         except Exception as g3_exc:
-                    import traceback as _tb
+            import traceback as _tb
 
-                    g3_err_msg = f"Gate 3 (Monte Carlo) failed: {g3_exc}"
-                    logger.warning(f"[StrategyValidator] {g3_err_msg}{_tb.format_exc()}")
-                    # Monte Carlo failure is not catastrophic — degrade to CAUTION rather than FAIL
-                    # if the strategy otherwise passed Gates 1 and 2.
-                    g3_passed = False
-                    g3_status = "CAUTION"
-                    gate_results["gate3_monte_carlo"] = GateResult(
-                        gate_name="Gate 3: Monte Carlo Stress",
-                        passed=False,
-                        status="CAUTION",
-                        metrics={},
-                        details=g3_err_msg,
-                        warnings=[g3_err_msg],
-                    )
-                    all_warnings.append(g3_err_msg)
+            g3_err_msg = f"Gate 3 (Monte Carlo) failed: {g3_exc}"
+            logger.warning(f"[StrategyValidator] {g3_err_msg}{_tb.format_exc()}")
+            # Monte Carlo failure is not catastrophic — degrade to CAUTION rather than FAIL
+            # if the strategy otherwise passed Gates 1 and 2.
+            g3_passed = False
+            g3_status = "CAUTION"
+            gate_results["gate3_monte_carlo"] = GateResult(
+                gate_name="Gate 3: Monte Carlo Stress",
+                passed=False,
+                status="CAUTION",
+                metrics={},
+                details=g3_err_msg,
+                warnings=[g3_err_msg],
+            )
+            all_warnings.append(g3_err_msg)
 
         # =========================================================================
         # Composite Scoring & Status Synthesis
@@ -464,7 +531,30 @@ class StrategyValidator:
             "net_profit": min(35.0, max(0.0, (bt_res.total_return_pct / 50.0) * 35.0)),
             "win_rate": min(35.0, max(0.0, ((bt_res.win_rate - 40.0) / 30.0) * 35.0)),
             "drawdown_penalized_sharpe": min(
-                35.0, max(0.0, (bt_res.sharpe_ratio / 2.0) * 35.0)
+                35.0,
+                max(
+                    0.0,
+                    (
+                        getattr(
+                            bt_res, "drawdown_penalized_sharpe", bt_res.sharpe_ratio
+                        )
+                        / 2.0
+                    )
+                    * 35.0,
+                ),
+            ),
+            "drawdown_penalized_sortino": min(
+                35.0,
+                max(
+                    0.0,
+                    (
+                        getattr(
+                            bt_res, "drawdown_penalized_sortino", bt_res.sortino_ratio
+                        )
+                        / 2.0
+                    )
+                    * 35.0,
+                ),
             ),
             "max_drawdown_pct": min(
                 35.0, max(0.0, (1.0 - (bt_res.max_drawdown_pct / 30.0)) * 35.0)
@@ -496,7 +586,7 @@ class StrategyValidator:
         # WFE-only scoring rewarded high efficiency even when OOS returns were near-zero.
         wfe_score = min(25.0, max(0.0, (wfe / 100.0) * 25.0))
         # OOS return quality: normalize to 15 pts with 20% return = full score
-        oos_return_score = min(15.0, max(0.0, (oos_return / 20.0) * 15.0))
+        oos_return_score = min(15.0, max(0.0, (oos_cumulative_return / 20.0) * 15.0))
         g2_score = wfe_score + oos_return_score
 
         # --- Gate 3 score (25 pts) ---

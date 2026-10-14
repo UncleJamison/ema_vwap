@@ -7,18 +7,20 @@ and tracks mark-to-market balances and positions.
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Any
+
 import pandas as pd
 
-from src.database import CandleDatabase, db as default_db
-from src.data_loader import DataLoader
 from src.config import StrategyParams
-from src.strategy import EmaVwapStrategy
-from src.risk_manager import RiskManager
+from src.data_loader import DataLoader
+from src.database import CandleDatabase
+from src.database import db as default_db
+from src.logger import logger
+from src.paper.ledger import PaperLedger
 from src.paper.models import PaperPosition, PaperTradeRecord
 from src.paper.profiles import PaperProfileRegistry
-from src.paper.ledger import PaperLedger
-from src.logger import logger
+from src.risk_manager import RiskManager
+from src.strategy import EmaVwapStrategy
 
 
 class PaperTradingEngine:
@@ -26,7 +28,7 @@ class PaperTradingEngine:
 
     def __init__(
         self,
-        db: Optional[CandleDatabase] = None,
+        db: CandleDatabase | None = None,
         account_id: str = "default",
     ) -> None:
         self.db = db or default_db
@@ -35,11 +37,11 @@ class PaperTradingEngine:
         self.ledger = PaperLedger(db=self.db)
 
         self._running: bool = False
-        self._poll_thread: Optional[threading.Thread] = None
+        self._poll_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
-        self._last_evaluations: Dict[str, Dict[str, Any]] = {}
-        self._last_poll_time: Optional[str] = None
+        self._last_evaluations: dict[str, dict[str, Any]] = {}
+        self._last_poll_time: str | None = None
         self._consecutive_errors: int = 0
         self._MAX_CONSECUTIVE_ERRORS: int = 10  # Circuit-breaker threshold
 
@@ -70,9 +72,9 @@ class PaperTradingEngine:
         exchange: str,
         symbol: str,
         timeframe: str = "5m",
-        force_candles: Optional[pd.DataFrame] = None,
+        force_candles: pd.DataFrame | None = None,
         fetch_live: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Evaluate a symbol against its active Optuna parameter profile.
         Checks open positions for SL/TP exit triggers and generates new entries on signals.
@@ -183,11 +185,12 @@ class PaperTradingEngine:
 
                 # Check Take-Profit
                 if not exit_triggered and pos.take_profit is not None:
-                    if pos.side == "LONG" and high_price >= pos.take_profit:
-                        exit_triggered = True
-                        exit_reason = "TAKE_PROFIT"
-                        exit_price = pos.take_profit
-                    elif pos.side == "SHORT" and low_price <= pos.take_profit:
+                    if (
+                        pos.side == "LONG"
+                        and high_price >= pos.take_profit
+                        or pos.side == "SHORT"
+                        and low_price <= pos.take_profit
+                    ):
                         exit_triggered = True
                         exit_reason = "TAKE_PROFIT"
                         exit_price = pos.take_profit
@@ -401,14 +404,11 @@ class PaperTradingEngine:
                 side_str = "LONG"
                 side_int = 1
 
-                if signal == 1:
+                if signal == 1 and params.trade_direction != "short_only":
                     should_enter = True
                     side_str = "LONG"
                     side_int = 1
-                elif signal == -1 and params.trade_direction in (
-                    "long_short",
-                    "short_only",
-                ):
+                elif signal == -1 and params.trade_direction != "long_only":
                     should_enter = True
                     side_str = "SHORT"
                     side_int = -1
@@ -423,7 +423,7 @@ class PaperTradingEngine:
                     )
 
                     current_balance = self.ledger.get_balance(self.account_id)
-                    units, pos_val, risk_amount = rm.calculate_position_size(
+                    units, pos_val, _risk_amount = rm.calculate_position_size(
                         equity=current_balance,
                         entry_price=close_price,
                         stop_loss_price=stop_loss,
@@ -506,8 +506,8 @@ class PaperTradingEngine:
         self,
         exchange: str,
         symbol: str,
-        current_price: Optional[float] = None,
-    ) -> Optional[PaperTradeRecord]:
+        current_price: float | None = None,
+    ) -> PaperTradeRecord | None:
         """Manually close an open paper position at market price."""
         with self._lock:
             pos = self.ledger.get_position(exchange, symbol)
@@ -556,7 +556,7 @@ class PaperTradingEngine:
             self.ledger.close_position(exchange, symbol)
             return trade
 
-    def step_all_active_profiles(self) -> List[Dict[str, Any]]:
+    def step_all_active_profiles(self) -> list[dict[str, Any]]:
         """Evaluate all active paper trading profiles with live candle fetching."""
         profiles = self.registry.list_profiles(active_only=True)
         results = []
@@ -587,8 +587,8 @@ class PaperTradingEngine:
         return results
 
     def reconcile_positions_on_startup(
-        self, force_candles_map: Optional[Dict[str, pd.DataFrame]] = None
-    ) -> List[Dict[str, Any]]:
+        self, force_candles_map: dict[str, pd.DataFrame] | None = None
+    ) -> list[dict[str, Any]]:
         """
         Audit all open positions against historical candles spanning the downtime gap.
         Evaluates chronologically bar-by-bar if Stop-Loss or Take-Profit levels were breached
@@ -602,7 +602,7 @@ class PaperTradingEngine:
         logger.info(
             f"[PaperTradingEngine] Reconciling {len(open_positions)} open position(s) across downtime window..."
         )
-        reconciliation_results: List[Dict[str, Any]] = []
+        reconciliation_results: list[dict[str, Any]] = []
 
         for pos in open_positions:
             exchange = pos.exchange
@@ -698,11 +698,12 @@ class PaperTradingEngine:
 
                 # Check Take-Profit breach
                 if not exit_triggered and pos.take_profit is not None:
-                    if pos.side == "LONG" and high_price >= pos.take_profit:
-                        exit_triggered = True
-                        exit_reason = "TAKE_PROFIT"
-                        exit_price = pos.take_profit
-                    elif pos.side == "SHORT" and low_price <= pos.take_profit:
+                    if (
+                        pos.side == "LONG"
+                        and high_price >= pos.take_profit
+                        or pos.side == "SHORT"
+                        and low_price <= pos.take_profit
+                    ):
                         exit_triggered = True
                         exit_reason = "TAKE_PROFIT"
                         exit_price = pos.take_profit
@@ -896,7 +897,7 @@ class PaperTradingEngine:
         self._poll_thread = None
         return True
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> dict[str, Any]:
         """Get live runner status and summary."""
         profiles = self.registry.list_profiles(active_only=True)
         positions = self.ledger.list_positions()
@@ -920,9 +921,51 @@ class PaperTradingEngine:
             "performance": stats,
         }
 
+    def get_balance_snapshot(self) -> dict[str, Any]:
+        """Get current paper trading balance snapshot for portfolio aggregation."""
+        self.registry.list_profiles(active_only=True)
+        positions = self.ledger.list_positions()
+        balance = self.ledger.get_balance(self.account_id)
+        self.ledger.get_statistics()
+
+        unrealized_total = sum(p.unrealized_pnl for p in positions)
+        positions_market_value = sum(p.cost_basis + p.unrealized_pnl for p in positions)
+        total_equity = balance + positions_market_value
+
+        # Convert positions to AssetPosition-like dicts
+        position_dicts = []
+        for p in positions:
+            position_dicts.append(
+                {
+                    "symbol": p.symbol,
+                    "side": p.side,
+                    "entry_price": p.entry_price,
+                    "quantity": p.quantity,
+                    "cost_basis": p.cost_basis,
+                    "current_price": p.current_price,
+                    "unrealized_pnl_usd": p.unrealized_pnl,
+                    "unrealized_pnl_pct": p.unrealized_pnl_pct,
+                }
+            )
+
+        return {
+            "cash_usd": round(balance, 2),
+            "stablecoin_usd": 0.0,
+            "crypto_usd": sum(
+                p.cost_basis + p.unrealized_pnl
+                for p in positions
+                if p.side in ("LONG", "SHORT")
+            ),
+            "stock_usd": 0.0,
+            "positions": position_dicts,
+            "total_nav_usd": round(total_equity, 2),
+            "buying_power_usd": round(total_equity * 4.0, 2),  # default margin
+            "unrealized_pnl_usd": round(unrealized_total, 2),
+        }
+
     def close_position_manual(
-        self, exchange: str, symbol: str, exit_price: Optional[float] = None
-    ) -> Dict[str, Any]:
+        self, exchange: str, symbol: str, exit_price: float | None = None
+    ) -> dict[str, Any]:
         """Manually close an open paper trading position at market/current price."""
         trade = self.close_position_market(exchange, symbol, exit_price)
         if not trade:
@@ -941,9 +984,9 @@ class PaperTradingEngine:
         self,
         exchange: str,
         symbol: str,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None,
-    ) -> Dict[str, Any]:
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+    ) -> dict[str, Any]:
         """Dynamically update Stop-Loss and/or Take-Profit price levels on an open position."""
         pos = self.ledger.get_position(exchange, symbol)
         if not pos:
