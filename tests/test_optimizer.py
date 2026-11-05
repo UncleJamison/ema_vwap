@@ -29,7 +29,7 @@ def test_optuna_optimizer_basic():
     assert "top_trials" in res
     assert "best_backtest_result" in res
     assert len(res["top_trials"]) <= 15
-    assert res["best_params"]["fast_ema"] >= 5
+    assert res["best_params"]["fast_ema"] >= 3  # Optuna range is 3-30
     assert res["reproducible"] is True
     assert res["parallelism_mode"] == opt_config.execution_mode
 
@@ -384,7 +384,6 @@ def test_multi_objective_prunes_nonfinite_metric_values(monkeypatch):
 
 
 def test_batch_optimizer_skips_no_valid_optimization_result(monkeypatch):
-    from types import SimpleNamespace
 
     import src.batch_optimizer as batch_module
 
@@ -392,7 +391,7 @@ def test_batch_optimizer_skips_no_valid_optimization_result(monkeypatch):
     observed_config = []
     monkeypatch.setattr(
         batch_module.DataLoader,
-        "load_candles",
+        "load_candles_sync",
         lambda **kwargs: df,
     )
     monkeypatch.setattr(
@@ -405,7 +404,7 @@ def test_batch_optimizer_skips_no_valid_optimization_result(monkeypatch):
     monkeypatch.setattr(
         batch_module.OptunaOptimizer,
         "optimize",
-        lambda self, candles, is_cancelled=None, progress_callback=None: observed_config.append(
+        lambda self, df=None, is_cancelled=None, progress_callback=None: observed_config.append(
             (self.config.min_trades, self.config.sampler_seed)
         )
         or {
@@ -415,14 +414,14 @@ def test_batch_optimizer_skips_no_valid_optimization_result(monkeypatch):
             "best_backtest_result": None,
         },
     )
+
+    # Mock save_batch_result_pg to fail if called
+    async def mock_save_batch_result_pg(*args, **kwargs):
+        pytest.fail("invalid optimization result must not be persisted")
+
     monkeypatch.setattr(
-        batch_module,
-        "db",
-        SimpleNamespace(
-            save_batch_result=lambda **kwargs: pytest.fail(
-                "invalid optimization result must not be persisted"
-            )
-        ),
+        "src.batch_optimizer.save_batch_result_pg",
+        mock_save_batch_result_pg,
     )
 
     batch_optimizer = batch_module.BatchOptimizer(
@@ -436,12 +435,13 @@ def test_batch_optimizer_skips_no_valid_optimization_result(monkeypatch):
         )
     )
 
-    batch_optimizer._run_single_optuna("BTC/USD", "5m")
+    import asyncio
+
+    asyncio.run(batch_optimizer._run_single_optuna("BTC/USD", "5m"))
     assert observed_config == [(1, 91)]
 
 
 def test_batch_optimizer_uses_configured_min_trades_for_persistence(monkeypatch):
-    from types import SimpleNamespace
 
     import src.batch_optimizer as batch_module
 
@@ -449,7 +449,7 @@ def test_batch_optimizer_uses_configured_min_trades_for_persistence(monkeypatch)
     saved_results = []
     monkeypatch.setattr(
         batch_module.DataLoader,
-        "load_candles",
+        "load_candles_sync",
         lambda **kwargs: df,
     )
     monkeypatch.setattr(
@@ -462,19 +462,21 @@ def test_batch_optimizer_uses_configured_min_trades_for_persistence(monkeypatch)
     monkeypatch.setattr(
         batch_module.OptunaOptimizer,
         "optimize",
-        lambda self, candles, is_cancelled=None, progress_callback=None: {
-            "best_params": {},
+        lambda self, df, is_cancelled=None, progress_callback=None: {
+            "best_params": {"fast_ema": 10, "slow_ema": 20},
             "best_value": 1.0,
             "best_value_valid": True,
             "best_backtest_result": {"total_trades": 2},
         },
     )
+
+    # Mock save_batch_result_pg to capture saved results
+    async def mock_save_batch_result_pg(*args, **kwargs):
+        saved_results.append(kwargs)
+
     monkeypatch.setattr(
-        batch_module,
-        "db",
-        SimpleNamespace(
-            save_batch_result=lambda **kwargs: saved_results.append(kwargs)
-        ),
+        "src.batch_optimizer.save_batch_result_pg",
+        mock_save_batch_result_pg,
     )
 
     batch_optimizer = batch_module.BatchOptimizer(
@@ -486,7 +488,9 @@ def test_batch_optimizer_uses_configured_min_trades_for_persistence(monkeypatch)
         )
     )
 
-    batch_optimizer._run_single_optuna("BTC/USD", "5m")
+    import asyncio
+
+    asyncio.run(batch_optimizer._run_single_optuna("BTC/USD", "5m"))
 
     assert len(saved_results) == 1
     assert saved_results[0]["trade_count"] == 2

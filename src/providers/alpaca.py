@@ -9,13 +9,12 @@ import logging
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
 import pandas as pd
 
 from src.config import get_optimal_lookback_days
-from src.db_connection_manager import get_database
 from src.providers.base import BaseDataProvider
 from src.settings import SettingsManager
 
@@ -57,7 +56,7 @@ class AlpacaStockAdapter(BaseDataProvider):
     base_url: ClassVar[str] = "https://data.alpaca.markets/v2/stocks"
 
     def __init__(self, settings_manager: SettingsManager | None = None):
-        self.settings = settings_manager or SettingsManager(get_database("system"))
+        self.settings = settings_manager or SettingsManager()
 
     def format_symbol(self, symbol: str) -> str:
         """Strip quote currency and special characters (e.g., 'AAPL/USD' -> 'AAPL')."""
@@ -108,7 +107,7 @@ class AlpacaStockAdapter(BaseDataProvider):
                 columns=["timestamp", "open", "high", "low", "close", "volume"]
             )
 
-        end_dt = datetime.now(timezone.utc)
+        end_dt = datetime.now(UTC)
         start_dt = end_dt - timedelta(days=days)
         start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")

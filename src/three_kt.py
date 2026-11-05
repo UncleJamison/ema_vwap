@@ -11,9 +11,9 @@ Usage:
     from src.three_kt import StrategyVersion, AbTestRunner
 
     sv = StrategyVersion(name="v1.0", branch="main", tag="v1.0.0", config={...})
-    sv.save()
+    await sv.save()
 
-    runner = AbTestRunner(champion, challenger)
+    runner = AbTestRunner(champion, challenger, df)
     winner = runner.run()
 """
 
@@ -21,8 +21,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
@@ -34,102 +33,256 @@ from src.backtester import BacktestEngine, BacktestResult
 from src.config import StrategyParams
 
 # ──────────────────────────────────────────────────────────────
-# SQLite-backed version store (branches, tags, history)
+# PostgreSQL-backed version store (branches, tags, history)
+# ──────────────────────────────────────────────────────────────
+
+
+# ──────────────────────────────────────────────────────────────
+# Conn-injected cores (shared by pool-backed *_pg funcs and StrategyVersionDB)
+# ──────────────────────────────────────────────────────────────
+
+
+async def _ensure_table_core(conn) -> None:
+    """Create the strategy_versions table if it doesn't exist."""
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_versions (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            tag TEXT NOT NULL DEFAULT 'v0.0.0',
+            config JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            is_active BOOLEAN NOT NULL DEFAULT FALSE
+        )
+    """
+    )
+
+
+async def _save_core(conn, name, branch, tag, config, is_active) -> int:
+    import json as _json
+
+    now = datetime.now(UTC)
+    row = await conn.fetchrow(
+        """
+        INSERT INTO strategy_versions (name, branch, tag, config, created_at, updated_at, is_active)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+    """,
+        name,
+        branch,
+        tag,
+        _json.dumps(config, default=str),
+        now,
+        now,
+        is_active,
+    )
+    return row["id"]
+
+
+async def _get_core(conn, version_id: int) -> dict[str, Any] | None:
+    row = await conn.fetchrow(
+        "SELECT * FROM strategy_versions WHERE id = $1", version_id
+    )
+    return dict(row) if row else None
+
+
+async def _list_core(conn, limit: int) -> list[dict[str, Any]]:
+    rows = await conn.fetch(
+        """
+        SELECT id, name, branch, tag, created_at, updated_at, is_active
+        FROM strategy_versions ORDER BY created_at DESC LIMIT $1
+    """,
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def _promote_core(conn, version_id: int) -> bool:
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE strategy_versions SET is_active = FALSE WHERE id != $1",
+            version_id,
+        )
+        result = await conn.execute(
+            "UPDATE strategy_versions SET is_active = TRUE WHERE id = $1",
+            version_id,
+        )
+        return result != "UPDATE 0"
+
+
+async def _active_core(conn) -> dict[str, Any] | None:
+    row = await conn.fetchrow(
+        "SELECT * FROM strategy_versions WHERE is_active = TRUE "
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+    return dict(row) if row else None
+
+
+# ──────────────────────────────────────────────────────────────
+# Pool-backed public API (for async callers in the app)
+# ──────────────────────────────────────────────────────────────
+
+
+async def _system_conn():
+    """Acquire a connection from the shared system-domain pool."""
+    from src.pg_connection_manager import get_pg_manager
+
+    return get_pg_manager().get_pool("system").acquire()
+
+
+async def save_strategy_version_pg(
+    name: str,
+    branch: str,
+    tag: str,
+    config: dict[str, Any],
+    is_active: bool = True,
+) -> int:
+    """Save a strategy version to PostgreSQL (shared pool)."""
+    async with _system_conn() as conn:
+        await _ensure_table_core(conn)
+        return await _save_core(conn, name, branch, tag, config, is_active)
+
+
+async def get_strategy_version_pg(version_id: int) -> dict[str, Any] | None:
+    """Get a strategy version by ID (shared pool)."""
+    async with _system_conn() as conn:
+        await _ensure_table_core(conn)
+        return await _get_core(conn, version_id)
+
+
+async def list_strategy_versions_pg(limit: int = 50) -> list[dict[str, Any]]:
+    """List strategy versions (shared pool)."""
+    async with _system_conn() as conn:
+        await _ensure_table_core(conn)
+        return await _list_core(conn, limit)
+
+
+async def promote_strategy_version_pg(version_id: int) -> bool:
+    """Promote a strategy version; demotes all others (shared pool)."""
+    async with _system_conn() as conn:
+        await _ensure_table_core(conn)
+        return await _promote_core(conn, version_id)
+
+
+async def get_active_strategy_version_pg() -> dict[str, Any] | None:
+    """Get the currently active strategy version (shared pool)."""
+    async with _system_conn() as conn:
+        await _ensure_table_core(conn)
+        return await _active_core(conn)
+
+
+def _run_with_conn(coro_fn):
+    """Run ``coro_fn(conn)`` to completion from synchronous code.
+
+    Two modes:
+    - App context (main loop running): submit to the main loop and use the
+      shared system-domain pool (pools are bound to that loop).
+    - Standalone (scripts/tests, no app loop): run in a fresh event loop with
+      a dedicated short-lived connection — fully self-contained, so shared
+      pool / event-loop binding issues cannot arise.
+    """
+    from src.sync_bridge import get_main_loop, run_async
+
+    main_loop = get_main_loop()
+    if main_loop is not None and main_loop.is_running():
+
+        async def _app_side():
+            from src.pg_connection_manager import get_pg_manager
+
+            mgr = get_pg_manager()
+            async with mgr.get_pool("system").acquire() as conn:
+                return await coro_fn(conn)
+
+        return run_async(_app_side())
+
+    # Standalone mode: fresh loop + dedicated connection
+    import asyncio
+    import os
+
+    import asyncpg
+
+    async def _standalone():
+        from src.pg_connection_manager import PostgresConfig
+
+        cfg = PostgresConfig.from_env()
+        db_name = os.environ.get("PG_DATABASE_SYSTEM") or "ema_vwap_system"
+        conn = await asyncpg.connect(
+            host=cfg.host,
+            port=cfg.port,
+            database=db_name,
+            user=cfg.user,
+            password=cfg.password,
+        )
+        try:
+            return await coro_fn(conn)
+        finally:
+            await conn.close()
+
+    return asyncio.run(_standalone())
+
+
+# ──────────────────────────────────────────────────────────────
+# StrategyVersionDB — sync PG-backed store (SQLite-era surface)
 # ──────────────────────────────────────────────────────────────
 
 
 class StrategyVersionDB:
-    """SQLite version store for strategy configurations."""
+    """PostgreSQL-backed strategy version store with a sync (SQLite-era) surface.
 
-    def __init__(self, db_path: str = "beads/3kt.db") -> None:
-        self.path = Path(db_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = None
+    ``db_path`` is accepted for backward compatibility and stored as ``.path``,
+    but persistence goes through the shared ``system`` PG domain pool.
+    """
 
-    @property
-    def conn(self):
-        if self._conn is None:
-            import sqlite3
+    def __init__(self, db_path: str | None = None):
+        self.path = db_path
+        self._tables_ready = False
 
-            self._conn = sqlite3.connect(str(self.path))
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS strategy_versions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    branch TEXT NOT NULL,
-                    tag TEXT NOT NULL,
-                    config TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    is_active INTEGER DEFAULT 1
-                )
-            """
-            )
-            self._conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_versions_tag
-                ON strategy_versions(tag)
-            """
-            )
-            self._conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_versions_branch
-                ON strategy_versions(branch)
-            """
-            )
-        return self._conn
+    def _run(self, coro_fn):
+        """Run ``coro_fn(conn)`` to completion (see _run_with_conn)."""
+        return _run_with_conn(coro_fn)
 
     def create_version(
         self, name: str, branch: str, tag: str, config: dict[str, Any]
     ) -> int:
-        now = datetime.now(timezone.utc).isoformat()
-        config_json = json.dumps(config, default=str)
-        cur = self.conn.execute(
-            """
-            INSERT INTO strategy_versions (name, branch, tag, config, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (name, branch, tag, config_json, now, now),
-        )
-        self.conn.commit()
-        return cur.lastrowid
+        """Insert a new strategy version; returns its row ID."""
+
+        async def _create(conn):
+            await _ensure_table_core(conn)
+            return await _save_core(conn, name, branch, tag, config, True)
+
+        return self._run(_create)
 
     def get_version(self, version_id: int) -> dict[str, Any] | None:
-        cur = self.conn.execute(
-            "SELECT * FROM strategy_versions WHERE id = ?", (version_id,)
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        cols = [d[0] for d in cur.description]
-        return dict(zip(cols, row))
+        """Fetch a version row by ID."""
+
+        async def _get(conn):
+            await _ensure_table_core(conn)
+            return await _get_core(conn, version_id)
+
+        return self._run(_get)
 
     def list_versions(self, limit: int = 50) -> list[dict[str, Any]]:
-        cur = self.conn.execute(
-            """
-            SELECT id, name, branch, tag, created_at, updated_at, is_active
-            FROM strategy_versions ORDER BY created_at DESC LIMIT ?
-            """,
-            (limit,),
-        )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        """List versions (newest first)."""
+
+        async def _list(conn):
+            await _ensure_table_core(conn)
+            return await _list_core(conn, limit)
+
+        return self._run(_list)
 
     def promote(self, version_id: int) -> bool:
-        self.conn.execute(
-            "UPDATE strategy_versions SET is_active = 0 WHERE id != ?", (version_id,)
-        )
-        cur = self.conn.execute(
-            "UPDATE strategy_versions SET is_active = 1 WHERE id = ?", (version_id,)
-        )
-        self.conn.commit()
-        return cur.rowcount > 0
+        """Promote one version; demotes all others."""
+
+        async def _promote(conn):
+            await _ensure_table_core(conn)
+            return await _promote_core(conn, version_id)
+
+        return self._run(_promote)
 
     def close(self) -> None:
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        """No-op under PostgreSQL (the shared pool outlives this object)."""
 
 
 # ──────────────────────────────────────────────────────────────
@@ -146,18 +299,24 @@ class StrategyVersion:
     tag: str = "v0.0.0"
     config: dict[str, Any] = field(default_factory=dict)
     is_active: bool = True
+    _id: int | None = field(default=None, repr=False)
     _db: StrategyVersionDB | None = field(default=None, repr=False)
 
     @property
     def id(self) -> int | None:
-        return self._id if hasattr(self, "_id") else None
+        return self._id
 
     def save(self) -> int:
-        """Register this version in the DB. Returns the DB row ID."""
-        db = self._db or StrategyVersionDB()
-        version_id = db.create_version(self.name, self.branch, self.tag, self.config)
+        """Register this version in PostgreSQL. Returns the DB row ID."""
+
+        async def _save(conn):
+            await _ensure_table_core(conn)
+            return await _save_core(
+                conn, self.name, self.branch, self.tag, self.config, self.is_active
+            )
+
+        version_id = _run_with_conn(_save)
         self._id = version_id
-        self._db = db
         return version_id
 
     @classmethod
@@ -201,21 +360,29 @@ class StrategyVersion:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["_id"] = self.id
-        d["_db"] = self._db
+        d["_db_path"] = self._db.path if getattr(self, "_db", None) else None
         return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> StrategyVersion:
+        config = data.get("config", {})
+        if isinstance(config, str):  # asyncpg returns JSONB as str without codec
+            try:
+                config = json.loads(config)
+            except (json.JSONDecodeError, TypeError):
+                config = {}
+
         version = cls(
             name=data.get("name", "unknown"),
             branch=data.get("branch", "main"),
             tag=data.get("tag", "v0.0.0"),
-            config=data.get("config", {}),
-            is_active=data.get("is_active", True),
+            config=config,
+            is_active=bool(data.get("is_active", True)),
         )
         version._id = data.get("_id", data.get("id"))
-        if "_db" in data:
-            version._db = data.get("_db")
+        db_path = data.get("_db_path")
+        if db_path:
+            version._db = StrategyVersionDB(db_path=db_path)
         return version
 
 
@@ -321,17 +488,17 @@ class AbTestRunner:
             "recommendation": "manual_promotion_required",
         }
 
-    def promote_version(self, version_id: int, db: StrategyVersionDB) -> bool:
+    async def promote_version(self, version_id: int) -> bool:
         """Manually promote a strategy version. This is the manual promotion API."""
-        return db.promote(version_id)
+        return await promote_strategy_version_pg(version_id)
 
-    def promote_by_name(self, name: str, db: StrategyVersionDB) -> bool:
+    async def promote_by_name(self, name: str) -> bool:
         """Find a version by name and promote it (convenience method for API)."""
-        versions = db.list_versions()
+        versions = await list_strategy_versions_pg()
         target = next((v for v in versions if v["name"] == name), None)
         if not target:
             return False
-        return db.promote(target["id"])
+        return await promote_strategy_version_pg(target["id"])
 
 
 # ──────────────────────────────────────────────────────────────
@@ -340,11 +507,16 @@ class AbTestRunner:
 
 
 def get_current_champion(db: StrategyVersionDB | None = None) -> StrategyVersion | None:
-    """Retrieve the currently active (champion) strategy version."""
-    version_db = db or StrategyVersionDB()
-    versions = version_db.list_versions()
-    active = [v for v in versions if v.get("is_active")]
-    if not active:
+    """Retrieve the currently active (champion) strategy version.
+
+    Returns a StrategyVersion object, or None if no active version exists.
+    """
+
+    async def _get(conn):
+        await _ensure_table_core(conn)
+        return await _active_core(conn)
+
+    row = _run_with_conn(_get)
+    if not row:
         return None
-    latest = active[0]  # list_versions returns DESC by created_at
-    return StrategyVersion.from_dict(latest)
+    return StrategyVersion.from_dict(row)

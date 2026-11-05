@@ -51,17 +51,17 @@ def test_trailing_stop_update():
     # Long trade
     current_stop = 50000.0
     # Price rises to 50500
-    # ATR distance = 100 * 2.0 = 200
+    # Trending ATR distance = 100 * 2.0 * 1.5 = 300
     # % distance = 50500 * 0.015 = 757.5
-    # distance = min(200, 757.5) = 200 (ATR base, capped by %)
-    # new_stop = 50500 - 200 = 50300, ratchet: max(50000, 50300) = 50300
+    # distance = min(300, 757.5) = 300 (ATR base, capped by %)
+    # new_stop = 50500 - 300 = 50200, ratchet: max(50000, 50200) = 50200
     updated_stop = rm.update_trailing_stop(
         side=1, current_price=50500.0, current_stop=current_stop, atr=atr
     )
-    assert updated_stop == 50300.0
+    assert updated_stop == 50200.0
 
     # Price drops to 50200 -> trailing stop should NOT ratchet down
     no_drop_stop = rm.update_trailing_stop(
         side=1, current_price=50200.0, current_stop=updated_stop, atr=atr
     )
-    assert no_drop_stop == 50300.0  # price drop: stop must not ratchet down
+    assert no_drop_stop == 50200.0  # price drop: stop must not ratchet down

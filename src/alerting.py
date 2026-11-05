@@ -3,14 +3,13 @@ Configurable channels: email, Discord webhook, Telegram bot, Slack webhook.
 Integrates with SettingsManager for channel credentials and rate limiting.
 """
 
-import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
-from src.db_connection_manager import get_database
 from src.logger import logger
+from src.pg_database import save_alert_pg
 from src.settings import SettingsManager
 
 
@@ -126,7 +125,7 @@ class AlertManager:
     """Central manager for sending alerts to configured notification channels."""
 
     def __init__(self, settings_mgr: SettingsManager | None = None):
-        self.settings = settings_mgr or SettingsManager(get_database("system"))
+        self.settings = settings_mgr or SettingsManager()
         self.channels: dict[str, AlertChannel] = {}
         self._register_default_channels()
         self.history: list[dict[str, Any]] = []
@@ -165,7 +164,7 @@ class AlertManager:
             enabled=slack_enabled, webhook_url=slack_webhook
         )
 
-    def send(
+    async def send(
         self,
         alert_type: AlertType | str,
         message: str,
@@ -178,7 +177,7 @@ class AlertManager:
                 alert_type = AlertType(alert_type)
             except ValueError:
                 alert_type = AlertType.SYSTEM_HEALTH
-        timestamp = datetime.now(timezone.utc).isoformat() + "Z"
+        timestamp = datetime.now(UTC).isoformat()
         entry = {
             "timestamp": timestamp,
             "type": alert_type.value,
@@ -206,9 +205,8 @@ class AlertManager:
         self.history.append(entry)
         # Persist low-frequency alert to DB (ema_vwap-6ic)
         try:
-            db = get_database("system")
-            db.save_alert(entry)
-        except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+            await save_alert_pg(entry)
+        except Exception as e:
             logger.warning(f"DB persistence skipped for alert: {e}")
         return entry
 
@@ -228,11 +226,11 @@ def get_alert_manager(settings_mgr: SettingsManager | None = None) -> AlertManag
     return _alert_manager_instance
 
 
-def send_alert(
+async def send_alert(
     alert_type: AlertType | str,
     message: str,
     level: str = "INFO",
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Global convenience wrapper: dispatch via the singleton AlertManager."""
-    return get_alert_manager().send(alert_type, message, level, metadata)
+    return await get_alert_manager().send(alert_type, message, level, metadata)

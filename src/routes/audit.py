@@ -65,7 +65,7 @@ async def list_audit_logs(
                     status_code=400, detail=f"Invalid event_type: {event_type}"
                 )
 
-        logs = audit_logger.query(
+        logs = await audit_logger.query(
             user_id=user_id,
             event_type=AuditEventType(event_type) if event_type else None,
             start_time=start_time_dt,

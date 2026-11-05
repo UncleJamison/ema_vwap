@@ -8,14 +8,18 @@ Tests for Task Polling Routes (src/routes/tasks.py):
 
 import threading
 import time
-from datetime import datetime, timezone
-from unittest.mock import Mock, patch
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.routes.tasks import router as tasks_router
-from src.tasks import TaskCancelledException, TaskManager, TaskStatus
+from src.tasks import (
+    TaskCancelledException,
+    TaskManager,
+    TaskStatus,
+)
 
 
 class TestTaskRoutesList:
@@ -23,7 +27,7 @@ class TestTaskRoutesList:
 
     def test_list_tasks_empty(self, client, mock_task_db):
         """Should return empty list when no tasks exist."""
-        mock_task_db.list_background_tasks = Mock(return_value=[])
+        mock_task_db.list_background_tasks.return_value = []
 
         response = client.get("/api/tasks")
 
@@ -49,7 +53,7 @@ class TestTaskRoutesList:
                 "created_at": "2024-01-01T00:00:00",
             }
         ]
-        mock_task_db.list_background_tasks = Mock(return_value=mock_tasks)
+        mock_task_db.list_background_tasks.return_value = mock_tasks
 
         response = client.get("/api/tasks")
 
@@ -61,7 +65,7 @@ class TestTaskRoutesList:
 
     def test_list_tasks_with_limit(self, client, mock_task_db):
         """Should respect limit parameter."""
-        mock_task_db.list_background_tasks = Mock(return_value=[])
+        mock_task_db.list_background_tasks.return_value = []
 
         response = client.get("/api/tasks?limit=10")
 
@@ -72,7 +76,7 @@ class TestTaskRoutesList:
 
     def test_list_tasks_with_status_filter(self, client, mock_task_db):
         """Should filter by status parameter."""
-        mock_task_db.list_background_tasks = Mock(return_value=[])
+        mock_task_db.list_background_tasks.return_value = []
 
         response = client.get("/api/tasks?status=running")
 
@@ -83,7 +87,7 @@ class TestTaskRoutesList:
 
     def test_list_tasks_with_both_params(self, client, mock_task_db):
         """Should respect both limit and status parameters."""
-        mock_task_db.list_background_tasks = Mock(return_value=[])
+        mock_task_db.list_background_tasks.return_value = []
 
         response = client.get("/api/tasks?limit=25&status=completed")
 
@@ -120,7 +124,7 @@ class TestTaskRoutesGet:
             "result": None,
             "created_at": "2024-01-01T00:00:00",
         }
-        mock_task_db.get_background_task = Mock(return_value=mock_task)
+        mock_task_db.get_background_task.return_value = mock_task
 
         response = client.get("/api/tasks/task_abc123")
 
@@ -132,7 +136,7 @@ class TestTaskRoutesGet:
 
     def test_get_task_not_found(self, client, mock_task_db):
         """Should return 404 when task not found."""
-        mock_task_db.get_background_task = Mock(return_value=None)
+        mock_task_db.get_background_task.return_value = None
 
         response = client.get("/api/tasks/nonexistent")
 
@@ -157,8 +161,8 @@ class TestTaskRoutesCancel:
             "result": None,
             "created_at": "2024-01-01T00:00:00",
         }
-        mock_task_db.get_background_task = Mock(return_value=mock_task)
-        mock_task_db.save_background_task = Mock()
+        mock_task_db.get_background_task.return_value = mock_task
+        mock_task_db.save_background_task.return_value = None
 
         response = client.post("/api/tasks/task_abc123/cancel", headers=auth_headers)
 
@@ -182,7 +186,7 @@ class TestTaskRoutesCancel:
             "result": {"data": "test"},
             "created_at": "2024-01-01T00:00:00",
         }
-        mock_task_db.get_background_task = Mock(return_value=mock_task)
+        mock_task_db.get_background_task.return_value = mock_task
 
         response = client.post("/api/tasks/task_abc123/cancel", headers=auth_headers)
 
@@ -203,7 +207,7 @@ class TestTaskRoutesCancel:
             "result": None,
             "created_at": "2024-01-01T00:00:00",
         }
-        mock_task_db.get_background_task = Mock(return_value=mock_task)
+        mock_task_db.get_background_task.return_value = mock_task
 
         response = client.post("/api/tasks/task_abc123/cancel", headers=auth_headers)
 
@@ -211,7 +215,7 @@ class TestTaskRoutesCancel:
 
     def test_cancel_task_not_found(self, client, mock_task_db, auth_headers):
         """Should return 400 for non-existent task."""
-        mock_task_db.get_background_task = Mock(return_value=None)
+        mock_task_db.get_background_task.return_value = None
 
         response = client.post("/api/tasks/nonexistent/cancel", headers=auth_headers)
 
@@ -238,13 +242,23 @@ class TestTaskManagerCore:
     """Tests for TaskManager core functionality."""
 
     @pytest.fixture
-    def task_manager(self, tmp_path):
-        """Create TaskManager with temporary database."""
-        db_path = tmp_path / "test_tasks.db"
-        from src.database import CandleDatabase
+    def task_manager(self, pg_container):
+        """Create TaskManager against real PG with a clean background_tasks table."""
+        import asyncio as _asyncio
 
-        db = CandleDatabase(db_path=str(db_path))
-        return TaskManager(db=db)
+        from src.sync_bridge import get_main_loop
+
+        async def _cleanup():
+            from src.pg_connection_manager import get_pg_manager
+
+            pool = get_pg_manager().get_pool("system")
+            async with pool.acquire() as conn:
+                await conn.execute("TRUNCATE background_tasks")
+
+        _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(
+            timeout=10
+        )
+        return TaskManager()
 
     def test_create_task(self, task_manager):
         """Should create new task and return task_id."""
@@ -428,13 +442,21 @@ class TestTaskManagerCore:
 
 
 @pytest.fixture
-def task_manager(tmp_path):
-    """Create TaskManager with temporary database."""
-    db_path = tmp_path / "test_tasks.db"
-    from src.database import CandleDatabase
+def task_manager(pg_container):
+    """Create TaskManager against real PG with a clean background_tasks table."""
+    import asyncio as _asyncio
 
-    db = CandleDatabase(db_path=str(db_path))
-    return TaskManager(db=db)
+    from src.sync_bridge import get_main_loop
+
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
+
+        pool = get_pg_manager().get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE background_tasks")
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(timeout=10)
+    return TaskManager()
 
 
 class TestTaskManagerThreadSafety:
@@ -476,16 +498,16 @@ class TestTaskRoutesIntegration:
             "status": "pending",
             "progress_pct": 0.0,
             "step_description": "Task created",
-            "start_time": datetime.now(timezone.utc).isoformat(),
+            "start_time": datetime.now(UTC).isoformat(),
             "end_time": None,
             "error": None,
             "result": None,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
 
         # Mock the database to return our task
-        mock_task_db.get_background_task = Mock(return_value=mock_task)
-        mock_task_db.list_background_tasks = Mock(return_value=[mock_task])
+        mock_task_db.get_background_task.return_value = mock_task
+        mock_task_db.list_background_tasks.return_value = [mock_task]
 
         # List tasks
         response = client.get("/api/tasks")
@@ -498,7 +520,7 @@ class TestTaskRoutesIntegration:
         assert response.json()["task"]["task_id"] == task_id
 
         # Cancel task (requires auth)
-        mock_task_db.save_background_task = Mock()
+        mock_task_db.save_background_task.return_value = None
         response = client.post(f"/api/tasks/{task_id}/cancel", headers=auth_headers)
         assert response.status_code == 200
 
@@ -525,11 +547,23 @@ def client():
 
 @pytest.fixture
 def mock_task_db():
-    """Mock the database used by global_task_manager."""
-    mock_db = Mock()
-    # Patch the global_task_manager's db
-    with patch("src.routes.tasks.global_task_manager.db", mock_db), patch(
-        "src.tasks.global_task_manager.db", mock_db
+    """Mock the PG database functions used by global_task_manager.
+
+    Patches the pg_database functions imported into src.tasks namespace so
+    TaskManager methods (cancel_task, fail_task, etc.) run real logic against
+    mocked PG functions. Tests configure return values via
+    mock_task_db.<func>.return_value = ... instead of replacing attributes.
+    """
+    mock_db = AsyncMock()
+    # Configure default return values
+    mock_db.save_background_task.return_value = None
+    mock_db.get_background_task.return_value = None
+    mock_db.list_background_tasks.return_value = []
+    # Patch the pg_database functions as referenced in src.tasks module
+    with patch(
+        "src.tasks.save_background_task_pg", mock_db.save_background_task
+    ), patch("src.tasks.get_background_task_pg", mock_db.get_background_task), patch(
+        "src.tasks.list_background_tasks_pg", mock_db.list_background_tasks
     ):
         yield mock_db
 

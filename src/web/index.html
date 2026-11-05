@@ -91,13 +91,16 @@
                             </select>
             </div>
             <div class="form-row" style="margin-top: 10px;">
-              <button id="sync-db-btn" class="btn-secondary" style="flex: 1;">
-                <span class="btn-icon">📥</span> Sync 180-Day DB
-              </button>
-              <button id="clear-db-btn" class="btn-secondary" style="flex: 1; border-color: rgba(255, 0, 122, 0.4); color: #ff007a;">
-                <span class="btn-icon">🗑️</span> Clear DB Cache
-              </button>
-            </div>
+                          <button id="sync-db-btn" class="btn-secondary" style="flex: 1;">
+                                                      <span class="btn-icon">📥</span> Sync DB
+                                                    </button>
+                          <button id="sync-1m-btn" class="btn-secondary" style="flex: 1;">
+                            <span class="btn-icon">⚡</span> Sync 1m
+                          </button>
+                          <button id="clear-db-btn" class="btn-secondary" style="flex: 1; border-color: rgba(255, 0, 122, 0.4); color: #ff007a;">
+                            <span class="btn-icon">🗑️</span> Clear DB Cache
+                          </button>
+                        </div>
           </div>
         </div>
 
@@ -380,8 +383,8 @@
             </div>
             <div class="form-row">
               <div class="form-group">
-                <label for="optuna-trials-input">Optuna Trials</label>
-                <input type="number" id="optuna-trials-input" value="50" min="5" max="1000" class="form-control">
+                <label for="optuna-trials-input">Optuna Trials <span style="opacity:0.6;font-size:0.8em">(recommended: 50–100)</span></label>
+                <input type="number" id="optuna-trials-input" value="100" min="10" max="2000" class="form-control">
               </div>
               <div class="form-group">
                 <label for="wfo-windows-input">WFO Windows <span style="opacity:0.6;font-size:0.8em">(0 = auto)</span></label>
@@ -389,8 +392,8 @@
               </div>
             </div>
             <div class="form-group">
-              <label for="wfo-days-input">WFO Lookback Days <span style="opacity:0.6;font-size:0.8em">(default: 365)</span></label>
-              <input type="number" id="wfo-days-input" value="365" min="150" max="2000" class="form-control">
+              <label for="wfo-days-input">WFO Lookback Days <span style="opacity:0.6;font-size:0.8em">(blank or 0 = Auto Optimal)</span></label>
+              <input type="number" id="wfo-days-input" placeholder="Auto (optimal)" min="0" max="3650" class="form-control">
             </div>
             <div class="form-group">
               <label for="mc-sims-input">Monte Carlo Sims</label>
@@ -906,7 +909,7 @@
                   <option value="auto">Auto (Compare All 3 Setups)</option>
                   <option value="crossover">Setup 1: EMA × VWAP Crossover</option>
                   <option value="multi_ema">Setup 2: Multi-EMA Confirmation</option>
-                  <option value="vwap_pullback">Setup 3: VWAP Pullback Entry</option>
+                  <option value="pullback">Setup 3: VWAP Pullback Entry</option>
                 </select>
               </div>
               <div class="form-group" id="batch-target-group">
@@ -994,6 +997,9 @@
               </label>
               <button id="batch-load-btn" class="btn-secondary">
                 <span class="btn-icon">&#x1f504;</span> Load Saved Results
+              </button>
+              <button id="batch-refresh-val-btn" class="btn-secondary" title="Re-run 3-gate validation on all saved results">
+                <span class="btn-icon">&#x1f501;</span> Refresh Validation
               </button>
               <button id="batch-delete-btn" class="btn-secondary" disabled>
                 <span class="btn-icon">&#x1f5d1;</span> Delete Selected

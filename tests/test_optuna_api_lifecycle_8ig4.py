@@ -2,19 +2,24 @@
 
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.app import app
 from src.config import OptunaConfig, StrategyParams
 from src.data_loader import DataLoader
-from src.database import CandleDatabase
 from src.optimizer import OptunaOptimizer
 from src.tasks import TaskManager, TaskStatus
 
 client = TestClient(app)
 
 
-def test_api_optimize_default_is_sequential():
+@pytest.fixture
+def auth_headers():
+    return {"X-API-Key": "test-key-for-tests"}
+
+
+def test_api_optimize_default_is_sequential(auth_headers, pg_container):
     """Verify that /api/optimize defaults to sequential execution when execution_mode is omitted."""
     payload = {
         "exchange": "synthetic",
@@ -26,14 +31,14 @@ def test_api_optimize_default_is_sequential():
         "n_trials": 3,
         "sampler_seed": 42,
     }
-    response = client.post("/api/optimize", json=payload)
+    response = client.post("/api/optimize", json=payload, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "started"
     assert "task_id" in data
 
 
-def test_api_optimize_multiprocess_explicit_opt_in():
+def test_api_optimize_multiprocess_explicit_opt_in(auth_headers, pg_container):
     """Verify that /api/optimize runs in multiprocess mode when explicitly requested."""
     payload = {
         "exchange": "synthetic",
@@ -47,14 +52,14 @@ def test_api_optimize_multiprocess_explicit_opt_in():
         "n_workers": 2,
         "sampler_seed": 42,
     }
-    response = client.post("/api/optimize", json=payload)
+    response = client.post("/api/optimize", json=payload, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "started"
     assert "task_id" in data
 
 
-def test_api_optimize_worker_clamping():
+def test_api_optimize_worker_clamping(auth_headers, pg_container):
     """Verify that excessive worker count is clamped to MAX_OPTUNA_WORKERS."""
     payload = {
         "exchange": "synthetic",
@@ -68,17 +73,16 @@ def test_api_optimize_worker_clamping():
         "n_workers": 999,
         "sampler_seed": 42,
     }
-    response = client.post("/api/optimize", json=payload)
+    response = client.post("/api/optimize", json=payload, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "started"
     assert "task_id" in data
 
 
-def test_task_manager_multiprocess_progress_and_completion(tmp_path):
+def test_task_manager_multiprocess_progress_and_completion(pg_container):
     """Verify that a background multiprocess task updates progress and completes cleanly."""
-    db = CandleDatabase(db_path=str(tmp_path / "test_system_tasks.db"))
-    tm = TaskManager(db=db)
+    tm = TaskManager()
 
     df_candles = DataLoader.generate_synthetic_candles(num_bars=100, seed=42)
     base_params = StrategyParams(strategy_mode="crossover")
@@ -118,10 +122,9 @@ def test_task_manager_multiprocess_progress_and_completion(tmp_path):
     assert task["result"]["parallelism_mode"] == "multiprocess"
 
 
-def test_task_manager_multiprocess_cancellation_bounded(tmp_path):
+def test_task_manager_multiprocess_cancellation_bounded(pg_container):
     """Verify that cancelling a multiprocess background task stops workers within bounded time (<5s)."""
-    db = CandleDatabase(db_path=str(tmp_path / "test_system_cancel.db"))
-    tm = TaskManager(db=db)
+    tm = TaskManager()
 
     df_candles = DataLoader.generate_synthetic_candles(num_bars=200, seed=42)
     base_params = StrategyParams(strategy_mode="crossover")
@@ -170,10 +173,9 @@ def test_task_manager_multiprocess_cancellation_bounded(tmp_path):
         assert not t.is_alive()
 
 
-def test_concurrent_multiprocess_tasks_isolated(tmp_path):
+def test_concurrent_multiprocess_tasks_isolated(pg_container):
     """Verify that concurrent multiprocess optimization tasks execute in isolation."""
-    db = CandleDatabase(db_path=str(tmp_path / "test_system_concurrent.db"))
-    tm = TaskManager(db=db)
+    tm = TaskManager()
 
     df1 = DataLoader.generate_synthetic_candles(num_bars=100, seed=1)
     df2 = DataLoader.generate_synthetic_candles(num_bars=100, seed=2)

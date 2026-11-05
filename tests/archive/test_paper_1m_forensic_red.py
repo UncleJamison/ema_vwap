@@ -8,20 +8,48 @@ This test should FAIL (RED) until the system enters a position.
 import pytest
 
 from src.config import StrategyParams
-from src.database import CandleDatabase
 from src.paper.engine import PaperTradingEngine
 from src.providers import SyntheticAdapter
 
 
 @pytest.fixture
-def test_db_1m(tmp_path):
-    db_file = str(tmp_path / "test_1m_paper.db")
-    return CandleDatabase(db_path=db_file)
+def test_engine(pg_container):
+    _truncate(["candles", "paper_trading"])
+    return PaperTradingEngine()
 
 
-def test_1m_strategy_must_enter_position(test_db_1m):
+def _truncate(tables: list[str]) -> None:
+    """Clean tables in their domain via the test main loop (real PG)."""
+    import asyncio as _asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
+
+        mgr = get_pg_manager()
+        async with mgr.get_pool("candles").acquire() as conn:
+            if "candles" in tables:
+                await conn.execute(
+                    "DELETE FROM candles WHERE exchange = 'synthetic' "
+                    "AND symbol = 'BTC/USDT'"
+                )
+        async with mgr.get_pool("paper_trading").acquire() as conn:
+            for t in (
+                "paper_trade_history",
+                "paper_profiles",
+                "paper_positions",
+                "paper_ledger_transactions",
+            ):
+                if t in tables:
+                    await conn.execute(f"TRUNCATE {t} RESTART IDENTITY")
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(timeout=10)
+
+
+def test_1m_strategy_must_enter_position(test_engine):
     """RED: A 1m strategy with a profile and synthetic candles must enter a trade."""
-    engine = PaperTradingEngine(db=test_db_1m)
+    engine = test_engine
     synth = SyntheticAdapter()
 
     # Register an active 1m profile with permissive settings

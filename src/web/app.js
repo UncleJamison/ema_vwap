@@ -55,27 +55,27 @@ const DEFAULT_SETTINGS = {
   min_trades: 3,
   n_jobs: 1,
   n_startup_trials: null,
-    seed_base_params: true,
-    // Validation Gates
-    val_min_sharpe: 0.8,
-    val_max_drawdown: 30.0,
-    val_min_return: 0.0,
-    val_min_trades: 3,
-    val_wf_efficiency: 50,
-    val_profitable_windows: 50,
-    val_min_oos_return: 0.0,
-    val_trials: 250,
-    val_rigor_preset: "standard",
-    val_max_ruin: 5.0,
-    val_max_mc_drawdown: 35.0,
+  seed_base_params: true,
+  // Validation Gates
+  val_min_sharpe: 0.8,
+  val_max_drawdown: 30.0,
+  val_min_return: 0.0,
+  val_min_trades: 3,
+  val_wf_efficiency: 50,
+  val_profitable_windows: 50,
+  val_min_oos_return: 0.0,
+  val_trials: 250,
+  val_rigor_preset: "standard",
+  val_max_ruin: 5.0,
+  val_max_mc_drawdown: 35.0,
   mc_sims: 500,
   confidence_levels: [5.0, 50.0, 95.0],
   val_max_ruin: 5.0,
-    default_capital: 10000,
-    default_risk_pct: 1.0,
-    min_warmup_bars: 250,
-    market_hours: "crypto_24_7",
-    // Crypto Exchange Credentials
+  default_capital: 10000,
+  default_risk_pct: 1.0,
+  min_warmup_bars: 250,
+  market_hours: "crypto_24_7",
+  // Crypto Exchange Credentials
   gemini_api_key: "",
   gemini_secret_key: "",
   gemini_sandbox: true,
@@ -158,7 +158,7 @@ function saveSettings(settings) {
       delete safeSettings[key];
     }
     localStorage.setItem("ema_vwap_settings", JSON.stringify(safeSettings));
-    
+
     // Send sensitive settings to backend
     const sensitiveSettings = {};
     for (const key of SENSITIVE_FIELDS) {
@@ -180,7 +180,7 @@ function saveSettings(settings) {
 
 function initSettingsUI() {
   const s = getSettings();
-  
+
   // Execution & Fees
   const setVal = (id, val) => {
     const el = document.getElementById(id);
@@ -217,27 +217,27 @@ function initSettingsUI() {
   if (seedEl) seedEl.checked = s.seed_base_params !== false;
 
   // Risk & Capital
-    setVal("setting-default-capital", s.default_capital);
-    setVal("setting-default-risk", s.default_risk_pct);
+  setVal("setting-default-capital", s.default_capital);
+  setVal("setting-default-risk", s.default_risk_pct);
 
-    // Validation Gates
-    setVal("setting-val-min-sharpe", s.val_min_sharpe);
-    setVal("setting-val-max-drawdown", s.val_max_drawdown);
-    setVal("setting-val-min-return", s.val_min_return);
-    setVal("setting-val-min-trades", s.val_min_trades);
-    setVal("setting-val-wf-efficiency", s.val_wf_efficiency);
-    setVal("setting-val-profitable-windows", s.val_profitable_windows);
-    setVal("setting-val-min-oos-return", s.val_min_oos_return);
-    setVal("setting-val-trials", s.val_trials || 250);
-    setVal("setting-val-rigor-preset", s.val_rigor_preset || "standard");
-    setVal("setting-val-max-ruin", s.val_max_ruin);
-    setVal("setting-val-max-mc-drawdown", s.val_max_mc_drawdown);
-    setVal("mc-sims-input", s.mc_sims);
-    setVal("setting-val-max-ruin", s.confidence_levels[0]);
-    setVal("setting-val-median-mc-drawdown", s.confidence_levels[1]);
-    setVal("setting-val-max-ruin", s.val_max_ruin);
+  // Validation Gates
+  setVal("setting-val-min-sharpe", s.val_min_sharpe);
+  setVal("setting-val-max-drawdown", s.val_max_drawdown);
+  setVal("setting-val-min-return", s.val_min_return);
+  setVal("setting-val-min-trades", s.val_min_trades);
+  setVal("setting-val-wf-efficiency", s.val_wf_efficiency);
+  setVal("setting-val-profitable-windows", s.val_profitable_windows);
+  setVal("setting-val-min-oos-return", s.val_min_oos_return);
+  setVal("setting-val-trials", s.val_trials || 250);
+  setVal("setting-val-rigor-preset", s.val_rigor_preset || "standard");
+  setVal("setting-val-max-ruin", s.val_max_ruin);
+  setVal("setting-val-max-mc-drawdown", s.val_max_mc_drawdown);
+  setVal("mc-sims-input", s.mc_sims);
+  setVal("setting-val-max-ruin", s.confidence_levels[0]);
+  setVal("setting-val-median-mc-drawdown", s.confidence_levels[1]);
+  setVal("setting-val-max-ruin", s.val_max_ruin);
 
-    // Crypto Exchanges
+  // Crypto Exchanges
   setVal("setting-gemini-api-key", s.gemini_api_key || "");
   setVal("setting-gemini-secret-key", s.gemini_secret_key || "");
   const geminiSandboxEl = document.getElementById("setting-gemini-sandbox");
@@ -454,9 +454,9 @@ function setupSettingsModalEvents() {
 
 function getAuthHeaders(extraHeaders = {}) {
   const inputKey = document.getElementById("setting-app-api-key")?.value;
-  const key = (inputKey !== undefined && inputKey.trim() !== "" ? inputKey : 
-               (typeof window.BOOTSTRAP_API_KEY !== "undefined" && window.BOOTSTRAP_API_KEY) || 
-               (cachedSettings.app_api_key || "")).trim();
+  const key = (inputKey !== undefined && inputKey.trim() !== "" ? inputKey :
+    (typeof window.BOOTSTRAP_API_KEY !== "undefined" && window.BOOTSTRAP_API_KEY) ||
+    (cachedSettings.app_api_key || "")).trim();
   const headers = { ...extraHeaders };
   if (key) {
     headers["X-API-Key"] = key;
@@ -680,12 +680,12 @@ async function exportCandlesData(format = "csv") {
 }
 
 async function clearCandleCacheFromModal() {
-  if (!confirm("Are you sure you want to clear the local SQLite candle cache?\n\nCached market candles will be deleted from candles.db.")) {
+  if (!confirm("Are you sure you want to clear the candle cache?\n\nCached market candles will be removed from the database.")) {
     return;
   }
   const btn = document.getElementById("btn-db-clear-cache-modal");
   if (btn) btn.disabled = true;
-  logDbMaintenance("Flushing candle cache in candles.db...");
+  logDbMaintenance("Flushing candle cache...");
   try {
     const res = await fetch("/api/clear_cache", {
       method: "POST",
@@ -758,12 +758,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   console.log('[DEBUG] DOMContentLoaded fired, starting loadSensitiveSettings');
   // Load sensitive settings (API keys) from backend at startup
   await loadSensitiveSettings();
-  
+
+  // Ensure data-range-select defaults to "auto" (optimal lookback per timeframe)
+  // so backtests use get_optimal_lookback_days (e.g., 90d for 5m) instead of a fixed range.
+  const rangeEl = document.getElementById("data-range-select");
+  if (rangeEl && !rangeEl.value) rangeEl.value = "auto";
+
   // Initialize WebSocket dashboard with API key from cached settings
   if (typeof initWebSocketDashboard === "function") {
     initWebSocketDashboard();
   }
-  
+
   const runBtn = document.getElementById("run-backtest-btn");
   const syncBtn = document.getElementById("sync-db-btn");
   const clearBtn = document.getElementById("clear-db-btn");
@@ -909,6 +914,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (resetMainBtn) resetMainBtn.addEventListener("click", resetMainDefaults);
   syncBtn.addEventListener("click", syncDatabase);
   if (clearBtn) clearBtn.addEventListener("click", clearDatabase);
+  const sync1mBtn = document.getElementById("sync-1m-btn");
+  if (sync1mBtn) sync1mBtn.addEventListener("click", sync1m);
   exportBtn.addEventListener("click", exportTradesCSV);
 
   setupSettingsModalEvents();
@@ -923,7 +930,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     .then((d) => {
       if (d && d.snapshot) updateGlobalNavPill(d.snapshot.total_nav_usd);
     })
-    .catch(() => {});
+    .catch(() => { });
 
   // Run initial backtest on page load
   runBacktest();
@@ -1020,7 +1027,7 @@ function resetMainDefaults() {
   setField("optuna-multi-metric-select", "sharpe_ratio|max_drawdown_pct");
   setField("batch-objective-mode-select", "single");
   setField("batch-multi-metric-select", "sharpe_ratio|max_drawdown_pct");
-  setField("optuna-trials-input", 30);
+  setField("optuna-trials-input", 100);
   setField("wfo-windows-input", 0);
   setField("mc-sims-input", 500);
   const objectiveModeEl = document.getElementById("optuna-objective-mode-select");
@@ -1079,7 +1086,7 @@ function resetMainDefaults() {
 }
 
 async function clearDatabase() {
-  if (!confirm("Are you sure you want to clear the local SQLite candle cache?")) return;
+  if (!confirm("Are you sure you want to clear the database candle cache?")) return;
   const clearBtn = document.getElementById("clear-db-btn");
   clearBtn.disabled = true;
 
@@ -1135,7 +1142,41 @@ async function syncDatabase() {
     showToast(`Sync Error: ${error.message}`, "error");
   } finally {
     syncBtn.disabled = false;
-    syncBtn.innerHTML = `<span class="btn-icon">📥</span> Sync Database`;
+    syncBtn.innerHTML = `<span class="btn-icon">📥</span> Sync DB`;
+  }
+}
+
+async function sync1m() {
+  const syncBtn = document.getElementById("sync-1m-btn");
+  syncBtn.disabled = true;
+  syncBtn.innerHTML = `<span class="btn-icon">⏳</span> Fetching 1m...`;
+
+  const exchange = document.getElementById("exchange-select").value;
+  const symbol = document.getElementById("symbol-input").value.trim();
+  const timeframe = document.getElementById("timeframe-select").value;
+
+  // For 1m sync, use a fixed 30-day window (covers ~43,200 candles)
+  const days = 30;
+  const limit = 50000;
+
+  try {
+    const response = await fetch("/api/sync_history", {
+      method: "POST",
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ exchange, symbol, timeframe: "1m", days, limit }),
+    });
+
+    const data = await response.json();
+    if (response.ok) {
+      showToast(`Success: ${data.message}`, "success");
+    } else {
+      showToast(`Sync Error: ${data.detail || "Failed to sync 1m candles."}`, "error");
+    }
+  } catch (error) {
+    showToast(`Sync Error: ${error.message}`, "error");
+  } finally {
+    syncBtn.disabled = false;
+    syncBtn.innerHTML = `<span class="btn-icon">⚡</span> Sync 1m`;
   }
 }
 
@@ -1179,7 +1220,7 @@ async function runBacktest() {
       volume_multiplier: parseFloat(document.getElementById("vol-mult-input").value),
       stop_loss_type: document.getElementById("stop-loss-type-select").value,
       trailing_stop_pct: parseFloat(document.getElementById("tsl-distance-input").value) || 1.5,
-          risk_per_trade_pct: parseFloat(document.getElementById("risk-per-trade-input").value),
+      risk_per_trade_pct: parseFloat(document.getElementById("risk-per-trade-input").value),
       risk_reward_ratio: parseFloat(document.getElementById("rr-ratio-input").value),
       initial_capital: parseFloat(document.getElementById("capital-input").value),
       maker_fee_pct: settings.maker_fee_pct,
@@ -1187,16 +1228,12 @@ async function runBacktest() {
       slippage_pct: settings.slippage_pct,
     };
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s — large datasets (e.g. 90d 5m) can take time to queue
-    runBtn.innerHTML = `<span class="btn-icon">⏳</span> Queuing request...`;
+    runBtn.innerHTML = `<span class="btn-icon">⏳</span> Starting backtest...`;
     const response = await fetch("/api/backtest", {
       method: "POST",
       headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
-      signal: controller.signal,
     });
-    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const err = await response.json();
@@ -1210,12 +1247,18 @@ async function runBacktest() {
     if (data.status === "started" && data.task_id) {
       const taskId = data.task_id;
       let attempts = 0;
-      const maxAttempts = 300; // ~5 min at 1s intervals
+      const maxAttempts = 900; // ~15 min at 1s intervals
       let lastStep = "";
       while (attempts < maxAttempts) {
         await new Promise((r) => setTimeout(r, 1000));
         attempts += 1;
         const pollResp = await fetch(`/api/tasks/${taskId}`);
+        if (!pollResp.ok) {
+          const pollError = await pollResp.json();
+          throw new Error(
+            pollError.detail || `Unable to retrieve backtest task (${pollResp.status}).`
+          );
+        }
         const pollData = await pollResp.json();
         const task = pollData.task || {};
         if (task.status === "completed" || task.status === "success") {
@@ -1228,6 +1271,10 @@ async function runBacktest() {
           );
           return;
         }
+        if (task.status === "cancelled") {
+          alert("Backtest task was cancelled.");
+          return;
+        }
         const step = task.step_description || "";
         if (step && step !== lastStep) {
           lastStep = step;
@@ -1236,7 +1283,7 @@ async function runBacktest() {
       }
       if (attempts >= maxAttempts) {
         runBtn.innerHTML = `<span class="btn-icon">⏳</span> Running Simulation...`;
-        alert("Backtest is taking longer than expected. It may still be running — refresh the page to check.");
+        alert("Backtest is taking longer than 15 minutes. It may still be running — check the Tasks panel before starting another run.");
         return;
       }
     }
@@ -1257,20 +1304,15 @@ async function runBacktest() {
     tradesCurrentPage = 1;
     renderTradeTable(currentTrades);
   } catch (error) {
-    if (error.name === "AbortError") {
-      console.warn("Backtest request timed out after 20s — server may still be running.");
-      alert("Backtest request timed out (60s). The server may be overloaded or the dataset is very large.\n\nTry: reducing the day range, or refreshing to check if the task is still running.");
-    } else {
-      console.error("Backtest request failed:", error);
-      alert(`Request error: ${error.message}`);
-    }
+    console.error("Backtest request failed:", error);
+    alert(`Backtest request error: ${error.message}`);
   } finally {
     runBtn.disabled = false;
     runBtn.innerHTML = `<span class="btn-icon">▶</span> Run Strategy Backtest`;
   }
 }
 
-    function updateKPIs(metrics) {
+function updateKPIs(metrics) {
   if (!metrics) return;
 
   // SQLite cache hit/coverage badge
@@ -1308,7 +1350,7 @@ async function runBacktest() {
   kpiProfit.textContent = `$${netProfit >= 0 ? "+" : ""}${netProfit.toLocaleString()} Net`;
   kpiWinrate.textContent = `${fmt(metrics.win_rate || 0)}%`;
   kpiTradesCount.textContent = `${metrics.winning_trades || 0}W / ${metrics.losing_trades || 0}L (${metrics.total_trades || 0} total)`;
-  
+
   kpiPf.textContent = fmt(metrics.profit_factor);
   kpiPayoff.textContent = `Payoff: ${fmt(metrics.payoff_ratio)}`;
   kpiDrawdown.textContent = `${fmt(metrics.max_drawdown_pct)}%`;
@@ -1784,6 +1826,27 @@ function exportTradesCSV() {
   link.remove();
 }
 
+function getBacktestDaysForTimeframe() {
+  // Resolve "auto" to actual optimal lookback days per timeframe
+  // Matches src/config.py get_optimal_lookback_days() defaults
+  const tf = document.getElementById("timeframe-select")?.value || "5m";
+  const daysMap = {
+    "1m": 30,
+    "3m": 60,
+    "5m": 90,
+    "15m": 180,
+    "30m": 250,
+    "1h": 900,
+    "2h": 540,
+    "4h": 350,
+    "6h": 540,
+    "8h": 540,
+    "12h": 350,
+    "1d": 1800,
+  };
+  return daysMap[tf.toLowerCase()] || 90;
+}
+
 function getBatchDataRangeDays() {
   const rangeVal = document.getElementById("batch-data-range-select")?.value || "365_days";
 
@@ -1819,9 +1882,11 @@ function getDataRangeParams() {
       "1d": 1,
     }[timeframe] || 288;
 
-  // "auto" → let the backend decide (send days: null, limit: default 500 so backend auto-resolves)
+  // "auto" -> resolve to actual optimal lookback days (not null/500 limit)
+  // This ensures sync pulls full backtest dataset (e.g., 3m=60d, 5m=90d)
   if (rangeVal === "auto") {
-    return { limit: 500, days: null, timeframe, barsPerDay };
+    const optDays = getBacktestDaysForTimeframe();
+    return { limit: Math.round(optDays * barsPerDay), days: optDays, timeframe, barsPerDay };
   }
 
   let days = null;
@@ -1883,8 +1948,8 @@ function getStrategyParamsFromUI() {
     vwap_stop_offset_pct: parseFloat(document.getElementById("vwap-stop-input")?.value || "0.1"),
     atr_period: 14,
     atr_multiplier: parseFloat(document.getElementById("atr-mult-input")?.value || "2.0"),
-    trailing_stop_pct: 1.5,
-          risk_per_trade_pct: parseFloat(document.getElementById("risk-per-trade-input")?.value || "1.0"),
+    trailing_stop_pct: parseFloat(document.getElementById("tsl-distance-input")?.value) || 1.5,
+    risk_per_trade_pct: parseFloat(document.getElementById("risk-per-trade-input")?.value || "1.0"),
     risk_reward_ratio: parseFloat(document.getElementById("rr-ratio-input")?.value || "2.0"),
     max_holding_bars: maxHoldingBarsVal,
     initial_capital: parseFloat(document.getElementById("capital-input")?.value || "10000"),
@@ -2118,11 +2183,11 @@ async function runOptunaOptimization() {
     const slType = baseParams.stop_loss_type;
 
     // Display best value or best metric value (for multi-objective)
-    const bestValDisplay = res.optimization_mode === "multi_objective" 
-      ? res.best_metric_value 
+    const bestValDisplay = res.optimization_mode === "multi_objective"
+      ? res.best_metric_value
       : res.best_value;
     document.getElementById("opt-best-val").textContent = bestValDisplay !== null ? bestValDisplay : "N/A";
-    
+
     // Display target metric or pareto objectives
     let targetDisplay = res.target_metric.replaceAll("_", " ").toUpperCase();
     if (res.optimization_mode === "multi_objective" && res.pareto_objectives) {
@@ -2569,6 +2634,42 @@ function renderOptunaImportance(importanceMap) {
   Plotly.newPlot("optuna-importance-chart", [trace], layout, { responsive: true, displayModeBar: false });
 }
 
+function getValidationCriteriaFromUI() {
+  const getNum = (id, def) => {
+    const el = document.getElementById(id);
+    if (!el) return def;
+    const parsed = Number.parseFloat(el.value);
+    return Number.isFinite(parsed) ? parsed : def;
+  };
+  const getInt = (id, def) => {
+    const el = document.getElementById(id);
+    if (!el) return def;
+    const parsed = Number.parseInt(el.value, 10);
+    return Number.isFinite(parsed) ? parsed : def;
+  };
+  return {
+    min_backtest_sharpe: getNum("setting-val-min-sharpe", DEFAULT_SETTINGS.val_min_sharpe),
+    max_backtest_drawdown_pct: getNum("setting-val-max-drawdown", DEFAULT_SETTINGS.val_max_drawdown),
+    min_backtest_return_pct: getNum("setting-val-min-return", DEFAULT_SETTINGS.val_min_return),
+    min_trade_count: getInt("setting-val-min-trades", DEFAULT_SETTINGS.val_min_trades),
+    min_walk_forward_efficiency: getNum("setting-val-wf-efficiency", DEFAULT_SETTINGS.val_wf_efficiency),
+    min_profitable_windows_pct: getNum("setting-val-profitable-windows", DEFAULT_SETTINGS.val_profitable_windows),
+    min_oos_return_pct: getNum("setting-val-min-oos-return", DEFAULT_SETTINGS.val_min_oos_return),
+    max_monte_carlo_ruin_pct: getNum("setting-val-max-ruin", DEFAULT_SETTINGS.val_max_ruin),
+    max_monte_carlo_drawdown_pct: getNum("setting-val-max-mc-drawdown", DEFAULT_SETTINGS.val_max_mc_drawdown),
+  };
+}
+
+function getValidationTrialsFromUI() {
+  const valTrialsEl = document.getElementById("setting-val-trials");
+  const batchTrialsEl = document.getElementById("batch-trials-input");
+  const optunaTrialsEl = document.getElementById("optuna-trials-input");
+  const valTrials = valTrialsEl && parseInt(valTrialsEl.value, 10) ? parseInt(valTrialsEl.value, 10) : null;
+  const batchTrials = batchTrialsEl && parseInt(batchTrialsEl.value, 10) ? parseInt(batchTrialsEl.value, 10) : null;
+  const optunaTrials = optunaTrialsEl && parseInt(optunaTrialsEl.value, 10) ? parseInt(optunaTrialsEl.value, 10) : null;
+  return valTrials || batchTrials || optunaTrials || 250;
+}
+
 async function validateStrategyConfig(symbol, timeframe, exchange, params, targetMetric = null, enableMulti = false, multiMetrics = null, limitOverride = undefined, daysOverride = undefined) {
   const rangeParams = getDataRangeParams();
   const limit = limitOverride !== undefined ? limitOverride : rangeParams.limit;
@@ -2769,10 +2870,10 @@ function showValidationDetailsModal(reportKey, title = "Strategy Robustness Audi
           null  // daysOverride: null
         );
         window._validationReportCache[ctx.reportKey] = newReport;
-        
+
         // If batch result ID exists, save to SQLite
         if (ctx.batchId) {
-          await fetch(`/api/batch_results/${ctx.batchId}/validation`, {
+          const patchResp = await fetch(`/api/batch_results/${ctx.batchId}/validation`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -2780,6 +2881,11 @@ function showValidationDetailsModal(reportKey, title = "Strategy Robustness Audi
               report_json: JSON.stringify(newReport),
             }),
           });
+          if (!patchResp.ok) {
+            const err = await patchResp.json().catch(() => ({ detail: "Unknown error" }));
+            throw new Error(`Failed to save validation: ${err.detail || patchResp.status}`);
+          }
+          // Update the DOM cell
           const cell = document.getElementById(`batch-val-cell-${ctx.batchId}`);
           if (cell) {
             const rowDataAttr = encodeURIComponent(JSON.stringify(ctx.params));
@@ -2793,6 +2899,16 @@ function showValidationDetailsModal(reportKey, title = "Strategy Robustness Audi
                 🔄
               </button>
             </div>`;
+          }
+          // Also update cached rows so sorting preserves validation status
+          const table = document.getElementById("batch-leaderboard-table");
+          if (table && table._cachedRows) {
+            const rowIdx = table._cachedRows.findIndex(r => r.id === ctx.batchId);
+            if (rowIdx >= 0) {
+              table._cachedRows[rowIdx].validation_status = newReport.status;
+              table._cachedRows[rowIdx].validation_json = JSON.stringify(newReport);
+              table._cachedRows[rowIdx].validation_report = JSON.stringify(newReport);
+            }
           }
         } else if (ctx.trialIdx !== undefined) {
           const cell = document.getElementById(`trial-val-cell-${ctx.trialIdx}`);
@@ -2808,6 +2924,15 @@ function showValidationDetailsModal(reportKey, title = "Strategy Robustness Audi
                 🔄
               </button>
             </div>`;
+          }
+          // Also update cached rows for optuna trials table if present
+          const trialTable = document.getElementById("optuna-trials-table");
+          if (trialTable && trialTable._cachedRows) {
+            const rowIdx = trialTable._cachedRows.findIndex((r, i) => i === ctx.trialIdx);
+            if (rowIdx >= 0) {
+              trialTable._cachedRows[rowIdx].validation_status = newReport.status;
+              trialTable._cachedRows[rowIdx].validation_json = JSON.stringify(newReport);
+            }
           }
         }
 
@@ -3042,7 +3167,7 @@ function renderOptunaTrials(trials) {
     .map((t, idx) => {
       const p = t.params || {};
       let rowHtml = `<td style="font-weight: 600;">#${t.trial_number}</td>`;
-      
+
       // Format trial value: handle both single-objective (number) and multi-objective (object)
       let valueDisplay = "N/A";
       if (typeof t.value === "object" && t.value !== null) {
@@ -3061,8 +3186,8 @@ function renderOptunaTrials(trials) {
           p.strategy_mode === "multi_ema"
             ? `<span class="badge" style="color: #b87cf8;">Multi-EMA</span>`
             : p.strategy_mode === "pullback"
-            ? `<span class="badge" style="color: #ffaa00;">Pullback</span>`
-            : `<span class="badge" style="color: #00f2fe;">Crossover</span>`;
+              ? `<span class="badge" style="color: #ffaa00;">Pullback</span>`
+              : `<span class="badge" style="color: #00f2fe;">Crossover</span>`;
         rowHtml += `<td>${modeBadge}</td>`;
       }
       rowHtml += `<td>${p.fast_ema !== undefined ? p.fast_ema : "-"}</td>`;
@@ -3074,7 +3199,7 @@ function renderOptunaTrials(trials) {
       if (hasAtr) rowHtml += `<td>${p.atr_multiplier !== undefined ? p.atr_multiplier + "x" : "-"}</td>`;
       if (hasVwapOffset) rowHtml += `<td>${p.vwap_stop_offset_pct !== undefined ? p.vwap_stop_offset_pct + "%" : "-"}</td>`;
       rowHtml += `<td>${p.risk_reward_ratio !== undefined ? p.risk_reward_ratio + "x" : "-"}</td>`;
-      
+
       const lastRes = window._lastOptimizationResult;
       const isMulti = lastRes ? lastRes.optimization_mode === "multi_objective" : false;
       const multiMetrics = isMulti ? lastRes.pareto_objectives : null;
@@ -3163,7 +3288,7 @@ function renderOptunaTrials(trials) {
           cell.innerHTML = `<div style="display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
             ${getValidationBadgeHtml(report.status, report.overall_score, cacheKey)}
             <button class="btn-secondary btn-xs revalidate-trial-row-btn"
-                    data-trial-idx="${trialNum}"
+                    data-trial-idx="${idx}"
                     data-params="${rowDataAttr}"
                     style="padding: 1px 5px; font-size: 0.68rem; cursor: pointer; border-color: rgba(0, 242, 254, 0.3); color: var(--accent-cyan);"
                     title="Re-run 3-Gate Robustness Check">
@@ -3257,17 +3382,25 @@ async function runWalkForwardAnalysis() {
   try {
     const { limit, days } = getDataRangeParams();
     const baseParams = getStrategyParamsFromUI();
+    const wfoDaysRaw = document.getElementById("wfo-days-input")?.value?.trim();
+    const wfoDays = wfoDaysRaw ? parseInt(wfoDaysRaw, 10) : null;
+    const optunaTrials = parseInt(document.getElementById("optuna-trials-input")?.value, 10);
+    const valTrials = parseInt(document.getElementById("setting-val-trials")?.value, 10);
+    // val_trials (Settings → Validation Trials) is the authoritative WFO budget;
+    // fall back to the Optuna trials input, then 100 as a last resort.
+    let nTrialsTotal = valTrials || optunaTrials || 100;
+    const numWindows = parseInt(document.getElementById("wfo-windows-input")?.value, 10) || 0;
+
     const payload = {
       exchange: document.getElementById("exchange-select").value,
       symbol: document.getElementById("symbol-input").value.trim(),
       timeframe: document.getElementById("timeframe-select").value,
       limit: limit,
-      days: days,
+      days: wfoDays && wfoDays > 0 ? wfoDays : days,
       ...baseParams,
-      num_windows: parseInt(document.getElementById("wfo-windows-input").value, 10),
+      num_windows: numWindows,
       trials_per_window: 0, // 0 = auto-derive from n_trials_total / num_windows
-      n_trials_total: parseInt(document.getElementById("optuna-trials-input").value, 10),
-      days: parseInt(document.getElementById("wfo-days-input").value, 10) || 365,
+      n_trials_total: nTrialsTotal,
     };
 
     const response = await fetch("/api/walk_forward", {
@@ -3556,36 +3689,38 @@ async function startBatchSweep() {
     const resp = await fetch("/api/batch_optimize", {
       method: "POST",
       headers: getAuthHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ symbols, timeframes, exchange, n_trials: nTrials,
-                             target_metric: payloadTargetMetric,
-                             enable_multi_objective: objectiveMode === "multi",
-                             multi_objective_metrics: payloadMultiMetrics,
-                             enable_hard_drawdown_constraint: document.getElementById("batch-enable-dd-constraint")?.checked || false,
-                             max_drawdown_constraint_pct: parseFloat(document.getElementById("batch-dd-constraint-input")?.value || "25"),
-                             enable_max_holding_bars: document.getElementById("batch-enable-max-hold")?.checked || false,
-                             max_holding_bars_min: parseInt(document.getElementById("batch-max-hold-min")?.value || "4", 10),
-                             max_holding_bars_max: parseInt(document.getElementById("batch-max-hold-max")?.value || "96", 10),
-                             days: getBatchDataRangeDays(),
-                             strategy_mode: document.getElementById("batch-strategy-mode-select")?.value || "auto",
-                             min_trades: getSettings().min_trades,
-                             fast_ema_min: getSettings().fast_ema_min,
-                             fast_ema_max: getSettings().fast_ema_max,
-                             slow_ema_min: getSettings().slow_ema_min,
-                             slow_ema_max: getSettings().slow_ema_max,
-                             trend_ema_min: getSettings().trend_ema_min,
-                             trend_ema_max: getSettings().trend_ema_max,
-                             volume_multiplier_min: getSettings().volume_multiplier_min,
-                             volume_multiplier_max: getSettings().volume_multiplier_max,
-                             atr_multiplier_min: getSettings().atr_multiplier_min,
-                                                         atr_multiplier_max: getSettings().atr_multiplier_max,
-                                                         trailing_stop_min: getSettings().trailing_stop_min,
-                                                         trailing_stop_max: getSettings().trailing_stop_max,
-                                                         risk_reward_min: getSettings().risk_reward_min,
-                             risk_reward_max: getSettings().risk_reward_max,
-                             vwap_slope_max_bound: getSettings().vwap_slope_max_bound,
-                             n_jobs: getSettings().n_jobs !== undefined ? getSettings().n_jobs : 1,
-                             n_startup_trials: getSettings().n_startup_trials,
-                             trade_direction: tradeDirection }),
+      body: JSON.stringify({
+        symbols, timeframes, exchange, n_trials: nTrials,
+        target_metric: payloadTargetMetric,
+        enable_multi_objective: objectiveMode === "multi",
+        multi_objective_metrics: payloadMultiMetrics,
+        enable_hard_drawdown_constraint: document.getElementById("batch-enable-dd-constraint")?.checked || false,
+        max_drawdown_constraint_pct: parseFloat(document.getElementById("batch-dd-constraint-input")?.value || "25"),
+        enable_max_holding_bars: document.getElementById("batch-enable-max-hold")?.checked || false,
+        max_holding_bars_min: parseInt(document.getElementById("batch-max-hold-min")?.value || "4", 10),
+        max_holding_bars_max: parseInt(document.getElementById("batch-max-hold-max")?.value || "96", 10),
+        days: getBatchDataRangeDays(),
+        strategy_mode: document.getElementById("batch-strategy-mode-select")?.value || "auto",
+        min_trades: getSettings().min_trades,
+        fast_ema_min: getSettings().fast_ema_min,
+        fast_ema_max: getSettings().fast_ema_max,
+        slow_ema_min: getSettings().slow_ema_min,
+        slow_ema_max: getSettings().slow_ema_max,
+        trend_ema_min: getSettings().trend_ema_min,
+        trend_ema_max: getSettings().trend_ema_max,
+        volume_multiplier_min: getSettings().volume_multiplier_min,
+        volume_multiplier_max: getSettings().volume_multiplier_max,
+        atr_multiplier_min: getSettings().atr_multiplier_min,
+        atr_multiplier_max: getSettings().atr_multiplier_max,
+        trailing_stop_min: getSettings().trailing_stop_min,
+        trailing_stop_max: getSettings().trailing_stop_max,
+        risk_reward_min: getSettings().risk_reward_min,
+        risk_reward_max: getSettings().risk_reward_max,
+        vwap_slope_max_bound: getSettings().vwap_slope_max_bound,
+        n_jobs: getSettings().n_jobs !== undefined ? getSettings().n_jobs : 1,
+        n_startup_trials: getSettings().n_startup_trials,
+        trade_direction: tradeDirection
+      }),
     });
     if (!resp.ok) {
       const err = await resp.json();
@@ -3609,7 +3744,10 @@ async function startBatchSweep() {
         document.getElementById("batch-progress-label").textContent =
           state.current_combo || "Working...";
 
-        if (!state.running) {
+        // Only treat as complete if not running AND (done >= total OR there's an error)
+        // This prevents showing "Complete!" from stale state when a new sweep starts
+        const isTrulyComplete = !state.running && (state.done >= state.total || state.error);
+        if (isTrulyComplete) {
           clearInterval(_batchPollTimer);
           _batchPollTimer = null;
           btn.disabled = false;
@@ -3618,28 +3756,33 @@ async function startBatchSweep() {
             document.getElementById("batch-progress-label").textContent = `Failed: ${state.error}`;
             alert(`Batch Sweep Error: ${state.error}`);
           } else {
-                      document.getElementById("batch-progress-label").textContent = "Complete!";
-                    }
-                    // Auto-validate all saved results if the checkbox is checked
-                    const autoValChecked = document.getElementById("batch-auto-validate")?.checked;
-                    if (autoValChecked) {
-                      const autoValLabel = document.getElementById("batch-progress-label");
-                      if (autoValLabel) autoValLabel.textContent = "Validating results...";
-                      autoValidateBatchResults()
-                        .then(() => {
-                          if (autoValLabel) autoValLabel.textContent = "Complete!";
-                        })
-                        .catch((err) => {
-                          console.warn("[Batch] Auto-Validate warning:", err);
-                          if (autoValLabel) autoValLabel.textContent = "Complete (validation skipped)";
-                        });
-                    }
-                    // Auto-load results
-                    await loadBatchResults();
-                    // Switch to batch tab
-                    document.querySelector('[data-tab="tab-batch"]').click();
+            document.getElementById("batch-progress-label").textContent = "Complete!";
+          }
         }
-      } catch (_) {}
+        // Auto-validate only the recent sweep results if the checkbox is checked
+        // Only trigger on true completion (done >= total)
+        const autoValChecked = document.getElementById("batch-auto-validate")?.checked;
+        if (autoValChecked && state.done >= state.total) {
+          const autoValLabel = document.getElementById("batch-progress-label");
+          if (autoValLabel) autoValLabel.textContent = "Validating results...";
+          autoValidateBatchResults({
+            targetMetric: payloadTargetMetric,
+            symbols: symbols,
+            timeframes: timeframes,
+          })
+            .then(() => {
+              if (autoValLabel) autoValLabel.textContent = "Complete!";
+            })
+            .catch((err) => {
+              console.warn("[Batch] Auto-Validate warning:", err);
+              if (autoValLabel) autoValLabel.textContent = "Complete (validation skipped)";
+            });
+        }
+        // Auto-load results
+        await loadBatchResults();
+        // Switch to batch tab
+        document.querySelector('[data-tab="tab-batch"]').click();
+      } catch (_) { }
     }, 2000);
 
   } catch (err) {
@@ -3649,12 +3792,25 @@ async function startBatchSweep() {
   }
 }
 
-async function autoValidateBatchResults() {
+async function autoValidateBatchResults(sweepContext = {}) {
   try {
+    // For multi-objective, the database stores only the first metric as target_metric
+    let targetMetricForQuery = sweepContext.targetMetric;
+    if (targetMetricForQuery && targetMetricForQuery.includes("|")) {
+      targetMetricForQuery = targetMetricForQuery.split("|")[0];
+    }
+    const valTrials = getValidationTrialsFromUI();
+    const valCriteria = getValidationCriteriaFromUI();
     const resp = await fetch("/api/batch_results/auto-validate", {
       method: "POST",
       headers: getAuthHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({}),
+      body: JSON.stringify({
+        target_metric: targetMetricForQuery,
+        symbols: sweepContext.symbols,
+        timeframes: sweepContext.timeframes,
+        n_trials: valTrials,
+        criteria: valCriteria,
+      }),
     });
     if (!resp.ok) {
       const err = await resp.json();
@@ -3667,6 +3823,48 @@ async function autoValidateBatchResults() {
     await loadBatchResults();
   } catch (e) {
     console.warn("[Auto-Validate] Client error:", e);
+  }
+}
+
+async function refreshAllBatchValidations() {
+  const btn = document.getElementById("batch-refresh-val-btn");
+  const label = document.getElementById("batch-progress-label");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="btn-icon">&#x23f3;</span> Refreshing...`;
+  }
+  if (label) label.textContent = "Refreshing validation on all saved results...";
+
+  try {
+    // Call auto-validate without filters to process ALL saved results with current user settings
+    const valTrials = getValidationTrialsFromUI();
+    const valCriteria = getValidationCriteriaFromUI();
+    const resp = await fetch("/api/batch_results/auto-validate", {
+      method: "POST",
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        n_trials: valTrials,
+        criteria: valCriteria,
+      }),  // No filters = all results
+    });
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.detail || `Server error: ${resp.status}`);
+    }
+    const data = await resp.json();
+    console.log("[Refresh Validation] Validated", data.validated_count, "of", data.total_results, "results.");
+    if (label) label.textContent = `Complete! Validated ${data.validated_count} results.`;
+    // Refresh leaderboard to show updated badges
+    await loadBatchResults();
+  } catch (e) {
+    console.warn("[Refresh Validation] Error:", e);
+    if (label) label.textContent = `Error: ${e.message}`;
+    alert(`Refresh Validation failed: ${e.message}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `<span class="btn-icon">&#x1f501;</span> Refresh Validation`;
+    }
   }
 }
 
@@ -3707,7 +3905,7 @@ function getBatchValidationCellHtml(r) {
     try {
       const rep = typeof r.validation_json === "string" ? JSON.parse(r.validation_json) : r.validation_json;
       window._validationReportCache[cacheKey] = rep;
-    } catch (_) {}
+    } catch (_) { }
   }
   if (r.validation_status) {
     let score = null;
@@ -3734,18 +3932,20 @@ function getBatchValidationCellHtml(r) {
 }
 
 async function validateBatchLeaderboardRow(resultId, symbol, timeframe, exchange, encodedParams, btn, targetMetric = null) {
-  console.log("[DEBUG] validateBatchLeaderboardRow called:", {resultId, symbol, timeframe, exchange, targetMetric});
+  console.log("[DEBUG] validateBatchLeaderboardRow called:", { resultId, symbol, timeframe, exchange, targetMetric });
   if (btn) {
     btn.innerHTML = "⏳";
     btn.disabled = true;
   }
   const cell = document.getElementById(`batch-val-cell-${resultId}`);
+  // Hoisted out of try: the catch-block error UI references these (re-render
+  // buttons need resolvedTarget), so they must survive a validation failure.
+  const isMulti = Boolean(targetMetric && targetMetric.includes("|"));
+  const multiMetrics = isMulti ? targetMetric.split("|").filter(Boolean) : null;
+  const resolvedTarget = isMulti ? multiMetrics[0] : (targetMetric || null);
   try {
     const rawParams = decodeURIComponent(encodedParams || "{}");
     const p = JSON.parse(rawParams);
-    const isMulti = Boolean(targetMetric && targetMetric.includes("|"));
-    const multiMetrics = isMulti ? targetMetric.split("|").filter(Boolean) : null;
-    const resolvedTarget = isMulti ? multiMetrics[0] : (targetMetric || null);
     const report = await validateStrategyConfig(symbol, timeframe, exchange, p, resolvedTarget, isMulti, multiMetrics);
     const cacheKey = `batch_${resultId}`;
     window._validationReportCache[cacheKey] = report;
@@ -3864,8 +4064,16 @@ function renderBatchLeaderboard(rows) {
         try {
           const rep = typeof r.validation_json === "string" ? JSON.parse(r.validation_json) : r.validation_json;
           if (rep && typeof rep.overall_score === "number") return rep.overall_score;
-        } catch (_) {}
+        } catch (_) { }
         return null;
+      }
+      if (["win_rate", "total_return_pct", "max_drawdown_pct", "sharpe_ratio", "trade_count"].includes(key)) {
+        if (r[key] !== null && r[key] !== undefined) return r[key];
+        try {
+          const rep = typeof r.validation_json === "string" ? JSON.parse(r.validation_json) : r.validation_json;
+          const g1 = rep?.gate_results?.gate1?.metrics;
+          if (g1 && g1[key] !== undefined && g1[key] !== null) return g1[key];
+        } catch (_) { }
       }
       return r[key] ?? null;
     };
@@ -3887,17 +4095,17 @@ function renderBatchLeaderboard(rows) {
   const formatBatchMetricLabel = (m) => {
     if (!m) return "--";
     const singleLabels = {
-      sharpe_ratio:               "Sharpe",
-      sortino_ratio:              "Sortino",
-      drawdown_penalized_sharpe:  "DD-Penalized Sharpe",
+      sharpe_ratio: "Sharpe",
+      sortino_ratio: "Sortino",
+      drawdown_penalized_sharpe: "DD-Penalized Sharpe",
       drawdown_penalized_sortino: "DD-Penalized Sortino",
-      ulcer_index:                "Ulcer Index",
-      calmar_ratio:               "Calmar",
-      profit_factor:              "Profit Factor",
-      net_profit:                 "Net Profit ($)",
-      total_return_pct:           "Return %",
-      win_rate:                   "Win %",
-      max_drawdown_pct:           "Max Drawdown",
+      ulcer_index: "Ulcer Index",
+      calmar_ratio: "Calmar",
+      profit_factor: "Profit Factor",
+      net_profit: "Net Profit ($)",
+      total_return_pct: "Return %",
+      win_rate: "Win %",
+      max_drawdown_pct: "Max Drawdown",
     };
     if (m.includes("|")) {
       return m.split("|").map((part) => singleLabels[part] || part).join(" + ");
@@ -3914,6 +4122,28 @@ function renderBatchLeaderboard(rows) {
     const valColor = bestValueNum >= 0 ? "#34d399" : "#f87171";
     const bestValueDisplay = r.best_value !== null && r.best_value !== undefined ? r.best_value.toFixed(3) : "N/A";
     const rowDataAttr = encodeURIComponent(r.best_params || "{}");
+
+    // Extract metrics with fallback to validation_json Gate 1 metrics if null/missing
+    let winRate = r.win_rate;
+    let totalReturnPct = r.total_return_pct;
+    let maxDrawdownPct = r.max_drawdown_pct;
+    let sharpeRatio = r.sharpe_ratio;
+    let tradeCount = r.trade_count;
+
+    if (r.validation_json && (winRate === null || winRate === undefined || totalReturnPct === null || totalReturnPct === undefined)) {
+      try {
+        const rep = typeof r.validation_json === "string" ? JSON.parse(r.validation_json) : r.validation_json;
+        const g1 = rep?.gate_results?.gate1?.metrics;
+        if (g1) {
+          if (winRate === null || winRate === undefined) winRate = g1.win_rate;
+          if (totalReturnPct === null || totalReturnPct === undefined) totalReturnPct = g1.total_return_pct;
+          if (maxDrawdownPct === null || maxDrawdownPct === undefined) maxDrawdownPct = g1.max_drawdown_pct;
+          if (sharpeRatio === null || sharpeRatio === undefined) sharpeRatio = g1.sharpe_ratio;
+          if (!tradeCount && g1.trade_count) tradeCount = g1.trade_count;
+        }
+      } catch (_) { }
+    }
+
     return `
       <tr style="border-bottom:1px solid rgba(255,255,255,0.05);transition:background 0.15s;"
           onmouseover="this.style.background='rgba(255,255,255,0.04)'"
@@ -3933,11 +4163,11 @@ function renderBatchLeaderboard(rows) {
         <td style="padding:9px 10px;color:var(--accent-cyan);">${r.timeframe}</td>
         <td style="padding:9px 10px;color:var(--text-muted);font-size:0.8em;" title="${r.target_metric || ''}">${formatBatchMetricLabel(r.target_metric)}</td>
         <td style="padding:9px 10px;font-weight:700;color:${valColor};">${bestValueDisplay}</td>
-        <td style="padding:9px 10px;">${r.trade_count}</td>
-        <td style="padding:9px 10px;">${(r.sharpe_ratio || 0).toFixed(2)}</td>
-        <td style="padding:9px 10px;">${(r.total_return_pct || 0).toFixed(1)}%</td>
-        <td style="padding:9px 10px;">${(r.win_rate || 0).toFixed(1)}%</td>
-        <td style="padding:9px 10px;color:#f87171;">${(r.max_drawdown_pct || 0).toFixed(1)}%</td>
+        <td style="padding:9px 10px;">${tradeCount !== null && tradeCount !== undefined ? tradeCount : "--"}</td>
+        <td style="padding:9px 10px;">${sharpeRatio !== null && sharpeRatio !== undefined ? Number(sharpeRatio).toFixed(2) : "--"}</td>
+        <td style="padding:9px 10px;">${totalReturnPct !== null && totalReturnPct !== undefined ? Number(totalReturnPct).toFixed(1) + "%" : "--"}</td>
+        <td style="padding:9px 10px;">${winRate !== null && winRate !== undefined ? Number(winRate).toFixed(1) + "%" : "--"}</td>
+        <td style="padding:9px 10px;color:#f87171;">${maxDrawdownPct !== null && maxDrawdownPct !== undefined ? Number(maxDrawdownPct).toFixed(1) + "%" : "--"}</td>
         <td style="padding:9px 10px;color:var(--text-muted);font-size:0.78em;">${ts}</td>
         <td style="padding:9px 10px; text-align: center;" id="batch-val-cell-${r.id}">
           ${getBatchValidationCellHtml(r)}
@@ -4020,7 +4250,7 @@ function toggleAllBatchResults(checked) {
 }
 
 async function deleteSingleBatchResult(resultId, symbol, timeframe) {
-  console.log("[DEBUG] deleteSingleBatchResult called:", {resultId, symbol, timeframe});
+  console.log("[DEBUG] deleteSingleBatchResult called:", { resultId, symbol, timeframe });
   const label = symbol && timeframe ? `${symbol} (${timeframe})` : `result #${resultId}`;
   if (!confirm(`Delete batch result for ${label}? This cannot be undone.`)) return;
 
@@ -4093,7 +4323,7 @@ async function exportBatchToPortfolio() {
     const targetWeights = data.target_weights;
     const assetCount = data.count;
     alert(`Exported ${assetCount} assets to Portfolio Rebalancer with ${weightingMethod} weighting!`);
-    
+
     // Auto-populate the portfolio rebalancer tab
     if (typeof populateRebalancerTargets === "function") {
       populateRebalancerTargets(targetWeights);
@@ -4156,13 +4386,13 @@ async function purgeBatchResults() {
 }
 
 function applyBatchRow(symbol, timeframe, exchange, encodedParams) {
-  console.log("[DEBUG] applyBatchRow called:", {symbol, timeframe, exchange});
+  console.log("[DEBUG] applyBatchRow called:", { symbol, timeframe, exchange });
   // Set the symbol, timeframe, and exchange in the sidebar
   const symEl = document.getElementById("symbol-input");
-  const tfEl  = document.getElementById("timeframe-select");
-  const exEl  = document.getElementById("exchange-select");
+  const tfEl = document.getElementById("timeframe-select");
+  const exEl = document.getElementById("exchange-select");
   if (symEl) symEl.value = symbol;
-  if (tfEl)  tfEl.value  = timeframe;
+  if (tfEl) tfEl.value = timeframe;
   if (exEl) {
     exEl.value = exchange;
     exEl.dispatchEvent(new Event("change"));
@@ -4174,22 +4404,22 @@ function applyBatchRow(symbol, timeframe, exchange, encodedParams) {
     lastBatchParams = params;
     lastAppliedParams = params;
     const fieldMap = {
-      strategy_mode:          "strategy-mode-select",
-      trade_direction:        "trade-direction-select",
-      fast_ema:               "fast-ema-input",
-      slow_ema:               "slow-ema-input",
-      trend_ema:              "trend-ema-input",
-      vwap_slope_min:         "vwap-slope-input",
-      vwap_slope_lookback:    "vwap-lookback-input",
-      volume_filter_enabled:  "volume-filter-toggle",
-      volume_multiplier:      "vol-mult-input",
+      strategy_mode: "strategy-mode-select",
+      trade_direction: "trade-direction-select",
+      fast_ema: "fast-ema-input",
+      slow_ema: "slow-ema-input",
+      trend_ema: "trend-ema-input",
+      vwap_slope_min: "vwap-slope-input",
+      vwap_slope_lookback: "vwap-lookback-input",
+      volume_filter_enabled: "volume-filter-toggle",
+      volume_multiplier: "vol-mult-input",
       pullback_tolerance_pct: "pullback-tol-input",
-      stop_loss_type:         "stop-loss-type-select",
-      vwap_stop_offset_pct:   "vwap-stop-input",
-      atr_multiplier:         "atr-mult-input",
-      trailing_stop_pct: 1.5,
-          risk_per_trade_pct:     "risk-per-trade-input",
-      risk_reward_ratio:      "rr-ratio-input",
+      stop_loss_type: "stop-loss-type-select",
+      vwap_stop_offset_pct: "vwap-stop-input",
+      atr_multiplier: "atr-mult-input",
+      trailing_stop_pct: "tsl-distance-input",
+      risk_per_trade_pct: "risk-per-trade-input",
+      risk_reward_ratio: "rr-ratio-input",
     };
     const updatedIds = [];
     Object.entries(fieldMap).forEach(([key, id]) => {
@@ -4241,7 +4471,7 @@ function applyBatchRow(symbol, timeframe, exchange, encodedParams) {
 window.applyBatchRow = applyBatchRow;
 
 async function deployBatchRowToPaper(symbol, timeframe, exchange, metric, score, encodedParams, button) {
-  console.log("[DEBUG] deployBatchRowToPaper called:", {symbol, timeframe, exchange, metric, score});
+  console.log("[DEBUG] deployBatchRowToPaper called:", { symbol, timeframe, exchange, metric, score });
   try {
     const params = JSON.parse(decodeURIComponent(encodedParams));
 
@@ -4428,17 +4658,19 @@ window.deployBatchRowToPaper = deployBatchRowToPaper;
 
 // Wire up batch buttons
 document.addEventListener("DOMContentLoaded", () => {
-  const runBtn  = document.getElementById("batch-run-btn");
+  const runBtn = document.getElementById("batch-run-btn");
   const loadBtn = document.getElementById("batch-load-btn");
   const deleteBtn = document.getElementById("batch-delete-btn");
   const purgeBtn = document.getElementById("batch-purge-btn");
   const selectAll = document.getElementById("batch-select-all");
   const sideBtn = document.getElementById("run-batch-btn");
 
-  if (runBtn)  runBtn.addEventListener("click",  startBatchSweep);
-  if (loadBtn) loadBtn.addEventListener("click",  loadBatchResults);
+  if (runBtn) runBtn.addEventListener("click", startBatchSweep);
+  if (loadBtn) loadBtn.addEventListener("click", loadBatchResults);
   if (deleteBtn) deleteBtn.addEventListener("click", deleteSelectedBatchResults);
   if (purgeBtn) purgeBtn.addEventListener("click", purgeBatchResults);
+  const refreshValBtn = document.getElementById("batch-refresh-val-btn");
+  if (refreshValBtn) refreshValBtn.addEventListener("click", refreshAllBatchValidations);
   const exportBtn = document.getElementById("batch-export-portfolio-btn");
   if (exportBtn) exportBtn.addEventListener("click", openBatchExportModal);
   if (selectAll) selectAll.addEventListener("change", (event) => toggleAllBatchResults(event.target.checked));
@@ -4814,8 +5046,8 @@ function renderPaperTrades(trades) {
         t.exit_reason === "STOP_LOSS"
           ? `<span class="badge badge-stoploss">STOP LOSS</span>`
           : t.exit_reason === "TAKE_PROFIT"
-          ? `<span class="badge badge-takeprofit">TAKE PROFIT</span>`
-          : `<span class="badge badge-manual">MANUAL</span>`;
+            ? `<span class="badge badge-takeprofit">TAKE PROFIT</span>`
+            : `<span class="badge badge-manual">MANUAL</span>`;
 
       return `
         <tr>
@@ -4854,10 +5086,10 @@ function renderPaperTransactions(txs) {
         t.type === "DEPOSIT"
           ? `<span class="badge" style="color: #00f5a0;">DEPOSIT</span>`
           : t.type === "BUY_FILL"
-          ? `<span class="badge badge-long">BUY FILL</span>`
-          : t.type === "SELL_FILL"
-          ? `<span class="badge badge-short">SELL FILL</span>`
-          : `<span class="badge">${t.type}</span>`;
+            ? `<span class="badge badge-long">BUY FILL</span>`
+            : t.type === "SELL_FILL"
+              ? `<span class="badge badge-short">SELL FILL</span>`
+              : `<span class="badge">${t.type}</span>`;
 
       return `
         <tr>
@@ -5360,7 +5592,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   wireTweak("tweak-fast-inc", "tweak-fast-dec", "tweak-fast-val", "fast-ema-input", 1, 2, 50);
   wireTweak("tweak-slow-inc", "tweak-slow-dec", "tweak-slow-val", "slow-ema-input", 1, 5, 150);
-    wireTweak("tweak-trend-inc", "tweak-trend-dec", "tweak-trend-val", "trend-ema-input", 5, 20, 300);
+  wireTweak("tweak-trend-inc", "tweak-trend-dec", "tweak-trend-val", "trend-ema-input", 5, 20, 300);
   wireTweak("tweak-rr-inc", "tweak-rr-dec", "tweak-rr-val", "rr-ratio-input", 0.2, 0.5, 10.0);
 
   const tweakRerunBtn = document.getElementById("tweak-rerun-btn");
@@ -5466,13 +5698,13 @@ function populateRebalancerTargets(targetWeights) {
   for (const [sym, weight] of Object.entries(targetWeights)) {
     portfolioTargetWeights[sym.toUpperCase()] = (weight * 100).toFixed(2);
   }
-  
+
   // Switch to portfolio tab
   switchToTab("tab-portfolio");
-  
+
   // Re-render the target inputs
   renderRebalanceTargetInputs();
-  
+
   // Optionally auto-calculate the rebalance plan
   setTimeout(() => calculateRebalancePlan(), 100);
 }
@@ -5876,8 +6108,8 @@ function renderPortfolioVenues(venues) {
       const typeBadge = v.venue_type === "stock"
         ? `<span class="badge badge-blue" style="font-size:0.7rem;">STOCK</span>`
         : (v.venue_type === "crypto"
-            ? `<span class="badge badge-purple" style="font-size:0.7rem;">CRYPTO</span>`
-            : `<span class="badge badge-cyan" style="font-size:0.7rem;">PAPER</span>`);
+          ? `<span class="badge badge-purple" style="font-size:0.7rem;">CRYPTO</span>`
+          : `<span class="badge badge-cyan" style="font-size:0.7rem;">PAPER</span>`);
 
       return `
       <div class="kpi-card" style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); padding: 14px;">
@@ -5947,7 +6179,7 @@ async function calculateRebalancePlan() {
 
   try {
     const resp = await fetch("/api/portfolio/rebalance/plan", {
-        headers: getAuthHeaders(),
+      headers: getAuthHeaders(),
       method: "POST",
       headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
@@ -5977,8 +6209,8 @@ async function calculateRebalancePlan() {
           const actionBadge = item.trade_side === 1
             ? `<span class="badge badge-long">BUY</span>`
             : (item.trade_side === -1
-                ? `<span class="badge badge-short">SELL</span>`
-                : `<span class="badge">HOLD</span>`);
+              ? `<span class="badge badge-short">SELL</span>`
+              : `<span class="badge">HOLD</span>`);
 
           const deltaColor = item.trade_value_usd > 0 ? "#00f5a0" : (item.trade_value_usd < 0 ? "#ff007a" : "var(--text-muted)");
 
@@ -6015,7 +6247,7 @@ async function executePortfolioRebalance(dryRun) {
 
   try {
     const resp = await fetch("/api/portfolio/rebalance/execute", {
-        headers: getAuthHeaders(),
+      headers: getAuthHeaders(),
       method: "POST",
       headers: getAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
@@ -6104,4 +6336,3 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 });
-

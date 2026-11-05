@@ -4,6 +4,8 @@ Extracted from src/app.py (ema_vwap-tq41). Shared state is read through
 `src.app` at call time so monkeypatched tests keep working.
 """
 
+import asyncio
+from functools import partial
 from typing import Any
 
 import pandas as pd
@@ -62,8 +64,11 @@ class BaseStrategyRequest(BaseModel):
     vwap_stop_offset_pct: float = 0.1
     atr_period: int = 14
     atr_multiplier: float = 2.0
+    trailing_stop_pct: float = 1.5
+    trailing_stop_activation_pct: float = 0.0
     risk_reward_ratio: float = 2.0
     risk_per_trade_pct: float = 1.0
+    max_position_pct: float = 80.0
     max_holding_bars: int | None = None
     initial_capital: float = 10000.0
     maker_fee_pct: float = 0.05
@@ -174,6 +179,20 @@ class BaseStrategyRequest(BaseModel):
             raise ValueError("max_holding_bars must be positive if set")
         return v
 
+    @field_validator("trailing_stop_pct", "trailing_stop_activation_pct")
+    @classmethod
+    def validate_trailing_stop_pct(cls, v: float) -> float:
+        if not (0.0 <= v <= 50.0):
+            raise ValueError("trailing stop percentages must be between 0 and 50")
+        return v
+
+    @field_validator("max_position_pct")
+    @classmethod
+    def validate_max_position_pct(cls, v: float) -> float:
+        if not (1.0 <= v <= 500.0):
+            raise ValueError("max_position_pct must be between 1 and 500")
+        return v
+
 
 class BacktestRequest(BaseStrategyRequest):
     pass
@@ -185,82 +204,100 @@ def build_strategy_params(req: BaseStrategyRequest) -> StrategyParams:
     return StrategyParams.from_dict(data)
 
 
-@router.post("/api/backtest", dependencies=[Depends(get_api_key)])
-@limiter.limit("30/minute")
-def run_backtest(request: Request, req: BacktestRequest) -> dict[str, Any]:
-    try:
-        # "Auto (Optimal Lookback)" mode: frontend sends limit=500, days=None
-        # Detect this and use optimal lookback based on timeframe
-        backtest_days = req.days
-        backtest_limit = req.limit
-        if backtest_days is None and backtest_limit == 500:
-            # Auto mode: use optimal lookback days for the timeframe
-            backtest_days = get_optimal_lookback_days(req.timeframe)
-            backtest_limit = None  # let DataLoader compute from days
+def _run_backtest_task(
+    task_id: str, task_manager: TaskManager, request_data: dict[str, Any]
+) -> dict[str, Any]:
+    req = BacktestRequest.model_validate(request_data)
+    task_manager.update_progress(task_id, 5, "Resolving market data source...")
 
-        # Load Candles from Database Cache or Exchange API
-        df_candles = DataLoader.load_candles(
-            exchange=req.exchange,
-            symbol=req.symbol,
-            timeframe=req.timeframe,
-            limit=backtest_limit,
-            days=backtest_days,
+    from src.settings import SettingsManager
+
+    resolved_exchange, resolved_symbol = SettingsManager().resolve_exchange_symbol(
+        req.symbol, live_mode=False
+    )
+    req.exchange = resolved_exchange
+    req.symbol = resolved_symbol
+
+    backtest_days = req.days
+    backtest_limit = req.limit
+    if backtest_days is None and backtest_limit == 500:
+        backtest_days = get_optimal_lookback_days(req.timeframe)
+        backtest_limit = None
+
+    task_manager.update_progress(task_id, 15, "Loading historical candles...")
+    df_candles = DataLoader.load_candles_sync(
+        exchange=req.exchange,
+        symbol=req.symbol,
+        timeframe=req.timeframe,
+        limit=backtest_limit,
+        days=backtest_days,
+    )
+    if df_candles.empty:
+        raise ValueError(
+            f"No historical candles available for {req.symbol} ({req.timeframe})."
         )
 
-        # Build StrategyParams
-        params = build_strategy_params(req)
+    params = build_strategy_params(req)
+    task_manager.update_progress(task_id, 55, "Generating strategy signals...")
+    strategy = EmaVwapStrategy(params)
+    df_signals = strategy.generate_signals(df_candles)
 
-        # Compute indicators and strategy signals
-        strategy = EmaVwapStrategy(params)
-        df_signals = strategy.generate_signals(df_candles)
+    task_manager.update_progress(task_id, 75, "Simulating trades...")
+    result = BacktestEngine(params).run(df_signals)
 
-        # Run Backtest
-        engine = BacktestEngine(params)
-        result = engine.run(df_candles)
-
-        # Prepare chart candles response
-        chart_data = []
-        for _, row in df_signals.iterrows():
-            chart_data.append(
-                {
-                    "timestamp": str(row["timestamp"]),
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row["volume"]),
-                    "vwap": float(row["vwap"]) if not pd.isna(row["vwap"]) else None,
-                    "ema_fast": (
-                        float(row[f"ema_{params.fast_ema}"])
-                        if f"ema_{params.fast_ema}" in row
-                        and not pd.isna(row[f"ema_{params.fast_ema}"])
-                        else None
-                    ),
-                    "ema_slow": (
-                        float(row[f"ema_{params.slow_ema}"])
-                        if f"ema_{params.slow_ema}" in row
-                        and not pd.isna(row[f"ema_{params.slow_ema}"])
-                        else None
-                    ),
-                    "ema_trend": (
-                        float(row[f"ema_{params.trend_ema}"])
-                        if f"ema_{params.trend_ema}" in row
-                        and not pd.isna(row[f"ema_{params.trend_ema}"])
-                        else None
-                    ),
-                    "signal": int(row["signal"]),
-                }
+    task_manager.update_progress(task_id, 90, "Preparing chart data...")
+    fast_col = f"ema_{params.fast_ema}"
+    slow_col = f"ema_{params.slow_ema}"
+    trend_col = f"ema_{params.trend_ema}"
+    chart_df = df_signals[
+        [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "vwap",
+            "signal",
+        ]
+        + [
+            column
+            for column in (fast_col, slow_col, trend_col)
+            if column in df_signals.columns
+        ]
+    ].copy()
+    chart_df["timestamp"] = chart_df["timestamp"].astype(str)
+    chart_data = chart_df.to_dict("records")
+    for record in chart_data:
+        for column in ("vwap", fast_col, slow_col, trend_col):
+            value = record.get(column)
+            record[column] = (
+                float(value) if value is not None and not pd.isna(value) else None
             )
+        record["signal"] = int(record["signal"])
 
-        return {
-            "status": "success",
-            "symbol": req.symbol,
-            "exchange": req.exchange,
-            "timeframe": req.timeframe,
-            "params": params.to_dict(),
-            "metrics": result.to_dict(),
-            "chart_data": chart_data,
-        }
+    return {
+        "status": "success",
+        "symbol": req.symbol,
+        "exchange": req.exchange,
+        "timeframe": req.timeframe,
+        "params": params.to_dict(),
+        "metrics": result.to_dict(),
+        "chart_data": chart_data,
+    }
+
+
+@router.post("/api/backtest", dependencies=[Depends(get_api_key)])
+@limiter.limit("30/minute")
+async def run_backtest(request: Request, req: BacktestRequest) -> dict[str, Any]:
+    try:
+        task_id = await asyncio.to_thread(
+            global_task_manager.run_in_background,
+            "backtest",
+            _run_backtest_task,
+            req.model_dump(),
+        )
+        return {"status": "started", "task_id": task_id}
     except Exception as e:
         logger.error(f"[API] run_backtest error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -300,6 +337,10 @@ class OptimizeRequest(BaseStrategyRequest):
     pullback_tolerance_max: float | None = None
     vwap_stop_offset_min: float | None = None
     vwap_stop_offset_max: float | None = None
+    trailing_stop_min: float | None = None
+    trailing_stop_max: float | None = None
+    max_position_pct_min: float | None = None
+    max_position_pct_max: float | None = None
     execution_mode: str = "sequential"
 
 
@@ -399,6 +440,22 @@ def run_optimization(
                 if req.vwap_stop_offset_max is not None
                 else 0.8
             ),
+            trailing_stop_min=(
+                req.trailing_stop_min if req.trailing_stop_min is not None else 1.0
+            ),
+            trailing_stop_max=(
+                req.trailing_stop_max if req.trailing_stop_max is not None else 3.0
+            ),
+            max_position_pct_min=(
+                req.max_position_pct_min
+                if req.max_position_pct_min is not None
+                else 25.0
+            ),
+            max_position_pct_max=(
+                req.max_position_pct_max
+                if req.max_position_pct_max is not None
+                else 100.0
+            ),
             enable_hard_drawdown_constraint=req.enable_hard_drawdown_constraint,
             max_drawdown_constraint_pct=req.max_drawdown_constraint_pct,
             enable_max_holding_bars=req.enable_max_holding_bars,
@@ -412,8 +469,12 @@ def run_optimization(
 
     def _optimize_worker(task_id: str, tm: TaskManager) -> dict[str, Any]:
         try:
+            # Resolve canonical symbol for data loading (allows "BTC/USD" -> kucoin:BTC/USD)
+            resolved_exchange, resolved_symbol = DataLoader.resolve_canonical_symbol(
+                req.symbol, live_mode=False
+            )
+
             # "Auto (Optimal Lookback)" mode: frontend sends limit=500, days=None
-            # Detect this and use optimal lookback based on timeframe
             opt_limit = req.limit
             opt_days = req.days
             if opt_days is None and opt_limit == 500:
@@ -421,9 +482,9 @@ def run_optimization(
                 opt_days = get_optimal_lookback_days(req.timeframe)
                 opt_limit = None  # let DataLoader compute from days
 
-            df_candles = DataLoader.load_candles(
-                exchange=req.exchange,
-                symbol=req.symbol,
+            df_candles = DataLoader.load_candles_sync(
+                exchange=resolved_exchange,
+                symbol=resolved_symbol,
                 timeframe=req.timeframe,
                 limit=opt_limit,
                 days=opt_days,
@@ -455,22 +516,27 @@ def run_optimization_alias(
 
 
 @router.post("/api/walk_forward", dependencies=[Depends(get_api_key)])
-def run_walk_forward(req: WFORequest) -> dict[str, Any]:
+async def run_walk_forward(req: WFORequest) -> dict[str, Any]:
     try:
+        # Resolve canonical symbol for data loading (allows "BTC/USD" -> kucoin:BTC/USD)
+        # Use async variant to avoid run_async() from main event loop
+        resolved_exchange, resolved_symbol = await DataLoader.aresolve_canonical_symbol(
+            req.symbol, live_mode=False
+        )
+
         # WFO requires sufficient data for meaningful walk-forward windows.
-        # Default to 365 days (1 year) instead of limit=500 which is only ~1.7 days for 5m.
-        # Minimum 150 days needed for 3 windows; 365 gives ~7 windows; 500 gives 10 windows.
+        # When days is not explicitly specified (or <= 0), default to the optimal
+        # lookback days for the timeframe instead of a hardcoded 365 days.
         wfo_days = req.days
-        if wfo_days is None:
-            # If user explicitly set limit > 500, respect it; otherwise default to 365 days
+        if wfo_days is None or wfo_days <= 0:
             if req.limit and req.limit > 500:
                 wfo_days = None  # will use limit
             else:
-                wfo_days = 365
+                wfo_days = get_optimal_lookback_days(req.timeframe)
 
-        df_candles = DataLoader.load_candles(
-            exchange=req.exchange,
-            symbol=req.symbol,
+        df_candles = await DataLoader.load_candles(
+            exchange=resolved_exchange,
+            symbol=resolved_symbol,
             timeframe=req.timeframe,
             limit=req.limit if wfo_days is None else None,
             days=wfo_days,
@@ -501,7 +567,7 @@ def run_walk_forward(req: WFORequest) -> dict[str, Any]:
             trials_per_window=req.trials_per_window,
         )
 
-        n_trials_budget = req.n_trials_total if req.n_trials_total > 0 else 30
+        n_trials_budget = req.n_trials_total if req.n_trials_total > 0 else 100
         engine = WalkForwardEngine(
             base_params=base_params,
             wfo_config=wfo_config,
@@ -510,7 +576,9 @@ def run_walk_forward(req: WFORequest) -> dict[str, Any]:
             timeframe=req.timeframe,
         )
 
-        res = engine.run(df_candles)
+        # WFO runs 30+ Optuna trials per window (minutes of CPU); offload so
+        # the main event loop is not blocked for the whole run (ema_vwap-9xd4).
+        res = await asyncio.to_thread(engine.run, df_candles)
         return {
             "status": "success",
             "symbol": req.symbol,
@@ -524,8 +592,14 @@ def run_walk_forward(req: WFORequest) -> dict[str, Any]:
 
 
 @router.post("/api/monte_carlo", dependencies=[Depends(get_api_key)])
-def run_monte_carlo(req: MonteCarloRequest) -> dict[str, Any]:
+async def run_monte_carlo(req: MonteCarloRequest) -> dict[str, Any]:
     try:
+        # Resolve canonical symbol for data loading (allows "BTC/USD" -> kucoin:BTC/USD)
+        # Use async variant to avoid run_async() from main event loop
+        resolved_exchange, resolved_symbol = await DataLoader.aresolve_canonical_symbol(
+            req.symbol, live_mode=False
+        )
+
         # "Auto (Optimal Lookback)" mode: frontend sends limit=500, days=None
         # Detect this and use optimal lookback based on timeframe
         mc_limit = req.limit
@@ -535,15 +609,15 @@ def run_monte_carlo(req: MonteCarloRequest) -> dict[str, Any]:
             mc_days = get_optimal_lookback_days(req.timeframe)
             mc_limit = None  # let DataLoader compute from days
 
-        df_candles = DataLoader.load_candles(
-            exchange=req.exchange,
-            symbol=req.symbol,
+        df_candles = await DataLoader.load_candles(
+            exchange=resolved_exchange,
+            symbol=resolved_symbol,
             timeframe=req.timeframe,
             limit=mc_limit,
             days=mc_days,
         )
         params = build_strategy_params(req)
-        backtest_res = BacktestEngine(params).run(df_candles)
+        backtest_res = await asyncio.to_thread(BacktestEngine(params).run, df_candles)
         mc_config = MonteCarloConfig(
             num_simulations=req.num_simulations,
             sample_with_replacement=req.sample_with_replacement,
@@ -553,7 +627,7 @@ def run_monte_carlo(req: MonteCarloRequest) -> dict[str, Any]:
             trades=backtest_res.trades,
             config=mc_config,
         )
-        res = simulator.run()
+        res = await asyncio.to_thread(simulator.run)
         return {
             "status": "success",
             "symbol": req.symbol,
@@ -588,7 +662,7 @@ class ValidateStrategyRequest(BaseModel):
 
 
 @router.post("/api/strategy/validate", dependencies=[Depends(get_api_key)])
-def validate_strategy_endpoint(req: ValidateStrategyRequest) -> dict[str, Any]:
+async def validate_strategy_endpoint(req: ValidateStrategyRequest) -> dict[str, Any]:
     """
     Automated multi-stage robustness validation (Backtest + WFO + Monte Carlo)
     for a strategy configuration. Returns structured report and PASS/CAUTION/FAIL status.
@@ -603,7 +677,7 @@ def validate_strategy_endpoint(req: ValidateStrategyRequest) -> dict[str, Any]:
             val_days = get_optimal_lookback_days(req.timeframe)
             val_limit = None  # let DataLoader compute from days
 
-        df_candles = DataLoader.load_candles(
+        df_candles = await DataLoader.load_candles(
             exchange=req.exchange,
             symbol=req.symbol,
             timeframe=req.timeframe,
@@ -618,14 +692,19 @@ def validate_strategy_endpoint(req: ValidateStrategyRequest) -> dict[str, Any]:
             ValidationCriteria(**req.criteria) if req.criteria else ValidationCriteria()
         )
         validator = StrategyValidator(crit)
-        report = validator.validate(
-            df_candles=df_candles,
-            params=strat_params,
-            n_trials=req.n_trials,
-            target_metric=req.target_metric,
-            enable_multi_objective=req.enable_multi_objective,
-            multi_objective_metrics=req.multi_objective_metrics,
-            timeframe=req.timeframe,
+        # Validation runs Backtest + WFO + Monte Carlo (minutes of CPU);
+        # offload so the main event loop is not blocked (ema_vwap-9xd4).
+        report = await asyncio.to_thread(
+            partial(
+                validator.validate,
+                df_candles=df_candles,
+                params=strat_params,
+                n_trials=req.n_trials,
+                target_metric=req.target_metric,
+                enable_multi_objective=req.enable_multi_objective,
+                multi_objective_metrics=req.multi_objective_metrics,
+                timeframe=req.timeframe,
+            )
         )
 
         return {

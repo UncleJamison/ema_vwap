@@ -4,10 +4,20 @@ Ensures the UI web page and all required assets load reliably in both local and 
 """
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.app import _resolve_web_dir, app
+
+
+@pytest.fixture(autouse=True)
+def mock_pg_lifespan(monkeypatch):
+    """Mock PG lifespan to avoid connection leaks from TestClient."""
+    monkeypatch.setattr("src.app.init_pg_pools", AsyncMock())
+    monkeypatch.setattr("src.app.close_pg_pools", AsyncMock())
+    monkeypatch.setattr("src.app_limiter.limiter.reset", lambda: None)
 
 
 def test_root_serves_html():

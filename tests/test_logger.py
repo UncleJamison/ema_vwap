@@ -10,12 +10,19 @@ from src.logger import (
     LOGS_DIR,
     PAPER_LOG_PATH,
     logger,
-    paper_logger,
     setup_logging,
 )
 
 
 def test_logging_setup_and_writing():
+    # Clear existing handlers to avoid interference from other tests
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    paper_logger = logging.getLogger("paper_trading")
+    for handler in paper_logger.handlers[:]:
+        paper_logger.removeHandler(handler)
+
     setup_logging(log_level=logging.DEBUG)
 
     logger.info("Test main app logger message")

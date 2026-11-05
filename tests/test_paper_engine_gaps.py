@@ -32,10 +32,10 @@ def mock_registry():
     """Create a mock registry with proper defaults."""
     registry = Mock()
     params = StrategyParams()
-    registry.get_strategy_params.return_value = params
-    registry.get_profile.return_value = None
-    registry.get_deployed_profile.return_value = None
-    registry.list_profiles.return_value = []
+    registry.get_strategy_params_sync.return_value = params
+    registry.get_profile_sync.return_value = None
+    registry.get_deployed_profile_sync.return_value = None
+    registry.list_profiles_sync.return_value = []
     return registry
 
 
@@ -132,9 +132,10 @@ class TestPaperEngineEntryTimeImmutability:
         self, paper_engine, mock_ledger
     ):
         """entry_time should be set at position creation and never modified."""
-        mock_ledger.get_position.return_value = None
-        mock_ledger.get_balance.return_value = 10000.0
-        mock_ledger.get_total_equity.return_value = 10000.0
+        mock_ledger.get_position_sync.return_value = None
+        mock_ledger.get_balance_sync.return_value = 10000.0
+        mock_ledger.get_total_equity_sync.return_value = 10000.0
+        mock_ledger.list_positions_sync.return_value = []
 
         # Use force_candles with force_signals to force entry
         candles = make_candles(signal=1)
@@ -158,15 +159,15 @@ class TestPaperEngineEntryTimeImmutability:
             assert result["action"] in ("ENTER_LONG", "ENTER_SHORT")
 
             # Verify position was saved with entry_time
-            mock_ledger.save_position.assert_called()
-            saved_pos = mock_ledger.save_position.call_args[0][0]
+            mock_ledger.save_position_sync.assert_called()
+            saved_pos = mock_ledger.save_position_sync.call_args[0][0]
             assert saved_pos.entry_time is not None
             original_entry_time = saved_pos.entry_time
 
             # Second evaluation should NOT change entry_time
-            mock_ledger.get_position.return_value = saved_pos
-            mock_ledger.get_balance.return_value = 10000.0
-            mock_ledger.get_total_equity.return_value = 10000.0
+            mock_ledger.get_position_sync.return_value = saved_pos
+            mock_ledger.get_balance_sync.return_value = 10000.0
+            mock_ledger.get_total_equity_sync.return_value = 10000.0
 
             # Use price movement that won't trigger stops - small movement in same direction
             candles2 = make_candles(
@@ -197,16 +198,16 @@ class TestPaperEngineRiskPerTradeDelegation:
 
     def test_position_sizing_uses_risk_per_trade_pct(self, paper_engine, mock_ledger):
         """Position sizing should use profile's risk_per_trade_pct via RiskManager."""
-        mock_ledger.get_position.return_value = None
-        mock_ledger.get_balance.return_value = 100000.0  # Use larger equity
-        mock_ledger.get_total_equity.return_value = 100000.0
+        mock_ledger.get_position_sync.return_value = None
+        mock_ledger.get_balance_sync.return_value = 100000.0  # Use larger equity
+        mock_ledger.get_total_equity_sync.return_value = 100000.0
         # Mock list_positions to return empty (no existing positions)
-        mock_ledger.list_positions.return_value = []
+        mock_ledger.list_positions_sync.return_value = []
 
         params = StrategyParams(
             risk_per_trade_pct=2.0, atr_multiplier=2.0, max_position_pct=80.0
         )
-        paper_engine.registry.get_strategy_params.return_value = params
+        paper_engine.registry.get_strategy_params_sync.return_value = params
 
         # Use force_candles with force_signals to force entry
         candles = make_candles(signal=1)
@@ -242,18 +243,19 @@ class TestPaperEnginePortfolioCap:
 
     def test_portfolio_cap_applies(self, paper_engine, mock_ledger):
         """Portfolio cap should limit total position value to max_position_pct% of equity."""
-        mock_ledger.get_position.return_value = None
-        mock_ledger.get_balance.return_value = 10000.0
-        mock_ledger.get_total_equity.return_value = 10000.0
+        mock_ledger.get_position_sync.return_value = None
+        mock_ledger.get_balance_sync.return_value = 10000.0
+        mock_ledger.get_total_equity_sync.return_value = 10000.0
+        mock_ledger.list_positions_sync.return_value = []
         # Mock list_positions to return empty (no existing positions)
-        mock_ledger.list_positions.return_value = []
+        mock_ledger.list_positions_sync.return_value = []
 
         # Small risk_per_trade_pct but tight stop would create large position
         # max_position_pct = 80% (default)
         params = StrategyParams(
             risk_per_trade_pct=0.1, atr_multiplier=0.1, max_position_pct=80.0
         )
-        paper_engine.registry.get_strategy_params.return_value = params
+        paper_engine.registry.get_strategy_params_sync.return_value = params
 
         # Use force_candles with force_signals to force entry
         candles = make_candles(base_price=50000, signal=1)
@@ -282,9 +284,10 @@ class TestPaperEnginePortfolioCap:
         """Portfolio cap should account for existing positions."""
         from src.paper.models import PaperPosition
 
-        mock_ledger.get_position.return_value = None
-        mock_ledger.get_balance.return_value = 10000.0
-        mock_ledger.get_total_equity.return_value = 10000.0
+        mock_ledger.get_position_sync.return_value = None
+        mock_ledger.get_balance_sync.return_value = 10000.0
+        mock_ledger.get_total_equity_sync.return_value = 10000.0
+        mock_ledger.list_positions_sync.return_value = []
 
         # Mock existing position worth $3000 (30% of equity)
         existing_pos = PaperPosition(
@@ -297,12 +300,12 @@ class TestPaperEnginePortfolioCap:
             cost_basis=3000.0,
             unrealized_pnl=0.0,
         )
-        mock_ledger.list_positions.return_value = [existing_pos]
+        mock_ledger.list_positions_sync.return_value = [existing_pos]
 
         params = StrategyParams(
             risk_per_trade_pct=2.0, atr_multiplier=2.0, max_position_pct=80.0
         )
-        paper_engine.registry.get_strategy_params.return_value = params
+        paper_engine.registry.get_strategy_params_sync.return_value = params
 
         candles = make_candles(signal=1)
         signals = candles.copy()
@@ -340,14 +343,14 @@ class TestPaperEngineDeployedProfileValidation:
             fast_ema=12, slow_ema=26
         )
 
-        mock_registry.get_deployed_profile.return_value = deployed_profile
-        mock_registry.get_profile.return_value = None  # No active profile
+        mock_registry.get_deployed_profile_sync.return_value = deployed_profile
+        mock_registry.get_profile_sync.return_value = None  # No active profile
         # get_strategy_params should use deployed profile's params
-        mock_registry.get_strategy_params.return_value = StrategyParams(
+        mock_registry.get_strategy_params_sync.return_value = StrategyParams(
             fast_ema=12, slow_ema=26
         )
 
-        params = paper_engine.registry.get_strategy_params(
+        params = paper_engine.registry.get_strategy_params_sync(
             exchange="kucoin",
             symbol="BTC/USD",
             timeframe="5m",
@@ -376,10 +379,10 @@ class TestPaperEnginePositionCloseEdgeCases:
             entry_time="2024-01-01T00:00:00Z",
             last_bar_time="2024-01-01T00:00:00Z",
         )
-        mock_ledger.get_position.return_value = pos
+        mock_ledger.get_position_sync.return_value = pos
 
         params = StrategyParams(taker_fee_pct=0.075, slippage_pct=0.05)
-        paper_engine.registry.get_strategy_params.return_value = params
+        paper_engine.registry.get_strategy_params_sync.return_value = params
 
         # Candle opens BELOW stop loss (gap down)
         # low_price = 48500, stop_loss = 49000, open = 48800
@@ -427,8 +430,8 @@ class TestPaperEnginePositionCloseEdgeCases:
             entry_time="2024-01-01T00:00:00Z",
             last_bar_time="2024-01-01T00:00:00Z",
         )
-        mock_ledger.get_position.return_value = pos
-        paper_engine.registry.get_strategy_params.return_value = StrategyParams(
+        mock_ledger.get_position_sync.return_value = pos
+        paper_engine.registry.get_strategy_params_sync.return_value = StrategyParams(
             taker_fee_pct=0.075
         )
 
@@ -478,10 +481,10 @@ class TestPaperEngineMaxHoldingBars:
             entry_time="2024-01-01T00:00:00Z",
             last_bar_time="2024-01-01T00:00:00Z",
         )
-        mock_ledger.get_position.return_value = pos
+        mock_ledger.get_position_sync.return_value = pos
 
         params = StrategyParams(max_holding_bars=10)
-        paper_engine.registry.get_strategy_params.return_value = params
+        paper_engine.registry.get_strategy_params_sync.return_value = params
 
         # Simulate 10 bars passed (commented variables kept for documentation)
         # entry_dt = pd.Timestamp("2024-01-01T00:00:00Z", tz="UTC")
@@ -526,7 +529,7 @@ class TestPaperEngineReconciliation:
             take_profit=52000.0,
             entry_time="2024-01-01T00:00:00Z",
         )
-        mock_ledger.list_positions.return_value = [pos]
+        mock_ledger.list_positions_sync.return_value = [pos]
 
         # Candle data showing stop loss breached during downtime
         candles = pd.DataFrame(
@@ -547,7 +550,7 @@ class TestPaperEngineReconciliation:
         params = StrategyParams(
             stop_loss_type="vwap", vwap_stop_offset_pct=0.1, taker_fee_pct=0.075
         )
-        paper_engine.registry.get_strategy_params.return_value = params
+        paper_engine.registry.get_strategy_params_sync.return_value = params
 
         results = paper_engine.reconcile_positions_on_startup(
             force_candles_map={"kucoin:BTC/USD": candles}
@@ -598,8 +601,8 @@ class TestPaperEngineManualClose:
             cost_basis=10000.0,
             entry_time="2024-01-01T00:00:00Z",
         )
-        mock_ledger.get_position.return_value = pos
-        mock_ledger.get_balance.return_value = 10000.0
+        mock_ledger.get_position_sync.return_value = pos
+        mock_ledger.get_balance_sync.return_value = 10000.0
 
         trade = paper_engine.close_position_market("kucoin", "BTC/USD", 55000.0)
 
@@ -607,7 +610,7 @@ class TestPaperEngineManualClose:
         assert trade.exit_reason == "MANUAL"
         assert trade.exit_price == 55000.0
         assert trade.realized_pnl > 0
-        mock_ledger.close_position.assert_called_once()
+        mock_ledger.close_position_sync.assert_called_once()
 
 
 class TestPaperEngineStepAllActiveProfiles:
@@ -629,15 +632,17 @@ class TestPaperEngineStepAllActiveProfiles:
                 params={"fast_ema": 12},
             ),
         ]
-        mock_registry.list_profiles.return_value = profiles
+        mock_registry.list_profiles_sync_sync.return_value = profiles
 
         with patch(
             "src.paper.engine.DataLoader.fetch_and_update_candles"
         ) as mock_fetch:
             mock_fetch.return_value = make_candles()
 
-            paper_engine.registry.list_profiles.return_value = profiles
-            paper_engine.registry.get_strategy_params.return_value = StrategyParams()
+            paper_engine.registry.list_profiles_sync.return_value = profiles
+            paper_engine.registry.get_strategy_params_sync.return_value = (
+                StrategyParams()
+            )
 
             _ = paper_engine.step_all_active_profiles()
 
@@ -650,8 +655,9 @@ class TestPaperEngineManualStep:
 
     def test_manual_step_fetches_live(self, paper_engine, mock_ledger, mock_registry):
         """Manual step should fetch live candles."""
-        mock_registry.get_profile.return_value = Mock(timeframe="5m")
-        paper_engine.registry.get_strategy_params.return_value = StrategyParams()
+        mock_registry.get_profile_sync.return_value = Mock(timeframe="5m")
+        paper_engine.registry.get_strategy_params_sync.return_value = StrategyParams()
+        mock_ledger.get_position_sync.return_value = None
 
         with patch(
             "src.paper.engine.DataLoader.fetch_and_update_candles"
@@ -688,15 +694,15 @@ class TestPaperEngineEntryTimeImmutability4Sites:
             cost_basis=10000.0,
             entry_time="2024-01-01T00:00:00Z",
         )
-        mock_ledger.get_position.return_value = pos
+        mock_ledger.get_position_sync.return_value = pos
 
         original_entry_time = pos.entry_time
 
         # Simulate multiple evaluations
         for i in range(5):
-            mock_ledger.get_position.return_value = pos
-            mock_ledger.get_balance.return_value = 10000.0
-            mock_ledger.get_total_equity.return_value = 10000.0
+            mock_ledger.get_position_sync.return_value = pos
+            mock_ledger.get_balance_sync.return_value = 10000.0
+            mock_ledger.get_total_equity_sync.return_value = 10000.0
 
             with patch(
                 "src.paper.engine.DataLoader.fetch_and_update_candles"

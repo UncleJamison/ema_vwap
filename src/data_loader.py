@@ -8,8 +8,9 @@ from typing import ClassVar
 
 import pandas as pd
 
-from src.config import get_bars_per_day, get_timeframe_spec
+from src.config import get_timeframe_spec
 from src.database import CandleDatabase
+from src.pg_database import load_candles_pg, save_candles_pg
 from src.providers import (
     STANDARD_TF_ORDER,
     GeminiAdapter,
@@ -76,6 +77,30 @@ class DataLoader:
     _DONOR_CACHE_TTL: ClassVar[float] = 300.0  # seconds
 
     @staticmethod
+    def _cache_is_fresh(df: pd.DataFrame, timeframe: str) -> bool:
+        if df.empty:
+            return False
+
+        timeframe_minutes = {
+            "1m": 1,
+            "3m": 3,
+            "5m": 5,
+            "15m": 15,
+            "30m": 30,
+            "1h": 60,
+            "2h": 120,
+            "4h": 240,
+            "6h": 360,
+            "8h": 480,
+            "12h": 720,
+            "1d": 1440,
+        }
+        period_minutes = timeframe_minutes.get(timeframe.lower(), 5)
+        newest_ts = pd.to_datetime(df["timestamp"].iloc[-1], utc=True)
+        age_seconds = (pd.Timestamp.now(tz="UTC") - newest_ts).total_seconds()
+        return age_seconds <= period_minutes * 60 * 5
+
+    @staticmethod
     def apply_split_adjustment(
         df: pd.DataFrame,
         split_date: str,
@@ -114,76 +139,66 @@ class DataLoader:
         adapter: KuCoinAdapter = registry.get("kucoin")  # type: ignore
         return adapter.format_symbol(symbol)
 
+    @staticmethod
+    def resolve_canonical_symbol(
+        canonical_symbol: str, live_mode: bool = False
+    ) -> tuple[str, str]:
+        """
+        Resolve a canonical symbol (e.g., 'BTC/USD') to exchange-specific symbol.
+
+        Args:
+            canonical_symbol: The canonical symbol (e.g., 'BTC/USD')
+            live_mode: If True, use prefer_live exchange; otherwise prefer_history
+
+        Returns:
+            Tuple of (exchange, exchange_specific_symbol)
+        """
+        from src.settings import SettingsManager
+
+        mgr = SettingsManager()
+        return mgr.resolve_exchange_symbol(canonical_symbol, live_mode)
+
+    @staticmethod
+    async def aresolve_canonical_symbol(
+        canonical_symbol: str, live_mode: bool = False
+    ) -> tuple[str, str]:
+        """
+        Async variant of resolve_canonical_symbol() - safe from the main event loop.
+
+        Args:
+            canonical_symbol: The canonical symbol (e.g., 'BTC/USD')
+            live_mode: If True, use prefer_live exchange; otherwise prefer_history
+
+        Returns:
+            Tuple of (exchange, exchange_specific_symbol)
+        """
+        from src.settings import SettingsManager
+
+        mgr = SettingsManager()
+        return await mgr.aresolve_exchange_symbol(canonical_symbol, live_mode)
+
     @classmethod
-    def fetch_kucoin_historical(
+    async def fetch_kucoin_historical(
         cls, symbol: str = "BTC/USDT", timeframe: str = "5m", days: int | None = None
     ) -> pd.DataFrame:
         """
         Fetch up to `days` of historical intraday candles from KuCoin using paginated requests.
-        Saves candles to SQLite database and upserts derived higher timeframes.
         """
 
         provider = registry.get("kucoin")
-        df = provider.fetch_historical_candles(
-            symbol=symbol, timeframe=timeframe, days=days
-        )
+        import asyncio
 
-        # Explicit 1m -> 3m upsampling when 3m data is insufficient
-        if timeframe == "3m" and (
-            df.empty or (days is not None and len(df) < max(10, int(days * 480 * 0.3)))
-        ):
-
-            print(
-                f"[DataLoader] 3m insufficient ({len(df)} bars, requested {days} days). Fetching 1m and upsampling..."
-            )
-            donor_df = cls.fetch_kucoin_historical(
-                symbol=symbol, timeframe="1m", days=days
-            )
-            if not donor_df.empty and len(donor_df) > 0:
-                # Save 1m and resample to 3m
-                cls.resample_and_upsert(
-                    exchange="kucoin",
-                    symbol=symbol,
-                    base_timeframe="1m",
-                    df=donor_df,
-                    target_tfs=["3m"],
-                )
-                # Load upsampled 3m from DB
-                upsampled = db.load_candles(
-                    exchange="kucoin",
-                    symbol=symbol,
-                    timeframe="3m",
-                    limit=max(1, int(days * 480)) if days else 500,
-                )
-                if not upsampled.empty:
-                    return upsampled
-            # If 1m donor also fails, fall through to synthetic
-
-        if df.empty:
-            bars_per_day = get_bars_per_day(timeframe, "crypto")
-            synth_df = cls.generate_synthetic_candles(
-                symbol=symbol,
-                timeframe=timeframe,
-                num_bars=min(days * bars_per_day, 1000),
-            )
-            # Save synthetic with explicit tag for audit
-            db.save_candles(
-                exchange="synthetic", symbol=symbol, timeframe=timeframe, df=synth_df
-            )
-            return synth_df
-
-        # Save fetched candles to SQLite database
-        db.save_candles(exchange="kucoin", symbol=symbol, timeframe=timeframe, df=df)
-
-        # Upsert derived higher timeframes
-        cls.resample_and_upsert(
-            exchange="kucoin", symbol=symbol, base_timeframe=timeframe, df=df
+        df = await asyncio.to_thread(
+            provider.fetch_historical_candles,
+            symbol=symbol,
+            timeframe=timeframe,
+            days=days,
         )
 
         return df
 
     @classmethod
-    def fetch_gemini_historical(
+    async def fetch_gemini_historical(
         cls, symbol: str = "BTC/USD", timeframe: str = "5m", days: int = 180
     ) -> pd.DataFrame:
         """Fetch historical candles from Gemini REST API and cache in SQLite.
@@ -199,20 +214,28 @@ class DataLoader:
                 f"[DataLoader] Gemini does not natively support {timeframe}. "
                 f"Fetching {donor_tf} and resampling up..."
             )
-            donor_df = cls.fetch_gemini_historical(
+            donor_df = await cls.fetch_gemini_historical(
                 symbol=symbol, timeframe=donor_tf, days=days
             )
             if donor_df.empty:
-                return donor_df
-            cls.resample_and_upsert(
+                raise RuntimeError(
+                    f"Gemini returned no {donor_tf} candles for {symbol}; "
+                    f"cannot build {timeframe} history."
+                )
+            await cls.resample_and_upsert(
                 exchange="gemini",
                 symbol=symbol,
                 df=donor_df,
                 base_timeframe=donor_tf,
                 target_tfs=[timeframe],
+                data_origin="provider",
+                source_timeframe=donor_tf,
             )
-            return db.load_candles(
-                exchange="gemini", symbol=symbol, timeframe=timeframe
+            return await load_candles_pg(
+                exchange="gemini",
+                symbol=symbol,
+                timeframe=timeframe,
+                data_origin="provider",
             )
 
         provider = registry.get("gemini")
@@ -221,19 +244,26 @@ class DataLoader:
         )
 
         if df.empty:
-            print(
-                "[DataLoader] Gemini request returned empty. Using synthetic generator."
-            )
-            bars_per_day = get_bars_per_day(timeframe, "crypto")
-            return cls.generate_synthetic_candles(
-                symbol=symbol,
-                timeframe=timeframe,
-                num_bars=min(days * bars_per_day, 1000),
+            raise RuntimeError(
+                f"Gemini returned no historical candles for {symbol} ({timeframe}); "
+                "synthetic data was not substituted."
             )
 
-        db.save_candles(exchange="gemini", symbol=symbol, timeframe=timeframe, df=df)
-        cls.resample_and_upsert(
-            exchange="gemini", symbol=symbol, base_timeframe=timeframe, df=df
+        await save_candles_pg(
+            exchange="gemini",
+            symbol=symbol,
+            timeframe=timeframe,
+            df=df,
+            data_origin="provider",
+            source_timeframe=timeframe,
+        )
+        await cls.resample_and_upsert(
+            exchange="gemini",
+            symbol=symbol,
+            base_timeframe=timeframe,
+            df=df,
+            data_origin="provider",
+            source_timeframe=timeframe,
         )
         return df
 
@@ -257,16 +287,18 @@ class DataLoader:
         )
 
     @classmethod
-    def resample_and_upsert(
+    async def resample_and_upsert(
         cls,
         exchange: str,
         symbol: str,
         df: pd.DataFrame,
         base_timeframe: str = "5m",
         target_tfs: list[str] | None = None,
+        data_origin: str = "unknown",
+        source_timeframe: str | None = None,
     ) -> int:
         """
-        Resample base OHLCV candles into higher timeframes and upsert to SQLite.
+        Resample base OHLCV candles into higher timeframes and upsert to PostgreSQL.
 
         Args:
             target_tfs: Optional explicit list of TFs to derive. When None, derives
@@ -307,22 +339,40 @@ class DataLoader:
             "1d": "1D",
         }
 
+        has_row_provenance = {"data_origin", "source_timeframe"} <= set(df.columns)
+        df_temp = df.copy()
+        try:
+            df_temp["timestamp"] = pd.to_datetime(
+                df_temp["timestamp"], utc=True, format="ISO8601"
+            )
+        except Exception:
+            df_temp["timestamp"] = pd.to_datetime(df_temp["timestamp"], utc=True)
+
         for tf in tfs_to_build:
             resample_freq = resample_freq_map.get(tf)
             if not resample_freq:
                 continue
 
-            df_temp = df.copy()
-            try:
-                df_temp["timestamp"] = pd.to_datetime(
-                    df_temp["timestamp"], utc=True, format="ISO8601"
+            if has_row_provenance:
+                df_temp["_bucket"] = df_temp["timestamp"].dt.floor(resample_freq)
+                bucket_provenance = df_temp.groupby("_bucket", sort=False).apply(
+                    lambda bucket: set(
+                        zip(
+                            bucket["data_origin"].astype(str),
+                            bucket["source_timeframe"].fillna("").astype(str),
+                            strict=True,
+                        )
+                    )
                 )
-            except Exception:
-                df_temp["timestamp"] = pd.to_datetime(df_temp["timestamp"], utc=True)
-            df_temp = df_temp.set_index("timestamp")
+            else:
+                bucket_provenance = None
 
+            source_df = df_temp.drop(
+                columns=["data_origin", "source_timeframe", "_bucket"],
+                errors="ignore",
+            ).set_index("timestamp")
             resampled = (
-                df_temp.resample(resample_freq)
+                source_df.resample(resample_freq)
                 .agg(
                     {
                         "open": "first",
@@ -336,9 +386,47 @@ class DataLoader:
                 .reset_index()
             )
 
-            if not resampled.empty:
-                count = db.save_candles(
-                    exchange=exchange, symbol=symbol, timeframe=tf, df=resampled
+            if resampled.empty:
+                continue
+
+            if bucket_provenance is not None:
+                provenance = [
+                    bucket_provenance.get(timestamp, set())
+                    for timestamp in resampled["timestamp"]
+                ]
+
+                def resolved_origin(values: set[tuple[str, str]]) -> str:
+                    return next(iter(values))[0] if len(values) == 1 else "unknown"
+
+                def resolved_timeframe(values: set[tuple[str, str]]) -> str:
+                    if len(values) != 1:
+                        return "mixed"
+                    source_tf = next(iter(values))[1]
+                    return source_tf or base_timeframe
+
+                resampled["data_origin"] = [resolved_origin(p) for p in provenance]
+                resampled["source_timeframe"] = [
+                    resolved_timeframe(p) for p in provenance
+                ]
+                groups = resampled.groupby(
+                    ["data_origin", "source_timeframe"], sort=False
+                )
+            else:
+                groups = [
+                    (
+                        (data_origin, source_timeframe or base_timeframe),
+                        resampled,
+                    )
+                ]
+
+            for (row_origin, row_source_timeframe), rows in groups:
+                count = await save_candles_pg(
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=tf,
+                    df=rows,
+                    data_origin=str(row_origin),
+                    source_timeframe=str(row_source_timeframe),
                 )
                 total_upserted += count
 
@@ -405,7 +493,7 @@ class DataLoader:
             return pd.DataFrame()
 
     @classmethod
-    def _fetch_and_store(
+    async def _fetch_and_store(
         cls,
         exchange: str,
         symbol: str,
@@ -413,6 +501,7 @@ class DataLoader:
         days: int | None = None,
         limit: int | None = None,
         donor_tf: str | None = None,
+        target_tfs: list[str] | None = None,
     ) -> pd.DataFrame:
         """
         Shared fetch + upsert + resample logic (ema_vwap-plkq).
@@ -435,43 +524,74 @@ class DataLoader:
 
         if donor_tf is not None:
             # Resample path: fetch donor TF, upsert, then resample
-            df = cls._fetch_and_store(
+            df = await cls._fetch_and_store(
                 exchange=exchange,
                 symbol=symbol,
                 timeframe=donor_tf,
                 days=days,
                 limit=limit,
                 donor_tf=None,
+                target_tfs=target_tfs,
             )
-            return cls.resample_and_upsert(
+            origin = (
+                "synthetic"
+                if exchange_lower in {"synthetic", "synthetic_stock"}
+                else "provider"
+            )
+            return await cls.resample_and_upsert(
                 exchange=exchange_lower,
                 symbol=symbol,
                 df=df,
                 base_timeframe=donor_tf,
-                target_tfs=[timeframe],
+                target_tfs=target_tfs or [timeframe],
+                data_origin=origin,
+                source_timeframe=donor_tf,
             )
 
         # Direct fetch path
         if exchange_lower == "kucoin":
-            df = cls.fetch_kucoin_historical(
+            df = await cls.fetch_kucoin_historical(
                 symbol=symbol, timeframe=timeframe, days=days
             )
+            origin = "provider"
         elif exchange_lower == "gemini":
-            df = cls.fetch_gemini_historical(
+            df = await cls.fetch_gemini_historical(
                 symbol=symbol, timeframe=timeframe, days=days
             )
-        else:
+            origin = "provider"
+        elif exchange_lower in {"synthetic", "synthetic_stock"}:
             df = cls.generate_synthetic_candles(
                 symbol=symbol, timeframe=timeframe, num_bars=days * tf_per_day
             )
+            origin = "synthetic"
+        else:
+            raise ValueError(f"Unsupported candle exchange: {exchange}")
+
+        if df.empty and origin == "provider":
+            raise RuntimeError(
+                f"{exchange} returned no historical candles for "
+                f"{symbol} ({timeframe}); data was not synthesized."
+            )
 
         if not df.empty:
-            db.save_candles(
+            await save_candles_pg(
                 exchange=exchange_lower,
                 symbol=symbol,
                 timeframe=timeframe,
                 df=df,
+                data_origin=origin,
+                source_timeframe=timeframe,
             )
+            if exchange_lower == "kucoin":
+                await cls.resample_and_upsert(
+                    exchange=exchange_lower,
+                    symbol=symbol,
+                    base_timeframe=timeframe,
+                    df=df,
+                    target_tfs=target_tfs,
+                    data_origin=origin,
+                    source_timeframe=timeframe,
+                )
 
         if limit and len(df) > limit:
             df = df.tail(limit).reset_index(drop=True)
@@ -479,7 +599,7 @@ class DataLoader:
         return df
 
     @classmethod
-    def load_candles(
+    async def load_candles(
         cls,
         exchange: str = "kucoin",
         symbol: str = "BTC/USD",
@@ -498,38 +618,6 @@ class DataLoader:
         exchange_lower = exchange.lower()
         donor_tf = get_donor_timeframe(exchange_lower, timeframe)
 
-        if donor_tf is not None and exchange_lower not in ("synthetic",):
-            # Donor-fetch memoization (ema_vwap-qx8o): batch sweeps repeatedly hit the
-            # same (exchange, symbol, donor_tf, limit, days) combination; skip the
-            # redundant recursive fetch + resample when done recently.
-            donor_key = (exchange_lower, str(symbol), donor_tf, int(limit or 0), days)
-            now = time.time()
-            cached_ts = cls._donor_fetch_cache.get(donor_key)
-            if cached_ts is not None and (now - cached_ts) < cls._DONOR_CACHE_TTL:
-                pass  # Donor fetched recently; skip redundant fetch + resample
-            else:
-                # Recursively fetch and resample the donor timeframe
-                cls.load_candles(
-                    exchange=exchange,
-                    symbol=symbol,
-                    timeframe=donor_tf,
-                    limit=limit,
-                    days=days,
-                    use_cache=use_cache,
-                )
-                donor_df = db.load_candles(
-                    exchange=exchange_lower, symbol=symbol, timeframe=donor_tf
-                )
-                if not donor_df.empty:
-                    cls.resample_and_upsert(
-                        exchange=exchange_lower,
-                        symbol=symbol,
-                        df=donor_df,
-                        base_timeframe=donor_tf,
-                        target_tfs=[timeframe],
-                    )
-                cls._donor_fetch_cache[donor_key] = now
-
         spec = get_timeframe_spec(timeframe, "crypto")
         tf_per_day = spec.bars_per_day_crypto
 
@@ -539,22 +627,127 @@ class DataLoader:
         else:
             target_limit = limit or 500
 
+        cached_df = pd.DataFrame()
         # Check local DB cache (exchanges only; synthetic is always generated fresh)
-        if use_cache and exchange_lower != "synthetic":
-            cached_df = db.load_candles(
+        if use_cache and exchange_lower not in ("synthetic", "synthetic_stock"):
+            cached_df = await load_candles_pg(
                 exchange=exchange,
                 symbol=symbol,
                 timeframe=timeframe,
                 limit=target_limit,
+                data_origin="provider",
             )
             if len(cached_df) >= target_limit:
-                print(
-                    f"[DataLoader] Loaded {len(cached_df)} candles for {symbol} ({exchange}) directly from SQLite DB."
+                if cls._cache_is_fresh(cached_df, timeframe):
+                    print(
+                        f"[DataLoader] Loaded {len(cached_df)} candles for {symbol} ({exchange}) from DB."
+                    )
+                    return cached_df
+                else:
+                    print(
+                        f"[DataLoader] DB cache for {symbol} ({exchange}, {timeframe}) is stale. "
+                        f"Fetching fresh data from exchange."
+                    )
+
+        if exchange_lower == "kucoin" and timeframe.lower() == "3m":
+            donor_limit = max(
+                int(limit or 0),
+                int(float(days) * 1440) if days is not None else int(limit or 500),
+            )
+            donor_df = (
+                await load_candles_pg(
+                    exchange=exchange_lower,
+                    symbol=symbol,
+                    timeframe="1m",
+                    limit=donor_limit,
+                    data_origin="provider",
+                    include_provenance=True,
                 )
-                return cached_df
+                if use_cache
+                else pd.DataFrame()
+            )
+            donor_is_current = len(donor_df) >= donor_limit and cls._cache_is_fresh(
+                donor_df, "1m"
+            )
+            donor_fetched = not donor_is_current
+            if donor_fetched:
+                donor_df = await cls._fetch_and_store(
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe="1m",
+                    days=days,
+                    limit=donor_limit,
+                    target_tfs=["3m"],
+                )
+
+            target_df = await load_candles_pg(
+                exchange=exchange_lower,
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=target_limit,
+                data_origin="provider",
+            )
+            if (
+                donor_is_current
+                and not donor_df.empty
+                and len(target_df) < target_limit
+            ):
+                await cls.resample_and_upsert(
+                    exchange=exchange_lower,
+                    symbol=symbol,
+                    df=donor_df,
+                    base_timeframe="1m",
+                    target_tfs=["3m"],
+                )
+                target_df = await load_candles_pg(
+                    exchange=exchange_lower,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    limit=target_limit,
+                    data_origin="provider",
+                )
+            return target_df if not target_df.empty else cached_df
+
+        if donor_tf is not None and exchange_lower not in (
+            "synthetic",
+            "synthetic_stock",
+        ):
+            # Donor-fetch memoization (ema_vwap-qx8o): batch sweeps repeatedly hit the
+            # same (exchange, symbol, donor_tf, limit, days) combination; skip the
+            # redundant recursive fetch + resample when done recently.
+            donor_key = (exchange_lower, str(symbol), donor_tf, int(limit or 0), days)
+            now = time.time()
+            cached_ts = cls._donor_fetch_cache.get(donor_key)
+            if cached_ts is None or (now - cached_ts) >= cls._DONOR_CACHE_TTL:
+                await cls.load_candles(
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=donor_tf,
+                    limit=limit,
+                    days=days,
+                    use_cache=use_cache,
+                )
+                donor_df = await load_candles_pg(
+                    exchange=exchange_lower,
+                    symbol=symbol,
+                    timeframe=donor_tf,
+                    data_origin="provider",
+                    include_provenance=True,
+                )
+                if not donor_df.empty:
+                    await cls.resample_and_upsert(
+                        exchange=exchange_lower,
+                        symbol=symbol,
+                        df=donor_df,
+                        base_timeframe=donor_tf,
+                        target_tfs=[timeframe],
+                        data_origin="provider",
+                        source_timeframe=donor_tf,
+                    )
+                cls._donor_fetch_cache[donor_key] = now
 
         # Fetch fresh data using shared method (ema_vwap-plkq)
-        df = cls._fetch_and_store(
+        df = await cls._fetch_and_store(
             exchange=exchange,
             symbol=symbol,
             timeframe=timeframe,
@@ -568,7 +761,7 @@ class DataLoader:
         return df
 
     @classmethod
-    def fetch_and_update_candles(
+    async def fetch_and_update_candles(
         cls,
         exchange: str = "kucoin",
         symbol: str = "BTC/USD",
@@ -581,14 +774,14 @@ class DataLoader:
         Falls back to DB cache gracefully on network or rate limit failure.
         """
         exchange_lower = exchange.lower()
-        if exchange_lower == "synthetic":
+        if exchange_lower in ("synthetic", "synthetic_stock"):
             return cls.generate_synthetic_candles(
                 symbol=symbol, timeframe=timeframe, num_bars=limit
             )
 
         # Use shared fetch + store method (ema_vwap-plkq)
         try:
-            df = cls._fetch_and_store(
+            df = await cls._fetch_and_store(
                 exchange=exchange,
                 symbol=symbol,
                 timeframe=timeframe,
@@ -600,10 +793,113 @@ class DataLoader:
             )
 
         # Return latest `limit` candles from DB
-        df = db.load_candles(
+        df = await load_candles_pg(
             exchange=exchange_lower,
             symbol=symbol,
             timeframe=timeframe,
             limit=limit,
+            data_origin="provider",
         )
         return df
+
+    @classmethod
+    def load_candles_sync(
+        cls,
+        exchange: str = "kucoin",
+        symbol: str = "BTC/USD",
+        timeframe: str = "5m",
+        limit: int = 500,
+        days: int | None = None,
+        use_cache: bool = True,
+    ) -> pd.DataFrame:
+        """Synchronous wrapper for load_candles. Handles running in threads.
+
+        Uses a long run_async timeout (600s): multi-year candle loads
+        (e.g. 365d of 1m = ~525k bars, live fetch + PG persist) legitimately
+        take minutes; the 30s default produced bare TimeoutErrors -> HTTP 500
+        on /api/walk_forward and /api/strategy/validate.
+        """
+        from src.sync_bridge import run_async
+
+        return run_async(
+            cls.load_candles(
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=limit,
+                days=days,
+                use_cache=use_cache,
+            ),
+            timeout=600.0,
+        )
+
+    @classmethod
+    def fetch_and_update_candles_sync(
+        cls,
+        exchange: str = "kucoin",
+        symbol: str = "BTC/USD",
+        timeframe: str = "5m",
+        limit: int = 200,
+    ) -> pd.DataFrame:
+        """Synchronous wrapper for fetch_and_update_candles.
+
+        Routes through run_async so the fetch+upsert coroutine runs on the
+        MAIN event loop, where the asyncpg pools are bound. asyncio.run()
+        here would drive pool-bound connections from a throwaway loop and
+        corrupt the pool ("cannot perform operation: another operation is
+        in progress"), killing the server process (ema_vwap polling crash).
+
+        Uses a long run_async timeout (600s): live fetch + PG upsert from
+        the exchange can take minutes for slow endpoints or large gaps.
+        """
+        from src.sync_bridge import run_async
+
+        return run_async(
+            cls.fetch_and_update_candles(
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=limit,
+            ),
+            timeout=600.0,
+        )
+
+
+# -------------------------------------------------------------------
+# Phase 4 (ema_vwap-0w9): Multi-Timeframe Data Loader Framework
+# -------------------------------------------------------------------
+# Option A: 1m candles for regime classification, 5m (or target tf) for trading.
+# The 1m data is cached after first fetch (acceptable overhead per user approval).
+# Full integration: backtester passes 1m df to strategy/classify_regime().
+# This is the framework hook; full data flow requires backtester integration.
+
+# Multi-timeframe cache keys for regime classification
+_multi_tf_cache: dict = {}
+
+
+def fetch_1m_for_regime_classify(
+    exchange: str, symbol: str, days: int = 90
+) -> pd.DataFrame:
+    """Fetch 1m candles (cached) for multi-timeframe regime classification (Phase 4)."""
+    from src.data_loader import DataLoader
+    from src.sync_bridge import run_async
+
+    key = (exchange, symbol, "1m_regime")
+    cached = _multi_tf_cache.get(key)
+    if cached is not None:
+        return cached.copy()
+
+    result_df = run_async(
+        DataLoader.load_candles(
+            exchange=exchange,
+            symbol=symbol,
+            timeframe="1m",
+            limit=50000,
+            days=days,
+            use_cache=True,
+        ),
+        timeout=300.0,
+    )
+    if result_df is not None and not result_df.empty:
+        _multi_tf_cache[key] = result_df.copy()
+    return result_df.copy() if result_df is not None else pd.DataFrame()

@@ -47,7 +47,7 @@ def test_validator_gate1_failure_on_poor_performer():
 
 
 def test_validator_full_pipeline_robust():
-    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=42)
+    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=0)
     # Reasonable trending crossover parameters
     params = StrategyParams(
         strategy_mode="crossover",
@@ -88,7 +88,7 @@ def test_validator_full_pipeline_robust():
 
 
 def test_validator_multi_objective_pipeline():
-    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=42)
+    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=0)
     params = StrategyParams(
         strategy_mode="crossover",
         fast_ema=5,
@@ -175,38 +175,43 @@ def test_validator_mc_risk_custom_criteria_overrides_settings():
             pass  # File may be locked by another process; best-effort cleanup
 
 
-def test_validator_mc_risk_with_settings_manager():
+def test_validator_mc_risk_with_settings_manager(pg_container):
     """Test that StrategyValidator can read MC risk from SettingsManager."""
+    import asyncio as _asyncio
 
-    # Use a temp db; cleanup best-effort (Windows file locks may persist)
-    with tempfile.NamedTemporaryFile(suffix="_system_mc_test.db", delete=False) as tmp:
-        tmp_db_path = tmp.name
-    try:
-        db = CandleDatabase(db_path=tmp_db_path)
-        mgr = SettingsManager(db)
+    from src.sync_bridge import get_main_loop
 
-        # Defaults should be read
-        validator = StrategyValidator(settings_mgr=mgr)
-        assert validator.criteria.max_monte_carlo_ruin_pct == 5.0
-        assert validator.criteria.max_monte_carlo_drawdown_pct == 35.0
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
 
-        # Custom values should override
-        mgr.set("max_monte_carlo_ruin_pct", 10.0)
-        mgr.set("max_monte_carlo_drawdown_pct", 50.0)
-        validator2 = StrategyValidator(settings_mgr=mgr)
-        assert validator2.criteria.max_monte_carlo_ruin_pct == 10.0
-        assert validator2.criteria.max_monte_carlo_drawdown_pct == 50.0
-    finally:
-        try:
-            os.unlink(tmp_db_path)
-        except PermissionError:
-            pass  # File may be locked by another process; best-effort cleanup
+        pool = get_pg_manager().get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM settings WHERE key IN "
+                "('max_monte_carlo_ruin_pct', 'max_monte_carlo_drawdown_pct')"
+            )
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(timeout=10)
+
+    mgr = SettingsManager()
+
+    # Defaults should be read
+    validator = StrategyValidator(settings_mgr=mgr)
+    assert validator.criteria.max_monte_carlo_ruin_pct == 5.0
+    assert validator.criteria.max_monte_carlo_drawdown_pct == 35.0
+
+    # Custom values should override
+    mgr.set("max_monte_carlo_ruin_pct", 10.0)
+    mgr.set("max_monte_carlo_drawdown_pct", 50.0)
+    validator2 = StrategyValidator(settings_mgr=mgr)
+    assert validator2.criteria.max_monte_carlo_ruin_pct == 10.0
+    assert validator2.criteria.max_monte_carlo_drawdown_pct == 50.0
 
 
 def test_validator_gate2_metrics_and_drawdown_penalized_scoring():
     """Verify Gate 2 reports both oos_total_return_pct and avg_oos_return_pct,
     and Gate 1 evaluates drawdown_penalized_sharpe and drawdown_penalized_sortino."""
-    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=42)
+    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=0)
     params = StrategyParams(
         strategy_mode="crossover",
         fast_ema=5,
@@ -249,7 +254,7 @@ def test_validator_gate2_metrics_and_drawdown_penalized_scoring():
 
 
 def test_validator_timeframe_aware_gate2():
-    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=42)
+    df = DataLoader.generate_synthetic_candles(num_bars=300, seed=0)
     params = StrategyParams(
         strategy_mode="crossover",
         fast_ema=5,

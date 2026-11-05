@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from src.auth import get_api_key
+from src.pg_database import get_alerts_pg
 
 router = APIRouter(tags=["Alerts"])
 
@@ -43,9 +44,9 @@ def create_alert(req: CreateAlertRequest) -> dict[str, Any]:
 
 
 @router.get("/api/alerts", dependencies=[Depends(get_api_key)])
-def list_alerts(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+async def list_alerts(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
     """Return recent alert history (most recent first)."""
-    alerts = _st()._system_db.get_alerts(limit=limit)
+    alerts = await get_alerts_pg(limit=limit)
     return {"status": "success", "count": len(alerts), "alerts": alerts}
 
 

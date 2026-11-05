@@ -7,11 +7,9 @@ Defines User, Role, Permission, and API Key models with SQLAlchemy.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from uuid import uuid4
-
-from src.database import CandleDatabase
 
 
 class RoleName(str, Enum):
@@ -173,7 +171,7 @@ class User:
 
     def is_locked(self) -> bool:
         return bool(
-            self.locked_until and datetime.now(timezone.utc) < self.locked_until
+            self.locked_until and datetime.now(UTC) < self.locked_until
         )
 
 
@@ -204,7 +202,7 @@ class APIKey:
     created_by: str = ""
 
     def is_expired(self) -> bool:
-        return bool(self.expires_at and datetime.now(timezone.utc) > self.expires_at)
+        return bool(self.expires_at and datetime.now(UTC) > self.expires_at)
 
     def to_dict(self, include_key: bool = False) -> dict:
         data = {
@@ -221,18 +219,29 @@ class APIKey:
         return data
 
 
-# Database operations
+# Database operations (PostgreSQL — async methods, awaited directly by deps)
 class UserManager:
-    """Manages user accounts in the system database."""
+    """Manages user accounts in the PostgreSQL system database.
 
-    def __init__(self, db: CandleDatabase):
-        self.db = db
-        self._ensure_tables()
+    All methods are async: they are called from async FastAPI dependencies
+    running on the main event loop, so they must be awaited directly
+    (never routed through sync_bridge — that would break the asyncpg pool).
+    """
 
-    def _ensure_tables(self):
-        """Create user tables if they don't exist."""
-        with self.db.get_connection() as conn:
-            conn.execute(
+    def __init__(self, db=None):
+        # db arg kept for backward compat; PG pool is used internally.
+        self._tables_ready = False
+
+    async def _ensure_tables(self):
+        """Create user tables if they don't exist (idempotent, lazy)."""
+        if self._tables_ready:
+            return
+        from src.pg_connection_manager import get_pg_manager
+
+        mgr = get_pg_manager()
+        pool = mgr.get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY,
@@ -241,55 +250,49 @@ class UserManager:
                     password_hash TEXT NOT NULL,
                     full_name TEXT DEFAULT '',
                     role TEXT NOT NULL DEFAULT 'viewer',
-                    is_active INTEGER DEFAULT 1,
-                    is_superuser INTEGER DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    last_login TEXT,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    is_superuser BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    last_login TIMESTAMPTZ,
                     failed_login_attempts INTEGER DEFAULT 0,
-                    locked_until TEXT,
+                    locked_until TIMESTAMPTZ,
                     api_key TEXT UNIQUE NOT NULL,
-                    api_key_created_at TEXT,
-                    api_key_last_used TEXT,
+                    api_key_created_at TIMESTAMPTZ,
+                    api_key_last_used TIMESTAMPTZ,
                     current_session_id TEXT
                 )
             """
             )
-            conn.execute(
+            await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS api_keys (
                     key TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
                     name TEXT NOT NULL,
                     description TEXT DEFAULT '',
-                    permissions TEXT DEFAULT '[]',
-                    is_active INTEGER DEFAULT 1,
-                    expires_at TEXT,
-                    created_at TEXT NOT NULL,
-                    last_used TEXT,
+                    permissions JSONB DEFAULT '[]',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    expires_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    last_used TIMESTAMPTZ,
                     created_by TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users (id)
                 )
             """
             )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)
-            """
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)"
             )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)
-            """
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)"
             )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id)
-            """
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id)"
             )
-            conn.commit()
+        self._tables_ready = True
 
-    def create_user(
+    async def create_user(
         self,
         username: str,
         email: str,
@@ -299,6 +302,7 @@ class UserManager:
         is_superuser: bool = False,
     ) -> User:
         """Create a new user."""
+        await self._ensure_tables()
         user = User(
             username=username,
             email=email,
@@ -307,166 +311,147 @@ class UserManager:
             role=role,
             is_superuser=is_superuser,
         )
+        from src.pg_connection_manager import get_pg_manager
 
-        with self.db.get_connection() as conn:
-            conn.execute(
+        mgr = get_pg_manager()
+        pool = mgr.get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute(
                 """
                 INSERT INTO users (id, username, email, password_hash, full_name, role,
-                                 is_active, is_superuser, created_at, updated_at,
-                                 api_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   is_active, is_superuser, created_at, updated_at, api_key)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             """,
-                (
-                    user.id,
-                    user.username,
-                    user.email,
-                    user.password_hash,
-                    user.full_name,
-                    user.role.value,
-                    int(user.is_active),
-                    int(user.is_superuser),
-                    user.created_at.isoformat(),
-                    user.updated_at.isoformat(),
-                    user.api_key,
-                ),
+                user.id,
+                user.username,
+                user.email,
+                user.password_hash,
+                user.full_name,
+                user.role.value,
+                user.is_active,
+                user.is_superuser,
+                user.created_at,
+                user.updated_at,
+                user.api_key,
             )
-            conn.commit()
-
         return user
 
-    def get_user(self, user_id: str) -> User | None:
+    async def _fetch_user(self, where: str, arg) -> User | None:
+        await self._ensure_tables()
+        from src.pg_connection_manager import get_pg_manager
+
+        mgr = get_pg_manager()
+        pool = mgr.get_pool("system")
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(f"SELECT * FROM users WHERE {where} = $1", arg)
+        if not row:
+            return None
+        return self._row_to_user(row)
+
+    async def get_user(self, user_id: str) -> User | None:
         """Get user by ID."""
-        with self.db.get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM users WHERE id = ?", (user_id,)
-            ).fetchone()
-            if not row:
-                return None
-            return self._row_to_user(row)
+        return await self._fetch_user("id", user_id)
 
-    def get_user_by_username(self, username: str) -> User | None:
+    async def get_user_by_username(self, username: str) -> User | None:
         """Get user by username."""
-        with self.db.get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM users WHERE username = ?", (username,)
-            ).fetchone()
-            if not row:
-                return None
-            return self._row_to_user(row)
+        return await self._fetch_user("username", username)
 
-    def get_user_by_email(self, email: str) -> User | None:
+    async def get_user_by_email(self, email: str) -> User | None:
         """Get user by email."""
-        with self.db.get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM users WHERE email = ?", (email,)
-            ).fetchone()
-            if not row:
-                return None
-            return self._row_to_user(row)
+        return await self._fetch_user("email", email)
 
-    def get_user_by_api_key(self, api_key: str) -> User | None:
+    async def get_user_by_api_key(self, api_key: str) -> User | None:
         """Get user by API key."""
-        with self.db.get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM users WHERE api_key = ?", (api_key,)
-            ).fetchone()
-            if not row:
-                return None
-            return self._row_to_user(row)
+        return await self._fetch_user("api_key", api_key)
 
-    def update_user(self, user: User) -> bool:
+    async def update_user(self, user: User) -> bool:
         """Update user record."""
-        user.updated_at = datetime.now(timezone.utc)
-        with self.db.get_connection() as conn:
-            conn.execute(
+        await self._ensure_tables()
+        user.updated_at = datetime.now(UTC)
+        from src.pg_connection_manager import get_pg_manager
+
+        mgr = get_pg_manager()
+        pool = mgr.get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute(
                 """
-                UPDATE users SET username = ?, email = ?, password_hash = ?,
-                               full_name = ?, role = ?, is_active = ?,
-                               is_superuser = ?, updated_at = ?,
-                               last_login = ?, failed_login_attempts = ?,
-                               locked_until = ?, api_key = ?,
-                               api_key_created_at = ?, api_key_last_used = ?,
-                               current_session_id = ?
-                WHERE id = ?
+                UPDATE users SET username = $1, email = $2, password_hash = $3,
+                               full_name = $4, role = $5, is_active = $6,
+                               is_superuser = $7, updated_at = $8,
+                               last_login = $9, failed_login_attempts = $10,
+                               locked_until = $11, api_key = $12,
+                               api_key_created_at = $13, api_key_last_used = $14,
+                               current_session_id = $15
+                WHERE id = $16
             """,
-                (
-                    user.username,
-                    user.email,
-                    user.password_hash,
-                    user.full_name,
-                    user.role.value,
-                    int(user.is_active),
-                    int(user.is_superuser),
-                    user.updated_at.isoformat(),
-                    user.last_login.isoformat() if user.last_login else None,
-                    user.failed_login_attempts,
-                    user.locked_until.isoformat() if user.locked_until else None,
-                    user.api_key,
-                    (
-                        user.api_key_created_at.isoformat()
-                        if user.api_key_created_at
-                        else None
-                    ),
-                    (
-                        user.api_key_last_used.isoformat()
-                        if user.api_key_last_used
-                        else None
-                    ),
-                    user.current_session_id,
-                    user.id,
-                ),
+                user.username,
+                user.email,
+                user.password_hash,
+                user.full_name,
+                user.role.value,
+                user.is_active,
+                user.is_superuser,
+                user.updated_at,
+                user.last_login,
+                user.failed_login_attempts,
+                user.locked_until,
+                user.api_key,
+                user.api_key_created_at,
+                user.api_key_last_used,
+                user.current_session_id,
+                user.id,
             )
-            conn.commit()
         return True
 
-    def delete_user(self, user_id: str) -> bool:
+    async def delete_user(self, user_id: str) -> bool:
         """Delete user."""
-        with self.db.get_connection() as conn:
-            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
-            conn.execute("DELETE FROM api_keys WHERE user_id = ?", (user_id,))
-            conn.commit()
+        await self._ensure_tables()
+        from src.pg_connection_manager import get_pg_manager
+
+        mgr = get_pg_manager()
+        pool = mgr.get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM api_keys WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM users WHERE id = $1", user_id)
         return True
 
-    def list_users(self, active_only: bool = False) -> list[User]:
+    async def list_users(self, active_only: bool = False) -> list[User]:
         """List all users."""
-        with self.db.get_connection() as conn:
-            query = "SELECT * FROM users"
+        await self._ensure_tables()
+        from src.pg_connection_manager import get_pg_manager
+
+        mgr = get_pg_manager()
+        pool = mgr.get_pool("system")
+        async with pool.acquire() as conn:
             if active_only:
-                query += " WHERE is_active = 1"
-            rows = conn.execute(query).fetchall()
-            return [self._row_to_user(row) for row in rows]
+                rows = await conn.fetch("SELECT * FROM users WHERE is_active = TRUE")
+            else:
+                rows = await conn.fetch("SELECT * FROM users")
+        return [self._row_to_user(r) for r in rows]
 
     def _row_to_user(self, row) -> User:
-        """Convert database row to User object."""
+        """Convert a database row (dict-like) to a User object."""
         return User(
-            id=row[0],
-            username=row[1],
-            email=row[2],
-            password_hash=row[3],
-            full_name=row[3] if len(row) > 3 else "",  # Handle schema
-            role=RoleName(row[4]),
-            is_active=bool(row[5]),
-            is_superuser=bool(row[6]),
-            created_at=(
-                datetime.fromisoformat(row[7]) if row[7] else datetime.now(timezone.utc)
-            ),
-            updated_at=(
-                datetime.fromisoformat(row[8]) if row[8] else datetime.now(timezone.utc)
-            ),
-            last_login=datetime.fromisoformat(row[9]) if row[9] else None,
-            failed_login_attempts=row[10] if len(row) > 10 else 0,
-            locked_until=datetime.fromisoformat(row[11]) if row[11] else None,
-            api_key=row[12] if len(row) > 12 else "",
-            api_key_created_at=(
-                datetime.fromisoformat(row[13]) if len(row) > 13 and row[13] else None
-            ),
-            api_key_last_used=(
-                datetime.fromisoformat(row[14]) if len(row) > 14 and row[14] else None
-            ),
-            current_session_id=row[15] if len(row) > 15 else None,
+            id=row["id"],
+            username=row["username"],
+            email=row["email"],
+            password_hash=row["password_hash"],
+            full_name=row["full_name"] or "",
+            role=RoleName(row["role"]),
+            is_active=bool(row["is_active"]),
+            is_superuser=bool(row["is_superuser"]),
+            created_at=row["created_at"] or datetime.now(UTC),
+            updated_at=row["updated_at"] or datetime.now(UTC),
+            last_login=row["last_login"],
+            failed_login_attempts=row["failed_login_attempts"] or 0,
+            locked_until=row["locked_until"],
+            api_key=row["api_key"] or "",
+            api_key_created_at=row["api_key_created_at"],
+            api_key_last_used=row["api_key_last_used"],
+            current_session_id=row["current_session_id"],
         )
 
-    def create_api_key(
+    async def create_api_key(
         self,
         user_id: str,
         name: str,
@@ -476,6 +461,9 @@ class UserManager:
         created_by: str = "",
     ) -> APIKey:
         """Create a new API key for a user."""
+        import json
+
+        await self._ensure_tables()
         api_key = APIKey(
             user_id=user_id,
             name=name,
@@ -484,69 +472,88 @@ class UserManager:
             expires_at=expires_at,
             created_by=created_by,
         )
+        from src.pg_connection_manager import get_pg_manager
 
-        with self.db.get_connection() as conn:
-            conn.execute(
+        mgr = get_pg_manager()
+        pool = mgr.get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute(
                 """
                 INSERT INTO api_keys (key, user_id, name, description, permissions,
                                      is_active, expires_at, created_at, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             """,
-                (
-                    api_key.key,
-                    api_key.user_id,
-                    api_key.name,
-                    api_key.description,
-                    "[" + ",".join(f'"{p.value}"' for p in api_key.permissions) + "]",
-                    int(api_key.is_active),
-                    api_key.expires_at.isoformat() if api_key.expires_at else None,
-                    api_key.created_at.isoformat(),
-                    api_key.created_by,
-                ),
+                api_key.key,
+                api_key.user_id,
+                api_key.name,
+                api_key.description,
+                json.dumps([p.value for p in api_key.permissions]),
+                api_key.is_active,
+                api_key.expires_at,
+                api_key.created_at,
+                api_key.created_by,
             )
-            conn.commit()
-
         return api_key
 
-    def get_api_key(self, key: str) -> APIKey | None:
+    async def get_api_key(self, key: str) -> APIKey | None:
         """Get API key by key string."""
-        with self.db.get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM api_keys WHERE key = ?", (key,)
-            ).fetchone()
-            if not row:
-                return None
-            return self._row_to_api_key(row)
+        await self._ensure_tables()
+        from src.pg_connection_manager import get_pg_manager
 
-    def list_api_keys(self, user_id: str) -> list[APIKey]:
+        mgr = get_pg_manager()
+        pool = mgr.get_pool("system")
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM api_keys WHERE key = $1", key)
+        if not row:
+            return None
+        return self._row_to_api_key(row)
+
+    async def list_api_keys(self, user_id: str) -> list[APIKey]:
         """List API keys for a user."""
-        with self.db.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM api_keys WHERE user_id = ?", (user_id,)
-            ).fetchall()
-            return [self._row_to_api_key(row) for row in rows]
+        await self._ensure_tables()
+        from src.pg_connection_manager import get_pg_manager
 
-    def revoke_api_key(self, key: str) -> bool:
+        mgr = get_pg_manager()
+        pool = mgr.get_pool("system")
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM api_keys WHERE user_id = $1", user_id
+            )
+        return [self._row_to_api_key(r) for r in rows]
+
+    async def revoke_api_key(self, key: str) -> bool:
         """Revoke an API key."""
-        with self.db.get_connection() as conn:
-            conn.execute("UPDATE api_keys SET is_active = 0 WHERE key = ?", (key,))
-            conn.commit()
+        await self._ensure_tables()
+        from src.pg_connection_manager import get_pg_manager
+
+        mgr = get_pg_manager()
+        pool = mgr.get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE api_keys SET is_active = FALSE WHERE key = $1", key
+            )
         return True
 
     def _row_to_api_key(self, row) -> APIKey:
+        """Convert a database row (dict-like) to an APIKey object."""
         import json
 
+        perms_raw = row["permissions"]
+        if isinstance(perms_raw, str):
+            try:
+                perms_raw = json.loads(perms_raw)
+            except (json.JSONDecodeError, TypeError):
+                perms_raw = []
+
         return APIKey(
-            key=row[0],
-            user_id=row[1],
-            name=row[2],
-            description=row[3] or "",
-            permissions={PermissionName(p) for p in json.loads(row[4])},
-            is_active=bool(row[5]),
-            expires_at=datetime.fromisoformat(row[6]) if row[6] else None,
-            created_at=(
-                datetime.fromisoformat(row[7]) if row[7] else datetime.now(timezone.utc)
-            ),
-            last_used=datetime.fromisoformat(row[8]) if row[8] else None,
-            created_by=row[9] or "",
+            key=row["key"],
+            user_id=row["user_id"],
+            name=row["name"],
+            description=row["description"] or "",
+            permissions={PermissionName(p) for p in (perms_raw or [])},
+            is_active=bool(row["is_active"]),
+            expires_at=row["expires_at"],
+            created_at=row["created_at"] or datetime.now(UTC),
+            last_used=row["last_used"],
+            created_by=row["created_by"] or "",
         )

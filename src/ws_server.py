@@ -13,13 +13,38 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+
+class DateTimeEncoder(json.JSONEncoder):
+    """JSON encoder that handles datetime and other non-serializable types."""
+
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        # Handle other common non-serializable types
+        if hasattr(obj, "isoformat"):  # date, time, etc.
+            return obj.isoformat()
+        if hasattr(obj, "__dict__"):  # custom objects
+            return obj.__dict__
+        return super().default(obj)
+
+
 logger = logging.getLogger(__name__)
+
+
+def _engine():
+    """Return the app's configured engine (src.app._paper_engine, constructed
+    with db + settings_mgr) at call time — the same object the main app's
+    route (src/routes/ws.py) serves. Call-time import avoids import cycles
+    and keeps monkeypatched tests working."""
+    import src.app as m
+
+    return m._paper_engine
 
 
 class WebSocketManager:
@@ -33,7 +58,7 @@ class WebSocketManager:
         # Verify API key before accepting connection
         from src.auth.security import verify_api_key
 
-        if not api_key or not verify_api_key(api_key):
+        if not api_key or not await verify_api_key(api_key):
             await websocket.close(code=4001, reason="Invalid or missing API key")
             logger.warning("[WebSocket] Connection rejected: invalid API key")
             return
@@ -62,7 +87,7 @@ class WebSocketManager:
         if not self.active_connections:
             return
 
-        data = json.dumps(message)
+        data = json.dumps(message, cls=DateTimeEncoder)
         async with self._lock:
             targets = list(self.active_connections)
 
@@ -89,7 +114,7 @@ class WebSocketManager:
     async def send_personal(self, websocket: WebSocket, message: dict[str, Any]):
         """Send a message to a specific client."""
         try:
-            await websocket.send_text(json.dumps(message))
+            await websocket.send_text(json.dumps(message, cls=DateTimeEncoder))
         except RuntimeError:  # Connection closed
             await self.disconnect(websocket)
 
@@ -100,18 +125,17 @@ ws_manager = WebSocketManager()
 @asynccontextmanager
 async def ws_lifespan(app: FastAPI):
     """Background task for periodic dashboard updates."""
-    from src.paper.engine import _paper_engine
 
     async def periodic_update():
         while True:
             await asyncio.sleep(5)  # 5-second update interval
             try:
-                status = _paper_engine.get_status()
+                status = await _engine().get_status()
                 await ws_manager.broadcast(
                     {
                         "type": "status_update",
                         "data": status,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }
                 )
             except Exception as e:
@@ -149,15 +173,13 @@ def create_ws_app() -> FastAPI:
         await ws_manager.connect(websocket)
         try:
             # Send initial status
-            from src.paper.engine import _paper_engine
-
-            status = _paper_engine.get_status()
+            status = await _engine().get_status()
             await ws_manager.send_personal(
                 websocket,
                 {
                     "type": "init",
                     "data": status,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                 },
             )
 
@@ -173,7 +195,7 @@ def create_ws_app() -> FastAPI:
                             websocket,
                             {
                                 "type": "pong",
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": datetime.now(UTC).isoformat(),
                             },
                         )
                     elif msg_type == "subscribe":
@@ -184,27 +206,27 @@ def create_ws_app() -> FastAPI:
                             {
                                 "type": "subscribed",
                                 "channels": channels,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": datetime.now(UTC).isoformat(),
                             },
                         )
                     elif msg_type == "get_status":
-                        status = _paper_engine.get_status()
+                        status = await _engine().get_status()
                         await ws_manager.send_personal(
                             websocket,
                             {
                                 "type": "status_update",
                                 "data": status,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": datetime.now(UTC).isoformat(),
                             },
                         )
                     elif msg_type == "get_positions":
-                        positions = _paper_engine.ledger.list_positions()
+                        positions = await _engine().ledger.alist_positions()
                         await ws_manager.send_personal(
                             websocket,
                             {
                                 "type": "positions_update",
                                 "data": [p.to_dict() for p in positions],
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": datetime.now(UTC).isoformat(),
                             },
                         )
                     elif msg_type == "step_engine":
@@ -214,16 +236,16 @@ def create_ws_app() -> FastAPI:
                             {
                                 "type": "error",
                                 "data": "step_engine command disabled: WebSocket requires API key authentication via X-API-Key header.",
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": datetime.now(UTC).isoformat(),
                             },
                         )
                         # Broadcast updated status to all
-                        status = _paper_engine.get_status()
+                        status = await _engine().get_status()
                         await ws_manager.broadcast(
                             {
                                 "type": "status_update",
                                 "data": status,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "timestamp": datetime.now(UTC).isoformat(),
                             },
                         )
 

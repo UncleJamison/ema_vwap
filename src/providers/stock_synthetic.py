@@ -5,7 +5,7 @@ overnight gap jumps, U-shaped intraday volume profiles, and optional simulated c
 """
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
 import numpy as np
@@ -82,7 +82,7 @@ class SyntheticStockAdapter(BaseDataProvider):
         bar_mins = tf_minutes_map.get(timeframe.lower(), 5)
 
         # Build trading days backwards from today
-        end_date = datetime.now(timezone.utc).date()
+        end_date = datetime.now(UTC).date()
         trading_days = []
         cur_date = end_date - timedelta(days=days * 2)  # buffer for weekends
 
@@ -128,7 +128,7 @@ class SyntheticStockAdapter(BaseDataProvider):
                     13,
                     30,
                     0,
-                    tzinfo=timezone.utc,
+                    tzinfo=UTC,
                 ) + timedelta(minutes=bar_offset_min)
 
                 # Intraday volatility and mean reversion

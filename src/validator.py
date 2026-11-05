@@ -162,7 +162,7 @@ class StrategyValidator:
         params: StrategyParams,
         wfo_config: WFOConfig | None = None,
         mc_config: MonteCarloConfig | None = None,
-        n_trials: int = 500,
+        n_trials: int | None = 500,
         target_metric: str = "sharpe_ratio",
         best_optuna_value: float | None = None,
         enable_multi_objective: bool = False,
@@ -198,6 +198,11 @@ class StrategyValidator:
         gate_results: dict[str, GateResult] = {}
         all_warnings: list[str] = []
         failure_reasons: list[str] = []
+
+        # Route may forward req.n_trials=None (field absent) — fall back to
+        # the default budget instead of passing None into OptunaConfig.
+        if n_trials is None:
+            n_trials = 500
 
         # =========================================================================
         # Gate 1: In-Sample Backtest Viability
@@ -297,6 +302,12 @@ class StrategyValidator:
         logger.info("[StrategyValidator] Running Gate 2: Walk-Forward Analysis...")
         wfe = 0.0
         oos_cumulative_return = 0.0
+        # Initialize gate-2 state upfront so the exception path below can
+        # never reference unassigned locals (UnboundLocalError → HTTP 500).
+        g2_passed = False
+        g2_warnings: list[str] = []
+        g2_status = "FAIL"
+        g2_metrics: dict[str, Any] = {}
         try:
             effective_bpd = bars_per_day
             if effective_bpd is None or effective_bpd <= 0:

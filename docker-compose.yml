@@ -1,6 +1,32 @@
 #version: "3.8"
 
 services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    pull_policy: never
+    container_name: ema_vwap_timescaledb
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=ema_vwap
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./scripts/init-timescaledb.sql:/docker-entrypoint-initdb.d/init-timescaledb.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ema_vwap"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
   ema-vwap-daemon:
     build:
       context: .
@@ -10,8 +36,6 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      # Persistent SQLite WAL database and cache directory
-      - ./data:/app/data
       # Persistent logs directory
       - ./logs:/app/logs
       # Mount application source code
@@ -23,10 +47,18 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
       - IN_DOCKER=1
-      - DB_JOURNAL_MODE=DELETE
-      # API key intentionally NOT set here. Configure via Settings UI
-      # (stored encrypted in data/system.db) or via API_KEY env at runtime.
-      # Never commit a real key to docker-compose.yml.
+      # PostgreSQL connection
+      - PG_HOST=timescaledb
+      - PG_PORT=5432
+      - PG_DATABASE=ema_vwap
+      - PG_USER=postgres
+      - PG_PASSWORD=postgres
+      - PG_SSL_MODE=disable
+      # API key for load testing
+      - API_KEY=test-load-test-key
+    depends_on:
+      timescaledb:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/ && curl -f http://localhost:8080/api/paper/engine/status || exit 1"]
       interval: 30s
@@ -38,3 +70,6 @@ services:
       options:
         max-size: "20m"
         max-file: "5"
+
+volumes:
+  timescaledb_data:

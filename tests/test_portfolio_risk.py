@@ -152,6 +152,7 @@ def test_portfolio_risk_endpoints():
     from src.app import app
 
     client = TestClient(app)
+    headers = {"X-API-Key": "test-key-for-tests"}
 
     # 1. Correlation endpoint
     resp_corr = client.get(
@@ -178,7 +179,9 @@ def test_portfolio_risk_endpoints():
         "allow_fractional": True,
         "include_synthetic": True,
     }
-    resp_size = client.post("/api/portfolio/size_position", json=payload)
+    resp_size = client.post(
+        "/api/portfolio/size_position", json=payload, headers=headers
+    )
     assert resp_size.status_code == 200
     assert resp_size.json()["status"] == "success"
     sizing = resp_size.json()["sizing"]

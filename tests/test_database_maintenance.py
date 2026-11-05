@@ -1,99 +1,188 @@
 """
 Tests for DB maintenance features: get_db_info, repair_database, vacuum_database,
-export_candles_csv, export_candles_json, and corruption/recovery behavior.
+and candle data round-trip (export equivalent).
+
+These tests were written for the old SQLite CandleDatabase. After the migration to
+PostgreSQL, the equivalent maintenance functions live in:
+  - src.db_connection_manager.get_db_info()
+  - src.db_maintenance_multi.get_db_info_all()
+  - src.db_maintenance_multi.repair_database_all()
+  - src.db_maintenance_multi.vacuum_database_all()
+
+Export (CSV/JSON) is no longer a CandleDatabase method; tests verify the candle
+data round-trips through save_candles() -> load_candles() -> pandas to_csv/to_json.
 """
 
-import os
+import pandas as pd
 
 from src.data_loader import DataLoader
 from src.database import CandleDatabase
+from src.db_connection_manager import get_db_info
+from src.db_maintenance_multi import (
+    get_db_info_all,
+    repair_database_all,
+    vacuum_database_all,
+)
+
+# ---------------------------------------------------------------------------
+# get_db_info / get_db_info_all — require real PostgreSQL (pg_container)
+# ---------------------------------------------------------------------------
 
 
-def test_get_db_info_on_healthy_db(tmp_path):
-    db_file = os.path.join(tmp_path, "test_info.db")
-    db = CandleDatabase(db_path=db_file)
-    info = db.get_db_info()
-    assert info.get("integrity_check") == "ok"
-    assert info.get("journal_mode") in ("delete", "wal")
-    assert info.get("file_size_bytes") >= 0
-    assert "tables" in info
+def test_get_db_info_on_healthy_db(pg_container):
+    """get_db_info() should return per-domain info with postgresql engine."""
+    info = get_db_info()
+    assert isinstance(info, dict)
+    for domain_info in info.values():
+        assert domain_info["type"] == "postgresql"
+        assert domain_info["pool_available"] is True
 
 
-def test_repair_database_healthy_reports_healthy(tmp_path):
-    db_file = os.path.join(tmp_path, "test_repair_healthy.db")
-    db = CandleDatabase(db_path=db_file)
-    result = db.repair_database()
-    assert result["status"] == "healthy"
-    assert "no repair needed" in result.get("message", "")
-    assert len(result.get("quarantined_files", [])) == 0
+def test_get_db_info_all_on_healthy_db(pg_container):
+    """get_db_info_all() should report all domains healthy."""
+    info = get_db_info_all()
+    assert info["engine"] == "postgresql"
+    assert info["all_healthy"] is True
+    assert "per_db" in info
+    for domain in ("candles", "batch_results", "paper_trading", "system"):
+        assert domain in info["per_db"]
+        assert info["per_db"][domain]["status"] == "healthy"
 
 
-def test_repair_database_empty_path(tmp_path):
-    db_file = os.path.join(tmp_path, "test_repair_empty.db")
-    # Use a nonexistent path - no need to create first
-    result = CandleDatabase(db_path=db_file).repair_database()
-    assert result["status"] in ("no_file", "healthy")
+# ---------------------------------------------------------------------------
+# repair_database — require real PostgreSQL (pg_container)
+# ---------------------------------------------------------------------------
 
 
-def test_export_candles_csv_empty(tmp_path):
-    db_file = os.path.join(tmp_path, "test_export_empty.db")
-    db = CandleDatabase(db_path=db_file)
-    csv_str = db.export_candles_csv()
-    assert "timestamp,open" in csv_str
+def test_repair_database_healthy_reports_healthy(pg_container):
+    """repair_database_all() should report success on healthy domains."""
+    result = repair_database_all()
+    assert result["status"] == "success"
+    assert result["cross_db_consistent"] is True
+    for domain in ("candles", "batch_results", "paper_trading", "system"):
+        assert result["results_per_db"][domain]["status"] == "success"
 
 
-def test_export_candles_json_empty(tmp_path):
-    db_file = os.path.join(tmp_path, "test_export_json_empty.db")
-    db = CandleDatabase(db_path=db_file)
-    json_str = db.export_candles_json()
-    assert json_str == "[]"
+def test_repair_database_all_cross_db_consistent(pg_container):
+    """repair_database_all() should be cross-db consistent."""
+    result = repair_database_all()
+    assert result["cross_db_consistent"] is True
 
 
-def test_export_candles_csv_with_data(tmp_path):
-    db_file = os.path.join(tmp_path, "test_export_csv.db")
-    db = CandleDatabase(db_path=db_file)
+# ---------------------------------------------------------------------------
+# vacuum_database — require real PostgreSQL (pg_container)
+# ---------------------------------------------------------------------------
+
+
+def test_vacuum_database(pg_container):
+    """vacuum_database_all() should report success."""
+    result = vacuum_database_all()
+    assert result["status"] == "success"
+    assert result["engine"] == "postgresql"
+
+
+# ---------------------------------------------------------------------------
+# Candle data round-trip (replaces export_candles_csv / export_candles_json)
+# ---------------------------------------------------------------------------
+
+
+def _clean_candles(exchange: str, symbol: str, timeframe: str) -> None:
+    """Delete a symbol's candles so round-trip counts are exact."""
+    import asyncio as _asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    async def _delete():
+        from src.pg_connection_manager import get_pg_manager
+
+        pool = get_pg_manager().get_pool("candles")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM candles WHERE exchange = $1 AND symbol = $2 "
+                "AND timeframe = $3",
+                exchange.lower(),
+                symbol,
+                timeframe.lower(),
+            )
+
+    _asyncio.run_coroutine_threadsafe(_delete(), get_main_loop()).result(timeout=10)
+
+
+def test_candles_round_trip_csv(pg_container):
+    """Save candles, load them back, and verify CSV serialization."""
+    _clean_candles("kucoin", "BTC/USD", "5m")
+    db = CandleDatabase(domain="candles")
     df = DataLoader.generate_synthetic_candles(num_bars=5, seed=42)
-    db.save_candles("kucoin", "BTC/USD", "5m", df)
+    saved = db.save_candles("kucoin", "BTC/USD", "5m", df)
+    assert saved == 5
 
-    csv_str = db.export_candles_csv(exchange="kucoin", symbol="BTC/USD", timeframe="5m")
+    loaded = db.load_candles("kucoin", "BTC/USD", "5m")
+    assert len(loaded) == 5
+
+    csv_str = loaded.to_csv(index=False)
     lines = csv_str.splitlines()
-    assert lines[0].startswith("timestamp,open")
+    assert "timestamp" in lines[0]
     assert len(lines) == 6  # header + 5 rows
 
 
-def test_export_candles_json_with_data(tmp_path):
-    db_file = os.path.join(tmp_path, "test_export_json.db")
-    db = CandleDatabase(db_path=db_file)
+def test_candles_round_trip_json(pg_container):
+    """Save candles, load them back, and verify JSON serialization."""
+    _clean_candles("gemini", "ETH/USD", "1h")
+    db = CandleDatabase(domain="candles")
     df = DataLoader.generate_synthetic_candles(num_bars=3, seed=99)
-    db.save_candles("gemini", "ETH/USD", "1h", df)
+    saved = db.save_candles("gemini", "ETH/USD", "1h", df)
+    assert saved == 3
 
-    json_str = db.export_candles_json(
-        exchange="gemini", symbol="ETH/USD", timeframe="1h"
-    )
-    assert '"timestamp"' in json_str or "timestamp" in json_str
+    loaded = db.load_candles("gemini", "ETH/USD", "1h")
+    assert len(loaded) == 3
+
+    json_str = loaded.to_json(orient="records", date_format="iso")
+    assert "timestamp" in json_str or '"timestamp"' in json_str
 
 
-def test_vacuum_database(tmp_path):
-    db_file = os.path.join(tmp_path, "test_vacuum.db")
-    db = CandleDatabase(db_path=db_file)
-    result = db.vacuum_database()
+def test_candles_round_trip_empty_csv(pg_container):
+    """Loading candles for an empty symbol should produce a valid empty CSV."""
+    db = CandleDatabase(domain="candles")
+    loaded = db.load_candles("kucoin", "EMPTY/USD", "5m")
+    assert isinstance(loaded, pd.DataFrame)
+    assert len(loaded) == 0
+
+    # to_csv on an empty DataFrame should not crash and should include timestamp column
+    csv_str = loaded.to_csv(index=False)
+    assert isinstance(csv_str, str)
+    if loaded.columns.tolist():
+        assert "timestamp" in loaded.columns
+
+
+def test_candles_round_trip_empty_json(pg_container):
+    """Loading candles for an empty symbol should produce a valid empty JSON."""
+    db = CandleDatabase(domain="candles")
+    loaded = db.load_candles("kucoin", "EMPTY/USD", "5m")
+    assert len(loaded) == 0
+
+    json_str = loaded.to_json(orient="records", date_format="iso")
+    assert json_str == "[]"
+
+
+# ---------------------------------------------------------------------------
+# Legacy SQLite-only concepts — adapted for PG
+# ---------------------------------------------------------------------------
+
+
+def test_repair_database_empty_path_no_file(pg_container):
+    """PG repair has no concept of a missing file; repair_all handles gracefully."""
+    result = repair_database_all()
+    assert result["status"] in ("success", "partial_failure")
+
+
+def test_get_db_info_integrity_check_on_new_db(pg_container):
+    """PG domains report healthy on a fresh container."""
+    info = get_db_info_all()
+    assert info["all_healthy"] is True
+
+
+def test_repair_database_quarantine_and_rebuild(pg_container):
+    """PG repair_all runs VACUUM ANALYZE on all domains without quarantine."""
+    result = repair_database_all()
+    assert result["any_quarantined"] is False
     assert result["status"] == "success"
-    assert "vacuumed" in result.get("message", "").lower()
-
-
-def test_get_db_info_integrity_check_on_new_db(tmp_path):
-    db_file = os.path.join(tmp_path, "test_integrity_new.db")
-    db = CandleDatabase(db_path=db_file)
-    info = db.get_db_info()
-    assert info.get("integrity_check") == "ok"
-    assert info.get("candle_record_count") == 0
-
-
-def test_repair_database_quarantine_and_rebuild(tmp_path):
-    """Simulate corruption by injecting a corrupt file and verifying repair replaces it."""
-    db_file = os.path.join(tmp_path, "test_repair_corrupt.db")
-    db = CandleDatabase(db_path=db_file)
-    # Manually corrupt DB by removing it and writing garbage to trigger repair on init
-    # Instead, test repair after deleting file and calling repair
-    # This validates repair logic runs end-to-end.
-    assert db.repair_database()["status"] in ("healthy", "success")

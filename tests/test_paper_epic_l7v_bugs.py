@@ -15,15 +15,45 @@ Covers:
 import math
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import pytest
+import pytest as _pytest
 
 from src.database import CandleDatabase
 from src.paper.engine import PaperTradingEngine
 from src.paper.ledger import PaperLedger
 from src.paper.models import PaperPosition
+
+
+@_pytest.fixture(autouse=True)
+def _real_pg_with_clean_state(pg_container):
+    """Use real PostgreSQL (not the autouse mock) with a clean paper state.
+
+    These tests verify end-to-end ledger math against the actual database.
+    Requesting pg_container exempts them from mock_pg_database, and the
+    per-test TRUNCATE isolates each test from the shared database.
+    """
+    import asyncio as _asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    ml = get_main_loop()
+
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
+
+        pool = get_pg_manager().get_pool("paper_trading")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE paper_positions, paper_trade_history, "
+                "paper_ledger_transactions RESTART IDENTITY"
+            )
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), ml).result(timeout=10)
+    yield
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,7 +78,10 @@ def _make_engine(db: CandleDatabase, account_id: str = "default") -> PaperTradin
 
 
 def _fund(ledger: PaperLedger, account_id: str = "default", amount: float = 100_000.0):
-    ledger.deposit(account_id=account_id, amount=amount, notes="test fund")
+    """Fund account with enough to cover amount + typical transaction fees."""
+    ledger.deposit_sync(account_id=account_id, amount=amount, notes="test fund")
+    # Add a small buffer so that buy/sell fees don't cause insufficient funds
+    ledger.deposit_sync(account_id=account_id, amount=100.0, notes="fee buffer")
 
 
 def _open_long(
@@ -62,7 +95,7 @@ def _open_long(
 ):
     cost_basis = entry_price * quantity
     fee = cost_basis * 0.001
-    ledger.record_buy(
+    ledger.record_buy_sync(
         account_id=account_id,
         exchange=exchange,
         symbol=symbol,
@@ -70,7 +103,7 @@ def _open_long(
         price=entry_price,
         fee=fee,
     )
-    bt = bar_time or datetime.now(timezone.utc).isoformat()
+    bt = bar_time or datetime.now(UTC).isoformat()
     pos = PaperPosition(
         account_id=account_id,
         exchange=exchange,
@@ -87,7 +120,7 @@ def _open_long(
         entry_time=bt,
         last_bar_time=bt,
     )
-    ledger.save_position(pos)
+    ledger.save_position_sync(pos)
     return pos
 
 
@@ -102,7 +135,7 @@ def _open_short(
 ):
     cost_basis = entry_price * quantity
     fee = cost_basis * 0.001
-    ledger.record_sell_short(
+    ledger.record_sell_short_sync(
         account_id=account_id,
         exchange=exchange,
         symbol=symbol,
@@ -111,7 +144,7 @@ def _open_short(
         cost_basis=cost_basis,
         fee=fee,
     )
-    bt = bar_time or datetime.now(timezone.utc).isoformat()
+    bt = bar_time or datetime.now(UTC).isoformat()
     pos = PaperPosition(
         account_id=account_id,
         exchange=exchange,
@@ -128,7 +161,7 @@ def _open_short(
         entry_time=bt,
         last_bar_time=bt,
     )
-    ledger.save_position(pos)
+    ledger.save_position_sync(pos)
     return pos
 
 
@@ -141,7 +174,7 @@ def _make_candles(
     close=50_500.0,
     timeframe_minutes=5,
 ):
-    t = start_time or datetime(2024, 1, 1, tzinfo=timezone.utc)
+    t = start_time or datetime(2024, 1, 1, tzinfo=UTC)
     rows = []
     for i in range(n):
         ts = t + timedelta(minutes=timeframe_minutes * i)
@@ -173,14 +206,14 @@ class TestEquityUnification:
         current = 52_000.0
         upnl = (current - entry) * qty
         _open_long(ledger, entry_price=entry, quantity=qty)
-        pos = ledger.get_position("binance", "BTC/USDT")
+        pos = ledger.get_position_sync("binance", "BTC/USDT")
         pos.current_price = current
         pos.unrealized_pnl = upnl
         pos.unrealized_pnl_pct = (upnl / cost_basis) * 100.0
-        ledger.save_position(pos)
-        cash = ledger.get_balance()
+        ledger.save_position_sync(pos)
+        cash = ledger.get_balance_sync()
         expected = cash + cost_basis + upnl
-        assert math.isclose(ledger.get_total_equity(), expected, rel_tol=1e-6)
+        assert math.isclose(ledger.get_total_equity_sync(), expected, rel_tol=1e-6)
 
     def test_short_equity_uses_cost_basis_not_quantity_times_price(self):
         db = _make_db()
@@ -191,16 +224,18 @@ class TestEquityUnification:
         current = 2_800.0
         upnl = (entry - current) * qty
         _open_short(ledger, entry_price=entry, quantity=qty)
-        pos = ledger.get_position("binance", "ETH/USDT")
+        pos = ledger.get_position_sync("binance", "ETH/USDT")
         pos.current_price = current
         pos.unrealized_pnl = upnl
         pos.unrealized_pnl_pct = (upnl / cost_basis) * 100.0
-        ledger.save_position(pos)
-        cash = ledger.get_balance()
+        ledger.save_position_sync(pos)
+        cash = ledger.get_balance_sync()
         expected = cash + cost_basis + upnl
         wrong_calc = cash + qty * current  # the old incorrect formula
-        assert math.isclose(ledger.get_total_equity(), expected, rel_tol=1e-6)
-        assert not math.isclose(ledger.get_total_equity(), wrong_calc, rel_tol=1e-6)
+        assert math.isclose(ledger.get_total_equity_sync(), expected, rel_tol=1e-6)
+        assert not math.isclose(
+            ledger.get_total_equity_sync(), wrong_calc, rel_tol=1e-6
+        )
 
     def test_equity_scoped_to_account(self):
         db = _make_db()
@@ -209,20 +244,20 @@ class TestEquityUnification:
         _fund(ledger, account_id="acct_b", amount=50_000.0)
         _open_long(ledger, account_id="acct_a", symbol="BTC/USDT")
         # acct_b has no positions; its equity must equal its cash
-        cash_b = ledger.get_balance(account_id="acct_b")
-        equity_b = ledger.get_total_equity(account_id="acct_b")
+        cash_b = ledger.get_balance_sync(account_id="acct_b")
+        equity_b = ledger.get_total_equity_sync(account_id="acct_b")
         assert math.isclose(equity_b, cash_b, rel_tol=1e-6), (
             f"acct_b equity ({equity_b}) != acct_b cash ({cash_b}): "
             "acct_a's position is leaking into acct_b's equity"
         )
         # acct_a equity = cash_a + position_market_value; verify it is different from acct_b
-        equity_a = ledger.get_total_equity(account_id="acct_a")
-        cash_a = ledger.get_balance(account_id="acct_a")
+        equity_a = ledger.get_total_equity_sync(account_id="acct_a")
+        cash_a = ledger.get_balance_sync(account_id="acct_a")
         assert not math.isclose(
             equity_a, equity_b, rel_tol=1e-6
         ), "acct_a and acct_b equity should differ because acct_a holds a position"
         # acct_a's equity accounts for both cash and position
-        positions_a = ledger.list_positions(account_id="acct_a")
+        positions_a = ledger.list_positions_sync(account_id="acct_a")
         expected_equity_a = cash_a + sum(
             p.cost_basis + p.unrealized_pnl for p in positions_a
         )
@@ -240,11 +275,11 @@ class TestEquityUnification:
         ledger = PaperLedger(db=db)
         _fund(ledger, amount=50_000.0)
         _open_short(ledger, entry_price=entry, quantity=qty)
-        pos = ledger.get_position("binance", "ETH/USDT")
+        pos = ledger.get_position_sync("binance", "ETH/USDT")
         pos.unrealized_pnl_pct = correct_pct
-        ledger.save_position(pos)
+        ledger.save_position_sync(pos)
         assert math.isclose(
-            ledger.get_position("binance", "ETH/USDT").unrealized_pnl_pct,
+            ledger.get_position_sync("binance", "ETH/USDT").unrealized_pnl_pct,
             correct_pct,
             rel_tol=1e-6,
         )
@@ -258,7 +293,7 @@ class TestEquityUnification:
         from src.config import StrategyParams
 
         fee_pct = StrategyParams().taker_fee_pct  # e.g. 0.075
-        engine.ledger.record_buy(
+        engine.ledger.record_buy_sync(
             account_id="default",
             exchange="binance",
             symbol="BTC/USDT",
@@ -275,9 +310,9 @@ class TestEquityUnification:
             current_price=entry,
             quantity=qty,
             cost_basis=entry * qty,
-            entry_time=datetime.now(timezone.utc).isoformat(),
+            entry_time=datetime.now(UTC).isoformat(),
         )
-        engine.ledger.save_position(pos)
+        engine.ledger.save_position_sync(pos)
         trade = engine.close_position_market(
             "binance", "BTC/USDT", current_price=exit_price
         )
@@ -318,11 +353,11 @@ class TestIdempotentExecution:
         db = _make_db()
         engine = _make_engine(db)
         _fund(engine.ledger, amount=100_000.0)
-        # engine stores bar_time as str(row["timestamp"]) which uses space separator:
-        # e.g. "2024-01-01 00:00:00+00:00" not the ISO T-separator
+        # engine stores bar_time as str(row["timestamp"]) which uses ISO format:
+        # e.g. "2024-01-01T00:00:00+00:00" (T separator, from datetime.isoformat())
         bar_ts = pd.Timestamp("2024-01-01T00:00:00", tz="UTC")
-        bar_time = str(bar_ts)  # "2024-01-01 00:00:00+00:00"
-        engine.ledger.record_buy(
+        bar_time = bar_ts.isoformat()  # "2024-01-01T00:00:00+00:00"
+        engine.ledger.record_buy_sync(
             account_id="default",
             exchange="binance",
             symbol="BTC/USDT",
@@ -344,7 +379,7 @@ class TestIdempotentExecution:
             entry_time=bar_time,
             last_bar_time=bar_time,
         )
-        engine.ledger.save_position(pos)
+        engine.ledger.save_position_sync(pos)
         df = pd.DataFrame(
             [
                 {
@@ -372,7 +407,7 @@ class TestIdempotentExecution:
         old_ts = pd.Timestamp("2024-01-01T00:00:00", tz="UTC")
         new_ts = pd.Timestamp("2024-01-01T00:05:00", tz="UTC")
         old_bar = old_ts.isoformat()
-        engine.ledger.record_buy(
+        engine.ledger.record_buy_sync(
             account_id="default",
             exchange="binance",
             symbol="BTC/USDT",
@@ -394,7 +429,7 @@ class TestIdempotentExecution:
             entry_time=old_bar,
             last_bar_time=old_bar,
         )
-        engine.ledger.save_position(pos)
+        engine.ledger.save_position_sync(pos)
         df = pd.DataFrame(
             [
                 {
@@ -414,7 +449,7 @@ class TestIdempotentExecution:
         result = engine.evaluate_symbol("binance", "BTC/USDT", "5m", force_candles=df)
         assert result["action"] == "HOLD"
         assert result.get("note") != "duplicate_bar_skipped"
-        updated = engine.ledger.get_position("binance", "BTC/USDT")
+        updated = engine.ledger.get_position_sync("binance", "BTC/USDT")
         assert updated.last_bar_time is not None
         assert updated.last_bar_time != old_bar
 
@@ -429,8 +464,8 @@ class TestReconciliationCheckpoint:
         db = _make_db()
         engine = _make_engine(db)
         _fund(engine.ledger, amount=100_000.0)
-        latest_ts = datetime(2024, 1, 2, tzinfo=timezone.utc)
-        engine.ledger.record_buy(
+        latest_ts = datetime(2024, 1, 2, tzinfo=UTC)
+        engine.ledger.record_buy_sync(
             account_id="default",
             exchange="binance",
             symbol="BTC/USDT",
@@ -452,7 +487,7 @@ class TestReconciliationCheckpoint:
             entry_time="2024-01-01T00:00:00+00:00",
             last_bar_time=latest_ts.isoformat(),
         )
-        engine.ledger.save_position(pos)
+        engine.ledger.save_position_sync(pos)
         candles = _make_candles(n=5, start_time=latest_ts - timedelta(minutes=20))
         results = engine.reconcile_positions_on_startup(
             force_candles_map={"binance:BTC/USDT": candles}
@@ -463,9 +498,9 @@ class TestReconciliationCheckpoint:
         db = _make_db()
         engine = _make_engine(db)
         _fund(engine.ledger, amount=100_000.0)
-        checkpoint = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        checkpoint = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
         breach_ts = checkpoint + timedelta(minutes=5)
-        engine.ledger.record_buy(
+        engine.ledger.record_buy_sync(
             account_id="default",
             exchange="binance",
             symbol="BTC/USDT",
@@ -488,7 +523,7 @@ class TestReconciliationCheckpoint:
             entry_time=checkpoint_str,
             last_bar_time=checkpoint_str,
         )
-        engine.ledger.save_position(pos)
+        engine.ledger.save_position_sync(pos)
         # Need >= 2 rows so reconcile's len(df_candles) >= 2 guard passes.
         # First row is AT the checkpoint (should be filtered out by > comparison).
         # Second row (breach_ts) is AFTER and should trigger the stop-loss.
@@ -519,7 +554,7 @@ class TestReconciliationCheckpoint:
             len(results) == 1
         ), f"Expected 1 reconcile result, got {len(results)}: {results}"
         assert "STOP_LOSS" in results[0]["action"]
-        assert engine.ledger.get_position("binance", "BTC/USDT") is None
+        assert engine.ledger.get_position_sync("binance", "BTC/USDT") is None
 
 
 # ===========================================================================
@@ -533,7 +568,7 @@ class TestCausalFills:
         engine = _make_engine(db)
         _fund(engine.ledger, amount=100_000.0)
         stop_level, gap_open = 49_000.0, 47_000.0
-        engine.ledger.record_buy(
+        engine.ledger.record_buy_sync(
             account_id="default",
             exchange="binance",
             symbol="BTC/USDT",
@@ -555,7 +590,7 @@ class TestCausalFills:
             entry_time="2024-01-01T00:00:00+00:00",
             last_bar_time="2024-01-01T00:00:00+00:00",
         )
-        engine.ledger.save_position(pos)
+        engine.ledger.save_position_sync(pos)
         ts = pd.to_datetime("2024-01-01T00:05:00+00:00", utc=True)
         df = pd.DataFrame(
             [
@@ -583,7 +618,7 @@ class TestCausalFills:
         engine = _make_engine(db)
         _fund(engine.ledger, amount=100_000.0)
         stop_level, gap_open = 3_150.0, 3_300.0
-        engine.ledger.record_sell_short(
+        engine.ledger.record_sell_short_sync(
             account_id="default",
             exchange="binance",
             symbol="ETH/USDT",
@@ -606,7 +641,7 @@ class TestCausalFills:
             entry_time="2024-01-01T00:00:00+00:00",
             last_bar_time="2024-01-01T00:00:00+00:00",
         )
-        engine.ledger.save_position(pos)
+        engine.ledger.save_position_sync(pos)
         ts = pd.to_datetime("2024-01-01T00:05:00+00:00", utc=True)
         df = pd.DataFrame(
             [
@@ -643,9 +678,10 @@ class TestAccountScopedPositions:
         _fund(ledger, "bob", 100_000.0)
         _open_long(ledger, account_id="alice", symbol="BTC/USDT")
         assert (
-            ledger.get_position("binance", "BTC/USDT", account_id="alice") is not None
+            ledger.get_position_sync("binance", "BTC/USDT", account_id="alice")
+            is not None
         )
-        assert ledger.get_position("binance", "BTC/USDT", account_id="bob") is None
+        assert ledger.get_position_sync("binance", "BTC/USDT", account_id="bob") is None
 
     def test_list_positions_scoped(self):
         db = _make_db()
@@ -654,10 +690,10 @@ class TestAccountScopedPositions:
         _fund(ledger, "bob", 100_000.0)
         _open_long(ledger, account_id="alice", symbol="BTC/USDT")
         _open_short(ledger, account_id="bob", symbol="ETH/USDT")
-        assert len(ledger.list_positions(account_id="alice")) == 1
-        assert ledger.list_positions(account_id="alice")[0].symbol == "BTC/USDT"
-        assert len(ledger.list_positions(account_id="bob")) == 1
-        assert ledger.list_positions(account_id="bob")[0].symbol == "ETH/USDT"
+        assert len(ledger.list_positions_sync(account_id="alice")) == 1
+        assert ledger.list_positions_sync(account_id="alice")[0].symbol == "BTC/USDT"
+        assert len(ledger.list_positions_sync(account_id="bob")) == 1
+        assert ledger.list_positions_sync(account_id="bob")[0].symbol == "ETH/USDT"
 
     def test_close_position_scoped(self):
         db = _make_db()
@@ -666,9 +702,14 @@ class TestAccountScopedPositions:
         _fund(ledger, "bob", 100_000.0)
         _open_long(ledger, account_id="alice", symbol="BTC/USDT")
         _open_long(ledger, account_id="bob", symbol="BTC/USDT")
-        ledger.close_position("binance", "BTC/USDT", account_id="alice")
-        assert ledger.get_position("binance", "BTC/USDT", account_id="alice") is None
-        assert ledger.get_position("binance", "BTC/USDT", account_id="bob") is not None
+        ledger.close_position_sync("binance", "BTC/USDT", account_id="alice")
+        assert (
+            ledger.get_position_sync("binance", "BTC/USDT", account_id="alice") is None
+        )
+        assert (
+            ledger.get_position_sync("binance", "BTC/USDT", account_id="bob")
+            is not None
+        )
 
     def test_equity_does_not_cross_accounts(self):
         db = _make_db()
@@ -683,8 +724,8 @@ class TestAccountScopedPositions:
             quantity=1.0,
         )
         # Bob's equity must equal his own cash — Alice's position must not bleed in
-        bob_cash = ledger.get_balance(account_id="bob")
-        bob_equity = ledger.get_total_equity(account_id="bob")
+        bob_cash = ledger.get_balance_sync(account_id="bob")
+        bob_equity = ledger.get_total_equity_sync(account_id="bob")
         assert math.isclose(bob_equity, bob_cash, rel_tol=1e-6), (
             f"Bob's equity ({bob_equity}) != bob's cash ({bob_cash}): "
             "Alice's position is leaking into Bob's equity."
@@ -704,7 +745,7 @@ class TestPricePrecisionAndHoldingPeriod:
         micro_price = 0.00001234
         qty = 1_000_000.0
         cost_basis = micro_price * qty
-        ledger.record_buy(
+        ledger.record_buy_sync(
             account_id="default",
             exchange="binance",
             symbol="MICRO/USDT",
@@ -721,10 +762,10 @@ class TestPricePrecisionAndHoldingPeriod:
             current_price=micro_price,
             quantity=qty,
             cost_basis=cost_basis,
-            entry_time=datetime.now(timezone.utc).isoformat(),
+            entry_time=datetime.now(UTC).isoformat(),
         )
-        ledger.save_position(pos)
-        recovered = ledger.get_position("binance", "MICRO/USDT")
+        ledger.save_position_sync(pos)
+        recovered = ledger.get_position_sync("binance", "MICRO/USDT")
         assert recovered is not None
         assert (
             recovered.entry_price > 0
@@ -734,9 +775,9 @@ class TestPricePrecisionAndHoldingPeriod:
         db = _make_db()
         engine = _make_engine(db)
         _fund(engine.ledger, amount=100_000.0)
-        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
         exit_time = entry_time + timedelta(minutes=50)  # 10 bars @ 5m
-        engine.ledger.record_buy(
+        engine.ledger.record_buy_sync(
             account_id="default",
             exchange="binance",
             symbol="BTC/USDT",
@@ -758,7 +799,7 @@ class TestPricePrecisionAndHoldingPeriod:
             entry_time=entry_time.isoformat(),
             last_bar_time=entry_time.isoformat(),
         )
-        engine.ledger.save_position(pos)
+        engine.ledger.save_position_sync(pos)
         df = pd.DataFrame(
             [
                 {
@@ -777,7 +818,7 @@ class TestPricePrecisionAndHoldingPeriod:
         )
         result = engine.evaluate_symbol("binance", "BTC/USDT", "5m", force_candles=df)
         assert result["action"] == "EXIT_STOP_LOSS"
-        history = engine.ledger.list_trade_history(
+        history = engine.ledger.list_trade_history_sync(
             exchange="binance", symbol="BTC/USDT"
         )
         assert len(history) == 1
@@ -793,57 +834,57 @@ class TestLedgerCashValidation:
     def test_deposit_rejects_zero(self):
         ledger = PaperLedger(db=_make_db())
         with pytest.raises(ValueError, match="finite positive"):
-            ledger.deposit(amount=0.0)
+            ledger.deposit_sync(amount=0.0)
 
     def test_deposit_rejects_negative(self):
         ledger = PaperLedger(db=_make_db())
         with pytest.raises(ValueError, match="finite positive"):
-            ledger.deposit(amount=-100.0)
+            ledger.deposit_sync(amount=-100.0)
 
     def test_deposit_rejects_nan(self):
         ledger = PaperLedger(db=_make_db())
         with pytest.raises(ValueError, match="finite positive"):
-            ledger.deposit(amount=float("nan"))
+            ledger.deposit_sync(amount=float("nan"))
 
     def test_deposit_rejects_inf(self):
         ledger = PaperLedger(db=_make_db())
         with pytest.raises(ValueError, match="finite positive"):
-            ledger.deposit(amount=float("inf"))
+            ledger.deposit_sync(amount=float("inf"))
 
     def test_withdraw_rejects_zero(self):
         ledger = PaperLedger(db=_make_db())
         _fund(ledger)
         with pytest.raises(ValueError, match="finite positive"):
-            ledger.withdraw(amount=0.0)
+            ledger.withdraw_sync(amount=0.0)
 
     def test_withdraw_rejects_negative(self):
         ledger = PaperLedger(db=_make_db())
         _fund(ledger)
         with pytest.raises(ValueError, match="finite positive"):
-            ledger.withdraw(amount=-500.0)
+            ledger.withdraw_sync(amount=-500.0)
 
     def test_withdraw_rejects_nan(self):
         ledger = PaperLedger(db=_make_db())
         _fund(ledger)
         with pytest.raises(ValueError, match="finite positive"):
-            ledger.withdraw(amount=float("nan"))
+            ledger.withdraw_sync(amount=float("nan"))
 
     def test_withdraw_rejects_over_balance(self):
         ledger = PaperLedger(db=_make_db())
         _fund(ledger, amount=1_000.0)
-        actual_balance = ledger.get_balance()  # may include 10000 default
-        with pytest.raises(ValueError, match="Insufficient"):
-            ledger.withdraw(
+        actual_balance = ledger.get_balance_sync()  # may include 10000 default
+        with pytest.raises(ValueError, match="Insufficient paper balance"):
+            ledger.withdraw_sync(
                 amount=actual_balance + 1_000.0
             )  # definitely exceeds balance
 
     def test_failed_validation_leaves_balance_unchanged(self):
         ledger = PaperLedger(db=_make_db())
         _fund(ledger, amount=1_000.0)
-        bal = ledger.get_balance()
+        bal = ledger.get_balance_sync()
         with pytest.raises(ValueError):
-            ledger.deposit(amount=-999.0)
-        assert ledger.get_balance() == bal
+            ledger.deposit_sync(amount=-999.0)
+        assert ledger.get_balance_sync() == bal
 
 
 # ===========================================================================
@@ -855,7 +896,7 @@ class TestShortLedgerTransactionType:
     def test_record_sell_short_type(self):
         ledger = PaperLedger(db=_make_db())
         _fund(ledger, amount=50_000.0)
-        tx = ledger.record_sell_short(
+        tx = ledger.record_sell_short_sync(
             account_id="default",
             exchange="binance",
             symbol="ETH/USDT",
@@ -872,7 +913,7 @@ class TestShortLedgerTransactionType:
         ledger = PaperLedger(db=_make_db())
         _fund(ledger, amount=50_000.0)
         qty = 3.0
-        ledger.record_sell_short(
+        ledger.record_sell_short_sync(
             account_id="default",
             exchange="binance",
             symbol="ETH/USDT",
@@ -883,7 +924,9 @@ class TestShortLedgerTransactionType:
         )
         txs = [
             t
-            for t in ledger.list_transactions(account_id="default", symbol="ETH/USDT")
+            for t in ledger.list_transactions_sync(
+                account_id="default", symbol="ETH/USDT"
+            )
             if t.type == "SELL_SHORT"
         ]
         assert len(txs) == 1
@@ -892,10 +935,10 @@ class TestShortLedgerTransactionType:
     def test_short_balance_after_reflects_collateral(self):
         ledger = PaperLedger(db=_make_db())
         _fund(ledger, amount=50_000.0)
-        balance_before_short = ledger.get_balance()  # includes 10k default
+        balance_before_short = ledger.get_balance_sync()  # includes 10k default
         entry, qty = 2_000.0, 5.0
         cost_basis, fee = entry * qty, entry * qty * 0.001
-        ledger.record_sell_short(
+        ledger.record_sell_short_sync(
             account_id="default",
             exchange="binance",
             symbol="ETH/USDT",
@@ -905,7 +948,7 @@ class TestShortLedgerTransactionType:
             fee=fee,
         )
         expected = balance_before_short - cost_basis - fee
-        assert math.isclose(ledger.get_balance(), expected, rel_tol=1e-9)
+        assert math.isclose(ledger.get_balance_sync(), expected, rel_tol=1e-9)
 
     def test_engine_short_entry_uses_sell_short(self):
         db = _make_db()
@@ -931,7 +974,7 @@ class TestShortLedgerTransactionType:
         result = engine.evaluate_symbol("binance", "ETH/USDT", "5m", force_candles=df)
         # If the engine enters a SHORT, verify the ledger records SELL_SHORT not BUY.
         if result["action"] == "ENTER_SHORT":
-            txs = engine.ledger.list_transactions(
+            txs = engine.ledger.list_transactions_sync(
                 account_id="default", symbol="ETH/USDT"
             )
             tx_types = [t.type for t in txs]

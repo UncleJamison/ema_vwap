@@ -111,7 +111,12 @@ class SyntheticAdapter(BaseDataProvider):
             else:
                 end_ts = end_ts.tz_convert("UTC")
         else:
-            end_ts = pd.Timestamp.now(tz="UTC").floor("min")
+            end_ts = pd.Timestamp.now(tz="UTC")
+        # Floor to the timeframe grid (like real exchange candle boundaries):
+        # a caller fetching the same window at T and T+5s gets identical
+        # timestamps, so local clock drift can never shift a candle onto a
+        # duplicate or missing key (ema_vwap-ky14 clock-drift criterion).
+        end_ts = end_ts.floor(freq)
 
         timestamps = pd.date_range(end=end_ts, periods=num_bars, freq=freq)
         prices = [init_price]

@@ -1,63 +1,116 @@
-"""
-Audit candles.db for synthetic vs real data composition.
-Synthetic candles are tagged with exchange='synthetic'; real with 'kucoin'.
-"""
+"""Report PostgreSQL candle counts and timestamp coverage by stored source tag."""
 
-import sqlite3
+import asyncio
+from datetime import datetime
+from typing import Any
 
-DB_PATH = "data/candles.db"
+from src.pg_database import _ensure_pg_manager
 
 
-def audit_candles():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    tables = [r[0] for r in cursor.fetchall()]
-    if "candles" not in tables:
-        print("AUDIT FAIL: candles table missing.")
+async def fetch_candle_inventory() -> list[dict[str, Any]]:
+    """Fetch compact per-exchange, symbol, and timeframe inventory statistics."""
+    pg_manager = await _ensure_pg_manager()
+    pool = pg_manager.get_pool("candles")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                exchange,
+                symbol,
+                timeframe,
+                data_origin,
+                source_timeframe,
+                COUNT(*) AS candle_count,
+                COUNT(DISTINCT timestamp) AS distinct_timestamps,
+                MIN(timestamp) AS first_timestamp,
+                MAX(timestamp) AS last_timestamp
+            FROM candles
+            GROUP BY exchange, symbol, timeframe, data_origin, source_timeframe
+            ORDER BY exchange, symbol, timeframe, data_origin, source_timeframe
+            """
+        )
+
+    return [dict(row) for row in rows]
+
+
+def _format_timestamp(value: datetime | None) -> str:
+    return value.isoformat() if value is not None else "n/a"
+
+
+def audit_candles(inventory: list[dict[str, Any]]) -> None:
+    """Print a database-wide source summary and detailed coverage inventory."""
+    print("=== POSTGRESQL CANDLE INVENTORY ===")
+
+    if not inventory:
+        print("No candle rows found.")
         return
 
-    cursor.execute(
-        "SELECT exchange, timeframe, COUNT(*) FROM candles GROUP BY exchange, timeframe ORDER BY exchange, timeframe;"
+    totals: dict[tuple[str, str], int] = {}
+    source_totals: dict[str, int] = {}
+    origin_totals: dict[str, int] = {}
+    overall_total = 0
+    for row in inventory:
+        exchange = row["exchange"]
+        timeframe = row["timeframe"]
+        origin = row["data_origin"]
+        count = int(row["candle_count"])
+        totals[(exchange, timeframe)] = totals.get((exchange, timeframe), 0) + count
+        source_totals[exchange] = source_totals.get(exchange, 0) + count
+        origin_totals[origin] = origin_totals.get(origin, 0) + count
+        overall_total += count
+
+    synthetic_total = origin_totals.get("synthetic", 0)
+    synthetic_pct = synthetic_total / overall_total * 100
+
+    print(f"Total candles: {overall_total:,}")
+    print(
+        f"Rows with synthetic data origin: {synthetic_total:,} "
+        f"({synthetic_pct:.1f}%)"
     )
-    rows = cursor.fetchall()
-
-    total_real = 0
-    total_synthetic = 0
-
-    print("=== CANDLE DB AUDIT (Synthetic vs Real) ===")
-    for exchange, tf, count in rows:
-        if exchange == "synthetic":
-            total_synthetic += count
-            label = "SYNTHETIC"
-        else:
-            total_real += count
-            label = "REAL"
-
-        note = " [GAP RISK]" if (tf == "3m" and count == 0) else ""
-        print(f"  {exchange:10} {tf:4s}: {count:8d} candles ({label}){note}")
-
-    total_all = total_real + total_synthetic
-    synthetic_pct = (total_synthetic / total_all * 100) if total_all > 0 else 0.0
-    real_pct = 100.0 - synthetic_pct
-
-    print("\nSummary:")
-    print(f"  Real candles:       {total_real} ({real_pct:.1f}%)")
-    print(f"  Synthetic candles:  {total_synthetic} ({synthetic_pct:.1f}%)")
-    print(f"  Total:              {total_all}")
-
-    cursor.execute(
-        "SELECT exchange, COUNT(*) FROM candles WHERE timeframe = '3m' GROUP BY exchange;"
+    print(
+        "Rows by data origin: "
+        + ", ".join(
+            f"{origin}={count:,}" for origin, count in sorted(origin_totals.items())
+        )
     )
-    tf3 = cursor.fetchall()
-    if tf3:
-        print("\n3m timeframe breakdown:")
-        for ex, count in tf3:
-            print(f"  {ex}: {count}")
-    else:
-        print("\n3m timeframe: NO DATA (will trigger synthetic fallback if requested)")
-    conn.close()
+    print(
+        "Provider means the row was fetched from the configured provider after "
+        "provenance tracking was enabled; unknown legacy rows are not verified."
+    )
+
+    print("\nCounts by stored exchange tag:")
+    print(f"{'Exchange':<18} {'Candles':>14}")
+    for exchange, count in sorted(source_totals.items()):
+        print(f"{exchange:<18} {count:>14,}")
+
+    print("\nCounts by stored exchange tag and timeframe:")
+    print(f"{'Exchange':<18} {'TF':<8} {'Candles':>14}")
+    for (exchange, timeframe), count in sorted(totals.items()):
+        print(f"{exchange:<18} {timeframe:<8} {count:>14,}")
+
+    print("\nCoverage by exchange, symbol, and timeframe:")
+    print(
+        f"{'Exchange':<18} {'Symbol':<16} {'TF':<8} {'Origin':<12} "
+        f"{'Source TF':<10} {'Candles':>12} {'First timestamp':<28} "
+        f"{'Last timestamp':<28} {'Duplicate timestamps':>20}"
+    )
+    for row in inventory:
+        duplicate_count = int(row["candle_count"]) - int(row["distinct_timestamps"])
+        print(
+            f"{row['exchange']:<18} {row['symbol']:<16} {row['timeframe']:<8} "
+            f"{row['data_origin']:<12} {row['source_timeframe'] or 'n/a'!s:<10} "
+            f"{int(row['candle_count']):>12,} "
+            f"{_format_timestamp(row['first_timestamp']):<28} "
+            f"{_format_timestamp(row['last_timestamp']):<28} "
+            f"{duplicate_count:>20,}"
+        )
+
+
+async def audit_candles_pg() -> None:
+    """Run and print the inventory against the configured PostgreSQL candles DB."""
+    audit_candles(await fetch_candle_inventory())
 
 
 if __name__ == "__main__":
-    audit_candles()
+    asyncio.run(audit_candles_pg())

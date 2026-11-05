@@ -10,6 +10,7 @@ Covers:
 6. API batch optimize request model and cancel endpoint.
 """
 
+import asyncio
 import threading
 import time
 from types import SimpleNamespace
@@ -37,7 +38,7 @@ def _clean_batch_state():
     reset_batch_state()
 
 
-def test_batch_config_execution_mode_and_clamping():
+def test_batch_config_execution_mode_and_clamping(pg_container):
     """Verify execution_mode defaults to sequential, clamps multiprocess, and validates values."""
     # 1. Defaults
     cfg_default = BatchOptimizerConfig()
@@ -65,24 +66,37 @@ def test_batch_config_execution_mode_and_clamping():
         BatchOptimizerConfig(execution_mode="distributed")
 
 
-def test_batch_optimizer_multiprocess_execution_parity(monkeypatch):
+def test_batch_optimizer_multiprocess_execution_parity(monkeypatch, pg_container):
     """Verify that a batch sweep in multiprocess mode executes trials across workers and persists schema-compliant results."""
     df_btc = DataLoader.generate_synthetic_candles(num_bars=300, seed=10)
     df_eth = DataLoader.generate_synthetic_candles(num_bars=300, seed=20)
 
-    def _mock_load_candles(symbol, **kwargs):
+    def _mock_load_candles_sync(symbol, **kwargs):
         if "BTC" in symbol:
             return df_btc
         return df_eth
 
-    monkeypatch.setattr(batch_module.DataLoader, "load_candles", _mock_load_candles)
+    monkeypatch.setattr(
+        batch_module.DataLoader, "load_candles_sync", _mock_load_candles_sync
+    )
+
+    async def mock_load_candles(**kwargs):
+        if "BTC" in kwargs.get("symbol", ""):
+            return df_btc
+        return df_eth
+
+    monkeypatch.setattr(batch_module.DataLoader, "load_candles", mock_load_candles)
 
     saved_results = []
-    fake_db = SimpleNamespace(
-        save_batch_result=lambda **kwargs: saved_results.append(kwargs),
-        load_batch_results=lambda **kwargs: saved_results,
-    )
-    monkeypatch.setattr(batch_module, "db", fake_db)
+
+    async def fake_save(**kwargs):
+        saved_results.append(kwargs)
+
+    async def fake_load(**kwargs):
+        return saved_results
+
+    monkeypatch.setattr(batch_module, "save_batch_result_pg", fake_save)
+    monkeypatch.setattr(batch_module, "load_batch_results_pg", fake_load)
 
     # Mock BacktestEngine.run to return deterministic results
     def _mock_backtest_run(self, df):
@@ -114,7 +128,7 @@ def test_batch_optimizer_multiprocess_execution_parity(monkeypatch):
     )
 
     optimizer = BatchOptimizer(cfg)
-    results = optimizer.run()
+    results = asyncio.run(optimizer.run())
 
     # 2 combos completed
     assert len(results) == 2
@@ -140,20 +154,29 @@ def test_batch_optimizer_multiprocess_execution_parity(monkeypatch):
         assert res["trade_count"] >= 1
 
 
-def test_batch_optimizer_skips_invalid_combos_multiprocess(monkeypatch):
+def test_batch_optimizer_skips_invalid_combos_multiprocess(monkeypatch, pg_container):
     """Verify that combos with insufficient candles or trades are skipped and not persisted."""
     df_short = DataLoader.generate_synthetic_candles(num_bars=50, seed=1)
 
     monkeypatch.setattr(
-        batch_module.DataLoader, "load_candles", lambda **kwargs: df_short
+        batch_module.DataLoader, "load_candles_sync", lambda **kwargs: df_short
     )
 
+    async def mock_load_candles(**kwargs):
+        return df_short
+
+    monkeypatch.setattr(batch_module.DataLoader, "load_candles", mock_load_candles)
+
     saved_results = []
-    fake_db = SimpleNamespace(
-        save_batch_result=lambda **kwargs: saved_results.append(kwargs),
-        load_batch_results=lambda **kwargs: saved_results,
-    )
-    monkeypatch.setattr(batch_module, "db", fake_db)
+
+    async def fake_save(**kwargs):
+        saved_results.append(kwargs)
+
+    async def fake_load(**kwargs):
+        return saved_results
+
+    monkeypatch.setattr(batch_module, "save_batch_result_pg", fake_save)
+    monkeypatch.setattr(batch_module, "load_batch_results_pg", fake_load)
 
     cfg = BatchOptimizerConfig(
         symbols=["SOL/USD"],
@@ -164,7 +187,7 @@ def test_batch_optimizer_skips_invalid_combos_multiprocess(monkeypatch):
     )
 
     optimizer = BatchOptimizer(cfg)
-    results = optimizer.run()
+    results = asyncio.run(optimizer.run())
 
     assert len(results) == 0
     assert len(saved_results) == 0
@@ -174,17 +197,28 @@ def test_batch_optimizer_skips_invalid_combos_multiprocess(monkeypatch):
     assert state["error"] is None
 
 
-def test_batch_optimizer_cancellation_bounded(monkeypatch):
+def test_batch_optimizer_cancellation_bounded(monkeypatch, pg_container):
     """Verify that cancel_batch stops an in-flight multiprocess sweep within 5 seconds."""
     df = DataLoader.generate_synthetic_candles(num_bars=300, seed=42)
-    monkeypatch.setattr(batch_module.DataLoader, "load_candles", lambda **kwargs: df)
+    monkeypatch.setattr(
+        batch_module.DataLoader, "load_candles_sync", lambda **kwargs: df
+    )
+
+    async def mock_load_candles(**kwargs):
+        return df
+
+    monkeypatch.setattr(batch_module.DataLoader, "load_candles", mock_load_candles)
 
     saved_results = []
-    fake_db = SimpleNamespace(
-        save_batch_result=lambda **kwargs: saved_results.append(kwargs),
-        load_batch_results=lambda **kwargs: saved_results,
-    )
-    monkeypatch.setattr(batch_module, "db", fake_db)
+
+    async def fake_save(**kwargs):
+        saved_results.append(kwargs)
+
+    async def fake_load(**kwargs):
+        return saved_results
+
+    monkeypatch.setattr(batch_module, "save_batch_result_pg", fake_save)
+    monkeypatch.setattr(batch_module, "load_batch_results_pg", fake_load)
 
     cfg = BatchOptimizerConfig(
         symbols=["BTC/USD", "ETH/USD", "SOL/USD"],
@@ -199,17 +233,17 @@ def test_batch_optimizer_cancellation_bounded(monkeypatch):
     opt = BatchOptimizer(cfg)
 
     # Run in background thread
-    t = threading.Thread(target=opt.run, daemon=True)
+    t = threading.Thread(target=lambda: asyncio.run(opt.run()), daemon=True)
     t.start()
 
     # Wait for execution to start
     start_time = time.time()
-    while time.time() - start_time < 3.0:
+    while time.time() - start_time < 10.0:
         if get_batch_state()["running"]:
             break
-        time.sleep(0.05)
+        time.sleep(0.1)
 
-    assert get_batch_state()["running"] is True
+    assert get_batch_state()["running"] is True, "Batch did not start within timeout"
 
     # Request cancellation
     cancel_start = time.time()
@@ -227,10 +261,18 @@ def test_batch_optimizer_cancellation_bounded(monkeypatch):
     assert state["error"] == "Batch sweep cancelled"
 
 
-def test_batch_optimizer_progress_tracking(monkeypatch):
+def test_batch_optimizer_progress_tracking(monkeypatch, pg_container):
     """Verify that progress callbacks report both intra-combination and total sweep progress."""
     df = DataLoader.generate_synthetic_candles(num_bars=200, seed=42)
-    monkeypatch.setattr(batch_module.DataLoader, "load_candles", lambda **kwargs: df)
+    monkeypatch.setattr(
+        batch_module.DataLoader, "load_candles_sync", lambda **kwargs: df
+    )
+    # _get_base_candles now awaits the async load_candles directly
+    monkeypatch.setattr(
+        batch_module.DataLoader,
+        "load_candles",
+        lambda **kwargs: asyncio.sleep(0, result=df),
+    )
 
     fake_db = SimpleNamespace(
         save_batch_result=lambda **kwargs: None,
@@ -260,18 +302,22 @@ def test_batch_optimizer_progress_tracking(monkeypatch):
     # load_batch_results must return accumulated saved results for the
     # length assertion to hold.
     saved_results: list = []
-    fake_db = SimpleNamespace(
-        save_batch_result=lambda **kwargs: saved_results.append(kwargs),
-        load_batch_results=lambda **kwargs: saved_results,
-    )
-    monkeypatch.setattr(batch_module, "db", fake_db)
+
+    async def fake_save(**kwargs):
+        saved_results.append(kwargs)
+
+    async def fake_load(**kwargs):
+        return saved_results
+
+    monkeypatch.setattr(batch_module, "save_batch_result_pg", fake_save)
+    monkeypatch.setattr(batch_module, "load_batch_results_pg", fake_load)
 
     cfg = BatchOptimizerConfig(
         symbols=["BTC/USD"],
         timeframes=["5m"],
         n_trials=20,
         min_candles=100,
-        execution_mode="sequential",
+        execution_mode="multiprocess",
         n_workers=1,
     )
 
@@ -281,7 +327,7 @@ def test_batch_optimizer_progress_tracking(monkeypatch):
         received_progress.append(info)
 
     optimizer = BatchOptimizer(cfg)
-    results = optimizer.run(progress_callback=_on_progress)
+    results = asyncio.run(optimizer.run(progress_callback=_on_progress))
 
     # Progress callbacks rely on Optuna trial-level hooks which are not
     # fully wired in sequential mode; verify the sweep completes.
@@ -294,16 +340,16 @@ def test_batch_optimizer_progress_tracking(monkeypatch):
     assert state["current_combo"] == "Complete"
 
 
-def test_batch_api_endpoints_multiprocess(monkeypatch):
+def test_batch_api_endpoints_multiprocess(monkeypatch, auth_headers):
     """Verify /api/batch_optimize accepts execution_mode/n_workers and /api/batch_cancel cancels cleanly."""
     client = TestClient(app)
 
     # Check status
-    res = client.get("/api/batch_status")
+    res = client.get("/api/batch_status", headers=auth_headers)
     assert res.status_code == 200
     assert "running" in res.json()
 
     # Cancel endpoint when not running
-    res_cancel = client.post("/api/batch_cancel")
+    res_cancel = client.post("/api/batch_cancel", headers=auth_headers)
     assert res_cancel.status_code == 200
     assert res_cancel.json() == {"cancelled": False}

@@ -9,7 +9,6 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from src.db_connection_manager import get_database
 from src.paper.ledger import PaperLedger
 from src.portfolio.connectors import categorize_currency
 from src.price_estimates import get_estimated_price
@@ -49,7 +48,7 @@ class OrderRouter:
         settings: SettingsManager | None = None,
         paper_ledger: PaperLedger | None = None,
     ):
-        self.settings = settings or SettingsManager(get_database("system"))
+        self.settings = settings or SettingsManager()
         self.paper_ledger = paper_ledger or PaperLedger()
 
     def route_order(
@@ -188,15 +187,43 @@ class OrderRouter:
         fill_price = (
             order.limit_price if order.limit_price and order.limit_price > 0 else 100.0
         )
-        # If symbol is known crypto, use realistic price
+        # If symbol is known crypto or stock, use realistic price
         if "BTC" in order.symbol:
             fill_price = get_estimated_price("BTC")
         elif "ETH" in order.symbol:
             fill_price = get_estimated_price("ETH")
-        elif "SPY" in order.symbol or "AAPL" in order.symbol:
+        elif "SPY" in order.symbol:
+            fill_price = 550.0
+        elif "AAPL" in order.symbol:
+            fill_price = 225.0
+        elif "SOL" in order.symbol:
             fill_price = get_estimated_price("SOL")
 
         fee = round(order.quantity * fill_price * 0.00075, 2)
+
+        try:
+            if order.side == 1:
+                self.paper_ledger.record_buy_sync(
+                    account_id="default",
+                    exchange=order.venue if order.venue != "auto" else "system",
+                    symbol=order.symbol,
+                    quantity=order.quantity,
+                    price=fill_price,
+                    fee=fee,
+                    notes=f"OrderRouter Fill: {order.order_id}",
+                )
+            elif order.side == -1:
+                self.paper_ledger.record_sell_sync(
+                    account_id="default",
+                    exchange=order.venue if order.venue != "auto" else "system",
+                    symbol=order.symbol,
+                    quantity=order.quantity,
+                    price=fill_price,
+                    fee=fee,
+                    notes=f"OrderRouter Fill: {order.order_id}",
+                )
+        except Exception as e:
+            logger.warning(f"[OrderRouter] Paper ledger recording skipped/failed: {e}")
 
         order.status = "filled"
         order.filled_qty = order.quantity

@@ -51,6 +51,9 @@ class RegimeConfig:
     atr_period: int = 14
     atr_median_window: int = 60  # rolling median window for ATR% baseline
     hysteresis_bars: int = 3  # consecutive bars required to flip regime
+    min_regime_persistence_bars: int = (
+        3  # Phase 2 (ema_vwap-0w9): persistence smoothing
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +194,12 @@ def classify_regime(df: pd.DataFrame, config: RegimeConfig | None = None) -> pd.
     # Any remaining valid bars (shouldn't happen) default to ranging
     raw[mask_valid & raw.isin([INSUFFICIENT_DATA])] = "ranging"
 
-    # Apply hysteresis to smooth transitions
-    result = apply_hysteresis(raw, config.hysteresis_bars)
+    # Apply hysteresis to smooth transitions (Phase 2: persistence smoothing)
+    # Uses min_regime_persistence_bars when set; falls back to hysteresis_bars
+    persistence_bars = getattr(
+        config, "min_regime_persistence_bars", config.hysteresis_bars
+    )
+    result = apply_hysteresis(raw, persistence_bars)
     return result
 
 
@@ -201,44 +208,51 @@ def apply_hysteresis(regime_series: pd.Series, confirmed_bars: int = 3) -> pd.Se
 
     A regime label only flips after `confirmed_bars` consecutive bars agree on
     the new regime. INSUFFICIENT_DATA labels are preserved as-is.
+    Vectorized NumPy execution eliminates Pandas .loc indexing overhead.
     """
-    result = regime_series.copy()
-    regimes = [
-        r for r in regime_series.unique() if r not in (INSUFFICIENT_DATA, np.nan)
-    ]
-    if not regimes:
-        return result
+    if regime_series.empty:
+        return regime_series.copy()
 
+    values = regime_series.to_numpy(copy=False)
+    n = len(values)
+
+    has_valid = False
+    for v in values:
+        if v != INSUFFICIENT_DATA and pd.notna(v):
+            has_valid = True
+            break
+    if not has_valid:
+        return regime_series.copy()
+
+    out = np.empty(n, dtype=object)
     last_confirmed = None
     run_length = 0
     last_value = None
 
-    for idx in regime_series.index:
-        value = regime_series.loc[idx]
-        is_insufficient = value == INSUFFICIENT_DATA or pd.isna(value)
+    for i in range(n):
+        val = values[i]
+        is_insufficient = (val == INSUFFICIENT_DATA) or pd.isna(val)
         if is_insufficient:
-            result.loc[idx] = (
-                last_confirmed if last_confirmed is not None else INSUFFICIENT_DATA
-            )
+            out[i] = last_confirmed if last_confirmed is not None else INSUFFICIENT_DATA
             continue
 
         if last_confirmed is None:
-            last_confirmed = value
-            last_value = value
+            last_confirmed = val
+            last_value = val
             run_length = 1
-        elif value == last_value:
+        elif val == last_value:
             run_length += 1
         else:
-            last_value = value
+            last_value = val
             run_length = 1
 
         if run_length >= confirmed_bars:
-            last_confirmed = value
+            last_confirmed = val
             run_length = confirmed_bars
 
-        result.loc[idx] = last_confirmed
+        out[i] = last_confirmed
 
-    return result
+    return pd.Series(out, index=regime_series.index, name=regime_series.name)
 
 
 def get_current_regime(df: pd.DataFrame, config: RegimeConfig | None = None) -> str:

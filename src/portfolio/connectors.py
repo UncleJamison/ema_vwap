@@ -44,7 +44,7 @@ class BaseVenueConnector(ABC):
     """Abstract base class for all exchange and broker balance connectors."""
 
     def __init__(self, settings: SettingsManager | None = None):
-        self.settings = settings or SettingsManager(get_database("system"))
+        self.settings = settings or SettingsManager()
 
     @abstractmethod
     def get_venue_name(self) -> str:
@@ -659,29 +659,80 @@ class PaperTradingBalanceConnector(BaseVenueConnector):
 
     def __init__(self, settings: SettingsManager | None = None) -> None:
         super().__init__(settings)
-        self.engine = (
-            PaperTradingEngine(settings.db) if settings else PaperTradingEngine()
-        )
+        db = get_database("paper_trading")
+        self.engine = PaperTradingEngine(db=db)
 
     def get_venue_name(self) -> str:
         return "paper"
 
     def fetch_balances(self) -> VenueBalance:
         """Fetch balances from the paper trading engine."""
-        balance = self.engine.get_balance_snapshot()
-        positions = balance.get("positions", [])
-        # Only consider paper trading as "connected" if there are active positions
-        # This allows synthetic fallback when paper trading has no active positions
-        is_connected = len(positions) > 0
-        return VenueBalance(
-            venue="paper",
-            venue_type="crypto",
-            is_connected=is_connected,
-            cash_usd=balance.get("cash_usd", 0.0),
-            stablecoin_usd=balance.get("stablecoin_usd", 0.0),
-            crypto_usd=balance.get("crypto_usd", 0.0),
-            stock_usd=balance.get("stock_usd", 0.0),
-            positions=positions,
-            total_nav_usd=balance.get("total_nav_usd", 0.0),
-            buying_power_usd=balance.get("buying_power_usd", 0.0),
-        )
+        try:
+            from src.portfolio.connectors import categorize_currency
+            from src.portfolio.models import AssetPosition
+
+            balance = self.engine.get_balance_snapshot()
+            raw_positions = balance.get("positions", [])
+            asset_positions: list[AssetPosition] = []
+
+            for p in raw_positions:
+                if isinstance(p, AssetPosition):
+                    asset_positions.append(p)
+                elif isinstance(p, dict):
+                    sym = p.get("symbol", "")
+                    base_cur = sym.split("/")[0] if "/" in sym else sym
+                    asset_type = categorize_currency(base_cur)
+                    if asset_type not in ("crypto", "stock"):
+                        asset_type = "crypto"
+                    side_int = 1 if p.get("side") in (1, "LONG", "buy") else -1
+                    cost = float(p.get("cost_basis", 0.0))
+                    qty = float(p.get("quantity", 0.0))
+                    cur_p = float(p.get("current_price", 0.0))
+                    mkt_val = qty * cur_p if qty > 0 and cur_p > 0 else cost
+                    asset_positions.append(
+                        AssetPosition(
+                            symbol=sym,
+                            venue="paper",
+                            asset_type=asset_type,
+                            side=side_int,
+                            quantity=qty,
+                            entry_price=float(p.get("entry_price", 0.0)),
+                            current_price=cur_p,
+                            market_value_usd=mkt_val,
+                            unrealized_pnl_usd=float(
+                                p.get(
+                                    "unrealized_pnl_usd", p.get("unrealized_pnl", 0.0)
+                                )
+                            ),
+                            unrealized_pnl_pct=float(p.get("unrealized_pnl_pct", 0.0)),
+                        )
+                    )
+
+            cash_usd = balance.get("cash_usd", 0.0)
+            total_nav = balance.get("total_nav_usd", 0.0)
+            is_connected = (
+                (total_nav > 0.0) or (cash_usd > 0.0) or (len(asset_positions) > 0)
+            )
+            return VenueBalance(
+                venue="paper",
+                venue_type="crypto",
+                is_connected=is_connected,
+                cash_usd=cash_usd,
+                stablecoin_usd=balance.get("stablecoin_usd", 0.0),
+                crypto_usd=balance.get("crypto_usd", 0.0),
+                stock_usd=balance.get("stock_usd", 0.0),
+                positions=asset_positions,
+                total_nav_usd=total_nav,
+                buying_power_usd=balance.get("buying_power_usd", 0.0),
+            )
+        except Exception as e:
+            logger.warning(
+                f"[PaperTradingBalanceConnector] Failed to fetch balances: {e}"
+            )
+            # Return empty balance with error - allows synthetic fallback
+            return VenueBalance(
+                venue="paper",
+                venue_type="crypto",
+                is_connected=False,
+                error_message=str(e),
+            )

@@ -6,14 +6,22 @@ import pandas as pd
 
 from src.config import StrategyParams
 from src.indicators import compute_all_indicators, compute_ema
-from src.regime import get_current_regime, regime_to_strategy_mode
+from src.regime import (
+    RegimeConfig,
+    classify_regime,
+)
 
 
 class EmaVwapStrategy:
     """Generates trade entry and exit signals based on EMA + VWAP setup rules."""
 
-    def __init__(self, params: StrategyParams):
+    def __init__(
+        self,
+        params: StrategyParams,
+        regime_config: RegimeConfig | None = None,
+    ):
         self.params = params
+        self.regime_config = regime_config
 
     def evaluate_filters(self, df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
         """
@@ -123,9 +131,9 @@ class EmaVwapStrategy:
         """
         Applies requested setup and filters df with all technical indicators.
         Returns DataFrame with 'signal' column (1 = Buy, -1 = Sell, 0 = Hold).
-        When strategy_mode='auto', regime is detected via get_current_regime and
-        mapped to a strategy mode via REGIME_MAP (trending->multi_ema,
-        ranging->pullback, high_vol->crossover).
+        When strategy_mode='auto', regime is detected point-in-time via classify_regime
+        and dynamically mapped to a strategy mode per bar via REGIME_MAP
+        (trending->multi_ema, ranging->pullback, high_vol->crossover).
         """
         if precomputed_indicators is None:
             df = compute_all_indicators(df, self.params)
@@ -138,20 +146,61 @@ class EmaVwapStrategy:
             }:
                 df[f"ema_{period}"] = compute_ema(df["close"], period)
 
+        # Multi-timeframe (Option A - Phase 4): optionally use 1m regime series for classification
+        # When 1m data is available (cached after first fetch), classify_regime can use 1m df
+        # The 5m trading loop remains unchanged; only classification uses finer granularity
+        # This runs for BOTH precomputed_indicators paths
+
+        regime_df_1m = getattr(self.params, "_regime_df_1m", None)
+
+        if (
+            regime_df_1m is not None
+            and hasattr(regime_df_1m, "index")
+            and not regime_df_1m.empty
+        ):
+            # Use 1m data for regime classification (multi-timeframe Option A)
+            regime_series_1m = classify_regime(regime_df_1m, config=self.regime_config)
+
+            # Resample 1m regime to 5m by taking the last regime label of each 5m bar
+            # This requires aligning timestamps; for simplicity, forward-fill then resample
+            regime_series = regime_series_1m.resample("5min").last().ffill()
+            # Align to the 5m df index (forward fill to match timestamps)
+            regime_series = regime_series.reindex(df.index, method="ffill")
+            df["regime"] = regime_series
+        else:
+            # Fallback to 5m regime classification (existing logic)
+            # Compute point-in-time regime classification without lookahead bias
+            if "regime" in df.columns and precomputed_indicators is not None:
+                regime_series = df["regime"]
+            else:
+                regime_series = classify_regime(df, config=self.regime_config)
+                df["regime"] = regime_series
+
         if self.params.strategy_mode == "auto":
-            regime = get_current_regime(df)
-            effective_mode = regime_to_strategy_mode(regime)
-            df["regime"] = pd.Series([regime] * len(df))
+            # Generate setups for all regimes and dynamically assign per bar
+            sig_multi = self.generate_multi_ema_signals(df)
+            sig_pull = self.generate_pullback_signals(df)
+            sig_cross = self.generate_crossover_signals(df)
+
+            raw_signals = pd.Series(0, index=df.index, dtype=int)
+            trending_mask = regime_series == "trending"
+            ranging_mask = regime_series == "ranging"
+            high_vol_mask = regime_series == "high_vol"
+            # Default fallback for insufficient_data or unclassified bars is crossover
+            other_mask = ~(trending_mask | ranging_mask | high_vol_mask)
+
+            raw_signals[trending_mask] = sig_multi[trending_mask]
+            raw_signals[ranging_mask] = sig_pull[ranging_mask]
+            raw_signals[high_vol_mask] = sig_cross[high_vol_mask]
+            raw_signals[other_mask] = sig_cross[other_mask]
         else:
             effective_mode = self.params.strategy_mode
-            df["regime"] = pd.Series(["static"] * len(df))
-
-        if effective_mode == "multi_ema":
-            raw_signals = self.generate_multi_ema_signals(df)
-        elif effective_mode == "pullback":
-            raw_signals = self.generate_pullback_signals(df)
-        else:
-            raw_signals = self.generate_crossover_signals(df)
+            if effective_mode == "multi_ema":
+                raw_signals = self.generate_multi_ema_signals(df)
+            elif effective_mode == "pullback":
+                raw_signals = self.generate_pullback_signals(df)
+            else:
+                raw_signals = self.generate_crossover_signals(df)
 
         # Apply VWAP Slope & Volume Gates
         slope_pass, volume_pass = self.evaluate_filters(df)

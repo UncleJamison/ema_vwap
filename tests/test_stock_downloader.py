@@ -57,7 +57,7 @@ def test_synthetic_stock_split_simulation():
     assert df_adjusted["close"].iloc[6] == df_split["close"].iloc[6]
 
 
-def test_alpaca_adapter_symbol_formatting_and_missing_keys(tmp_path):
+def test_alpaca_adapter_symbol_formatting_and_missing_keys(tmp_path, pg_container):
     """Verify Alpaca adapter handles symbols and returns empty df with warning if keys missing."""
     db_file = os.path.join(tmp_path, "system_test_settings.db")
     db = CandleDatabase(db_path=db_file)
@@ -74,7 +74,7 @@ def test_alpaca_adapter_symbol_formatting_and_missing_keys(tmp_path):
     assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
 
 
-def test_polygon_adapter_symbol_formatting_and_missing_keys(tmp_path):
+def test_polygon_adapter_symbol_formatting_and_missing_keys(tmp_path, pg_container):
     """Verify Polygon adapter handles symbols and returns empty df with warning if key missing."""
     db_file = os.path.join(tmp_path, "system_test_settings.db")
     db = CandleDatabase(db_path=db_file)
@@ -89,10 +89,23 @@ def test_polygon_adapter_symbol_formatting_and_missing_keys(tmp_path):
     assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
 
 
-def test_stock_data_loader_sqlite_caching_and_resampling(tmp_path):
-    """Verify stock candle caching into SQLite database and resampling."""
-    db_file = os.path.join(tmp_path, "system_test_stock_candles.db")
-    db = CandleDatabase(db_path=db_file)
+def test_stock_data_loader_sqlite_caching_and_resampling(pg_container):
+    """Verify stock candle caching into the database and resampling."""
+    import asyncio as _asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
+
+        pool = get_pg_manager().get_pool("candles")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM candles WHERE exchange = 'alpaca' AND symbol = 'AAPL'"
+            )
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(timeout=10)
+    db = CandleDatabase()
 
     adapter = SyntheticStockAdapter()
     df_5m = adapter.fetch_historical_candles(symbol="AAPL", timeframe="5m", days=5)
@@ -106,11 +119,24 @@ def test_stock_data_loader_sqlite_caching_and_resampling(tmp_path):
     assert df_loaded["close"].iloc[0] == df_5m["close"].iloc[0]
 
 
-def test_stock_settings_manager_storage_and_masking(tmp_path):
+def test_stock_settings_manager_storage_and_masking(pg_container):
     """Verify SettingsManager stores and masks Alpaca, Polygon, and Tiingo credentials."""
-    db_file = os.path.join(tmp_path, "system_test_settings_stock.db")
-    db = CandleDatabase(db_path=db_file)
-    mgr = SettingsManager(db=db)
+    import asyncio as _asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
+
+        pool = get_pg_manager().get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM settings WHERE key LIKE 'alpaca_%' "
+                "OR key LIKE 'polygon_%' OR key LIKE 'tiingo_%'"
+            )
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(timeout=10)
+    mgr = SettingsManager()
 
     mgr.update_bulk(
         {

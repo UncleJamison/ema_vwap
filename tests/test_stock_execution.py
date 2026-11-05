@@ -4,6 +4,8 @@ Intraday Margin Monitoring (4:1 longs, 2:1 shorts), and SEC/FINRA regulatory fee
 (Effective June 4, 2026: Old PDT 3-day-trade rule eliminated in favor of real-time margin framework)
 """
 
+from datetime import UTC
+
 import pandas as pd
 
 from src.backtester import BacktestEngine
@@ -162,9 +164,9 @@ def test_short_stock_regulatory_fees_apply_to_opening_sale():
 
 def test_intraday_margin_monitoring():
     """Verify that real-time intraday margin monitoring enforces 4:1 buying power for longs and blocks trades if insufficient margin."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    base_time = datetime(2026, 8, 31, 13, 30, tzinfo=timezone.utc)
+    base_time = datetime(2026, 8, 31, 13, 30, tzinfo=UTC)
     bars = []
 
     # Create multiple bars with signals for trading attempts
@@ -267,9 +269,9 @@ def test_margin_equity_breach_liquidates_open_stock_position():
                 "2026-09-01 13:30:00+00:00",
             ],
             "open": [100.0, 100.0],
-            "high": [101.0, 91.0],
-            "low": [99.0, 88.0],
-            "close": [100.0, 89.0],
+            "high": [101.0, 82.0],
+            "low": [99.0, 78.0],
+            "close": [100.0, 80.0],
             "volume": [1000, 1000],
             "signal": [1, 0],
             "vwap": [100.0, 100.0],
@@ -298,9 +300,9 @@ def test_margin_equity_breach_liquidates_open_stock_position():
 
 def test_minimum_margin_equity_enforcement():
     """Verify that minimum $2,000 margin equity requirement blocks trades when equity drops below threshold."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    base_time = datetime(2026, 8, 31, 13, 30, tzinfo=timezone.utc)
+    base_time = datetime(2026, 8, 31, 13, 30, tzinfo=UTC)
     bars = []
 
     # Create bars with a losing trade to drop equity below minimum

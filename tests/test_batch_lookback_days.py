@@ -27,6 +27,7 @@ Key behavior: For KuCoin, specific timeframes use explicit donors:
 Native (no donor): 1m, 5m, 15m, 1h, 8h, 12h, 1d
 """
 
+import asyncio
 from unittest.mock import Mock, patch
 
 import pytest
@@ -101,7 +102,7 @@ class TestBatchOptimizeLookbackDays:
         captured_calls = []
 
         def capture_load_candles(
-            exchange, symbol, timeframe, limit=None, days=None, use_cache=True
+            exchange, symbol, timeframe, limit=None, days=None, use_cache=True, **kwargs
         ):
             captured_calls.append(
                 {
@@ -111,6 +112,7 @@ class TestBatchOptimizeLookbackDays:
                     "limit": limit,
                     "days": days,
                     "use_cache": use_cache,
+                    "lookback_days": kwargs.get("lookback_days"),
                 }
             )
             import pandas as pd
@@ -147,6 +149,7 @@ class TestBatchOptimizeLookbackDays:
             return df
 
         mock_dataloader.load_candles.side_effect = capture_load_candles
+        mock_dataloader.load_candles_sync.side_effect = capture_load_candles
 
         config = BatchOptimizerConfig(
             exchange="kucoin",
@@ -159,7 +162,19 @@ class TestBatchOptimizeLookbackDays:
         )
 
         optimizer = BatchOptimizer(config)
-        optimizer.run()
+
+        async def _fake_save_pg(**kwargs):
+            return None
+
+        async def _fake_load_pg(**kwargs):
+            return []
+
+        import src.batch_optimizer as _bm
+
+        with patch.object(_bm, "save_batch_result_pg", _fake_save_pg), patch.object(
+            _bm, "load_batch_results_pg", _fake_load_pg
+        ):
+            asyncio.run(optimizer.run())
 
         print(f"Captured {len(captured_calls)} load_candles calls:")
         for call in captured_calls:

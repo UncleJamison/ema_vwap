@@ -149,11 +149,18 @@ class StrategyParams:
 
     # Risk Management & Stop Loss
     stop_loss_type: Literal["vwap", "atr"] = "vwap"
-    vwap_stop_offset_pct: float = 0.1  # Offset % added beyond VWAP line for stop loss
+    vwap_stop_offset_pct: float = (
+        0.1  # Base VWAP stop offset; RiskManager adjusts it by regime
+    )
     atr_period: int = 14
-    atr_multiplier: float = 2.0  # ATR trailing stop multiplier
+    atr_multiplier: float = (
+        2.0  # Base ATR stop multiplier; RiskManager adjusts it by regime
+    )
     trailing_stop_pct: float = (
         1.5  # Trailing stop % of price (profit lock); 0 to disable
+    )
+    trailing_stop_activation_pct: float = (
+        0.0  # Min favorable move % required before trailing stop activates (0 to disable)
     )
     risk_reward_ratio: float = 2.0  # Target R:R (e.g., 2.0 means Take Profit = 2x Risk)
     risk_per_trade_pct: float = 1.0  # Risk % of account equity per trade
@@ -211,6 +218,9 @@ class StrategyParams:
             "risk_reward_ratio": self.risk_reward_ratio,
             "risk_per_trade_pct": self.risk_per_trade_pct,
             "max_holding_bars": self.max_holding_bars,
+            "trailing_stop_pct": self.trailing_stop_pct,
+            "trailing_stop_activation_pct": self.trailing_stop_activation_pct,
+            "max_position_pct": self.max_position_pct,
             "initial_capital": self.initial_capital,
             "maker_fee_pct": self.maker_fee_pct,
             "taker_fee_pct": self.taker_fee_pct,
@@ -324,11 +334,26 @@ class OptunaConfig:
     multi_objective_metrics: list[str] = field(
         default_factory=lambda: ["sharpe_ratio", "max_drawdown_pct"]
     )
+    # Pruner: early-stop unpromising trials (ema_vwap-0w9 / discussion with user)
+    pruner: Literal["median", "hyperband", "none"] = "none"
 
     # Regime-adaptive sweep settings (ema_vwap-0tj)
     regime_sweep_enabled: bool = False
     regime_sweep_days: int = 180
     regime_sweep_n_jobs: int = 1
+    # Phase 1 (ema_vwap-0w9): regime-aware parameter search (flexible — same ranges, regime-aware defaults)
+    regime_aware_params: bool = False
+    # Phase 4 (0w9): multi-timeframe regime classification (1m for classification, 5m for trading)
+    use_multi_timeframe_regime: bool = True
+
+    def __post_init__(self) -> None:
+        if "|" in str(self.target_metric):
+            metrics = [
+                m.strip() for m in str(self.target_metric).split("|") if m.strip()
+            ]
+            self.enable_multi_objective = True
+            self.multi_objective_metrics = metrics
+            self.target_metric = metrics[0]
 
     def to_dict(self) -> dict[str, Any]:
         return {

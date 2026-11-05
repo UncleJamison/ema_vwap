@@ -7,10 +7,21 @@ from fastapi.testclient import TestClient
 
 from src.app import BacktestRequest, app, build_strategy_params
 from src.config import StrategyParams
-from src.database import CandleDatabase
 from src.paper.engine import PaperTradingEngine
 from src.paper.ledger import PaperLedger
 from src.paper.models import PaperPosition, PaperProfile
+
+
+class _InlineTaskManager:
+    def __init__(self):
+        self.result = None
+
+    def run_in_background(self, task_name, target_func, *args, **kwargs):
+        self.result = target_func("task-test", self, *args, **kwargs)
+        return "task-test"
+
+    def update_progress(self, task_id, progress_pct, step_description):
+        pass
 
 
 def test_request_to_strategy_params_fidelity():
@@ -92,12 +103,22 @@ def test_paper_profile_get_strategy_params():
     assert strat_params.atr_multiplier == 2.5
 
 
-def test_paper_engine_reconciliation_safely_parses_params(tmp_path):
+def test_paper_engine_reconciliation_safely_parses_params(pg_container):
     """Verify PaperTradingEngine reconciles positions without AttributeError or TypeError."""
-    db_file = tmp_path / "test_paper_recon.db"
-    db = CandleDatabase(db_path=str(db_file))
-    ledger = PaperLedger(db=db)
-    engine = PaperTradingEngine(db=db)
+    import asyncio as _asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
+
+        pool = get_pg_manager().get_pool("paper_trading")
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE paper_positions RESTART IDENTITY")
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(timeout=10)
+    ledger = PaperLedger()
+    engine = PaperTradingEngine()
 
     # Record open position with extra metadata
     pos = PaperPosition(
@@ -123,9 +144,17 @@ def test_paper_engine_reconciliation_safely_parses_params(tmp_path):
     assert isinstance(reconciled, list)
 
 
-def test_api_backtest_with_extended_params():
+def test_api_backtest_with_extended_params(auth_headers, monkeypatch):
     """Verify POST /api/backtest accepts and evaluates with full extended parameters."""
     client = TestClient(app)
+    task_manager = _InlineTaskManager()
+
+    class FakeSettingsManager:
+        def resolve_exchange_symbol(self, symbol, live_mode=False):
+            return "synthetic", symbol
+
+    monkeypatch.setattr("src.routes.backtest_opt.global_task_manager", task_manager)
+    monkeypatch.setattr("src.settings.SettingsManager", FakeSettingsManager)
     payload = {
         "exchange": "synthetic",
         "symbol": "BTC/USD",
@@ -139,20 +168,154 @@ def test_api_backtest_with_extended_params():
         "pullback_tolerance_pct": 0.25,
         "atr_multiplier": 2.5,
     }
-    response = client.post("/api/backtest", json=payload)
+    response = client.post("/api/backtest", json=payload, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
-    assert "metrics" in data
-    assert "chart_data" in data
+    assert data == {"status": "started", "task_id": "task-test"}
+    assert task_manager.result["status"] == "success"
+    assert "metrics" in task_manager.result
+    assert "chart_data" in task_manager.result
 
 
-def test_full_pipeline_optuna_to_paper_trading():
+def test_api_backtest_preserves_trailing_stop_and_max_position_pct(
+    auth_headers, monkeypatch
+):
+    """Verify POST /api/backtest propagates trailing_stop_pct, trailing_stop_activation_pct, and max_position_pct."""
+    from unittest.mock import Mock
+
+    from fastapi.testclient import TestClient
+
+    from src.app import app
+    from src.data_loader import DataLoader
+
+    client = TestClient(app)
+    task_manager = _InlineTaskManager()
+
+    class FakeSettingsManager:
+        def resolve_exchange_symbol(self, symbol, live_mode=False):
+            return "kucoin", symbol
+
+    monkeypatch.setattr("src.routes.backtest_opt.global_task_manager", task_manager)
+    monkeypatch.setattr("src.settings.SettingsManager", FakeSettingsManager)
+    monkeypatch.setattr(
+        DataLoader,
+        "load_candles_sync",
+        lambda **kwargs: DataLoader.generate_synthetic_candles(
+            symbol=kwargs["symbol"], timeframe=kwargs["timeframe"], num_bars=100
+        ),
+    )
+    mock_engine = Mock()
+    mock_result = Mock()
+    mock_result.to_dict.return_value = {"total_return_pct": 5.0}
+    mock_engine.return_value.run.return_value = mock_result
+    monkeypatch.setattr("src.routes.backtest_opt.BacktestEngine", mock_engine)
+
+    payload = {
+        "exchange": "kucoin",
+        "symbol": "BTC/USD",
+        "timeframe": "5m",
+        "limit": 100,
+        "trailing_stop_pct": 2.75,
+        "trailing_stop_activation_pct": 1.25,
+        "max_position_pct": 65.0,
+    }
+
+    response = client.post("/api/backtest", json=payload, headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json() == {"status": "started", "task_id": "task-test"}
+
+    mock_engine.assert_called_once()
+    passed_params = mock_engine.call_args[0][0]
+    assert passed_params.trailing_stop_pct == 2.75
+    assert passed_params.trailing_stop_activation_pct == 1.25
+    assert passed_params.max_position_pct == 65.0
+
+
+def test_api_optimize_preserves_custom_trailing_stop_and_position_bounds(auth_headers):
+    """Verify POST /api/optimize maps custom sweep bounds into OptunaConfig."""
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from src.app import app
+
+    client = TestClient(app)
+    with patch("src.routes.backtest_opt.global_task_manager") as mock_tm, patch(
+        "src.routes.backtest_opt.OptunaConfig"
+    ) as mock_optuna_cfg:
+
+        mock_tm.run_in_background.return_value = "task-test-opt"
+        payload = {
+            "exchange": "synthetic",
+            "symbol": "BTC/USD",
+            "timeframe": "5m",
+            "n_trials": 10,
+            "trailing_stop_min": 0.5,
+            "trailing_stop_max": 4.5,
+            "max_position_pct_min": 30.0,
+            "max_position_pct_max": 90.0,
+        }
+
+        response = client.post("/api/optimize", json=payload, headers=auth_headers)
+        assert response.status_code == 200
+        assert response.json()["task_id"] == "task-test-opt"
+
+        mock_optuna_cfg.assert_called_once()
+        kwargs = mock_optuna_cfg.call_args[1]
+        assert kwargs["trailing_stop_min"] == 0.5
+        assert kwargs["trailing_stop_max"] == 4.5
+        assert kwargs["max_position_pct_min"] == 30.0
+        assert kwargs["max_position_pct_max"] == 90.0
+
+
+def test_base_strategy_request_validation():
+    """Verify validation constraints on trailing_stop_pct and max_position_pct."""
+    from pydantic import ValidationError
+
+    from src.routes.backtest_opt import BaseStrategyRequest
+
+    # Valid
+    valid_req = BaseStrategyRequest(
+        trailing_stop_pct=0.0,
+        trailing_stop_activation_pct=0.0,
+        max_position_pct=1.0,
+    )
+    assert valid_req.trailing_stop_pct == 0.0
+
+    # Invalid trailing_stop_pct < 0
+    try:
+        BaseStrategyRequest(trailing_stop_pct=-0.1)
+        assert False, "Expected ValidationError for negative trailing_stop_pct"
+    except ValidationError:
+        pass
+
+    # Invalid trailing_stop_pct > 50
+    try:
+        BaseStrategyRequest(trailing_stop_pct=50.1)
+        assert False, "Expected ValidationError for trailing_stop_pct > 50"
+    except ValidationError:
+        pass
+
+    # Invalid max_position_pct < 1
+    try:
+        BaseStrategyRequest(max_position_pct=0.9)
+        assert False, "Expected ValidationError for max_position_pct < 1"
+    except ValidationError:
+        pass
+
+    # Invalid max_position_pct > 500
+    try:
+        BaseStrategyRequest(max_position_pct=500.1)
+        assert False, "Expected ValidationError for max_position_pct > 500"
+    except ValidationError:
+        pass
+
+
+def test_full_pipeline_optuna_to_paper_trading(pg_container):
     """
     End-to-end integration test: Optuna Sweep -> Apply -> Backtest -> Deploy -> Paper Trade.
     Verifies parameter propagation across all 5 stages without stubbing or loss.
     """
-    import os
-    import tempfile
 
     from fastapi.testclient import TestClient
 
@@ -160,7 +323,6 @@ def test_full_pipeline_optuna_to_paper_trading():
     from src.backtester import BacktestEngine
     from src.config import OptunaConfig, StrategyParams
     from src.data_loader import DataLoader
-    from src.database import CandleDatabase
     from src.optimizer import OptunaOptimizer
     from src.paper.engine import PaperTradingEngine
     from src.paper.ledger import PaperLedger
@@ -254,36 +416,34 @@ def test_full_pipeline_optuna_to_paper_trading():
     assert strat_params.atr_multiplier == bt_params.atr_multiplier
 
     # Step 5: Verify paper engine can use these params
-    with tempfile.NamedTemporaryFile(
-        suffix="paper_trading_test_db.db", delete=False
-    ) as f:
-        db_path = f.name
-    db = None
     engine = None
     try:
-        db = CandleDatabase(db_path=db_path)
-        PaperLedger(db=db)
-        engine = PaperTradingEngine(db=db)
+        PaperLedger()
+        engine = PaperTradingEngine()
 
         # Register a profile with the optimized params
-        profile_id = engine.registry.save_profile(
-            exchange="synthetic",
-            symbol="BTC/USD",
-            timeframe="5m",
-            strategy_mode=base_params.strategy_mode,
-            target_metric="sharpe_ratio",
-            params={
-                "fast_ema": strat_params.fast_ema,
-                "slow_ema": strat_params.slow_ema,
-                "trend_ema": strat_params.trend_ema,
-                "atr_multiplier": strat_params.atr_multiplier,
-                "risk_reward_ratio": strat_params.risk_reward_ratio,
-            },
+        from src.sync_bridge import run_async
+
+        profile_id = run_async(
+            engine.registry.save_profile(
+                exchange="synthetic",
+                symbol="BTC/USD",
+                timeframe="5m",
+                strategy_mode=base_params.strategy_mode,
+                target_metric="sharpe_ratio",
+                params={
+                    "fast_ema": strat_params.fast_ema,
+                    "slow_ema": strat_params.slow_ema,
+                    "trend_ema": strat_params.trend_ema,
+                    "atr_multiplier": strat_params.atr_multiplier,
+                    "risk_reward_ratio": strat_params.risk_reward_ratio,
+                },
+            )
         )
         assert profile_id is not None
 
         # Verify profile retrieves correct params
-        profiles = engine.registry.list_profiles(active_only=True)
+        profiles = run_async(engine.registry.list_profiles(active_only=True))
         assert len(profiles) >= 1
         deployed = next(p for p in profiles if p.profile_id == profile_id)
         assert deployed.params["fast_ema"] == bt_params.fast_ema
@@ -303,7 +463,7 @@ def test_full_pipeline_optuna_to_paper_trading():
         print("✅ Full pipeline Optuna->Apply->Backtest->Deploy->PaperTrade verified!")
 
     finally:
-        # Close engine and db to release file handle on Windows
+        # Stop polling (best effort)
         if engine is not None:
             try:
                 engine.stop_polling()
@@ -313,19 +473,6 @@ def test_full_pipeline_optuna_to_paper_trading():
                 TypeError,
             ):  # pragma: no cover - best effort cleanup
                 pass
-        # CandleDatabase doesn't have a persistent conn attribute; it manages connections internally
-        # Just ensure the file is cleaned up
-        try:
-            os.unlink(db_path)
-        except PermissionError:
-            # On Windows, file might still be locked; ignore
-            pass
-        except (
-            RuntimeError,
-            ValueError,
-            TypeError,
-        ):  # pragma: no cover - best effort cleanup
-            pass
 
 
 def test_pipeline_parameter_fidelity_check():

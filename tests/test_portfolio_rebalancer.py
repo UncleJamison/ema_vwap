@@ -80,6 +80,7 @@ def test_rebalance_and_routing_endpoints():
     from src.app import app
 
     client = TestClient(app)
+    headers = {"X-API-Key": "test-key-for-tests"}
 
     # 1. Route order endpoint
     resp_order = client.post(
@@ -91,6 +92,7 @@ def test_rebalance_and_routing_endpoints():
             "venue": "auto",
             "dry_run": True,
         },
+        headers=headers,
     )
     assert resp_order.status_code == 200
     assert resp_order.json()["status"] == "success"
@@ -104,6 +106,7 @@ def test_rebalance_and_routing_endpoints():
             "drift_threshold_pct": 1.0,
             "include_synthetic": True,
         },
+        headers=headers,
     )
     assert resp_plan.status_code == 200
     assert resp_plan.json()["status"] == "success"
@@ -118,6 +121,7 @@ def test_rebalance_and_routing_endpoints():
             "dry_run": True,
             "include_synthetic": True,
         },
+        headers=headers,
     )
     assert resp_exec.status_code == 200
     assert resp_exec.json()["status"] == "success"
@@ -219,6 +223,7 @@ def test_export_batch_to_portfolio_validation():
     from src.app import app
 
     client = TestClient(app)
+    headers = {"X-API-Key": "test-key-for-tests"}
 
     # Test: Empty result_ids should fail
     resp = client.post(
@@ -230,6 +235,7 @@ def test_export_batch_to_portfolio_validation():
             "min_sharpe": 0.5,
             "min_trades": 5,
         },
+        headers=headers,
     )
     assert resp.status_code == 404
 
@@ -243,6 +249,7 @@ def test_export_batch_to_portfolio_validation():
             "min_sharpe": 0.5,
             "min_trades": 5,
         },
+        headers=headers,
     )
     assert resp.status_code == 404
 

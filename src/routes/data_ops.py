@@ -35,12 +35,17 @@ class SyncHistoryRequest(BaseModel):
 @limiter.limit("10/minute")
 def sync_history(request: Request, req: SyncHistoryRequest) -> dict[str, Any]:
     try:
-        logger.info(
-            f"[API] Syncing {req.days} days of historical candles for {req.symbol} ({req.exchange})..."
+        # Resolve canonical symbol for data loading (allows "BTC/USD" -> kucoin:BTC/USD)
+        resolved_exchange, resolved_symbol = DataLoader.resolve_canonical_symbol(
+            req.symbol, live_mode=False
         )
-        df = DataLoader.load_candles(
-            exchange=req.exchange,
-            symbol=req.symbol,
+
+        logger.info(
+            f"[API] Syncing {req.days} days of historical candles for {resolved_symbol} ({resolved_exchange})..."
+        )
+        df = DataLoader.load_candles_sync(
+            exchange=resolved_exchange,
+            symbol=resolved_symbol,
             timeframe=req.timeframe,
             days=req.days,
             limit=None,

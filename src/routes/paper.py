@@ -4,6 +4,7 @@ Extracted from src/app.py (ema_vwap-tq41). Shared state is read through
 `src.app` at call time so monkeypatched tests keep working.
 """
 
+import asyncio
 import math
 from typing import Any, Literal
 
@@ -36,10 +37,10 @@ class DeployPaperProfileRequest(BaseModel):
 
 
 @router.post("/api/paper/profiles/deploy", dependencies=[Depends(get_api_key)])
-def deploy_paper_profile(req: DeployPaperProfileRequest) -> dict[str, Any]:
+async def deploy_paper_profile(req: DeployPaperProfileRequest) -> dict[str, Any]:
     """1-Click deployment: Save & activate an Optuna trial parameter set for a symbol."""
     try:
-        profile_id = _st()._paper_profiles.save_profile(
+        profile_id = await _st()._paper_profiles.save_profile(
             exchange=req.exchange,
             symbol=req.symbol,
             timeframe=req.timeframe,
@@ -48,10 +49,10 @@ def deploy_paper_profile(req: DeployPaperProfileRequest) -> dict[str, Any]:
             params=req.params,
             optuna_score=req.optuna_score,
             is_active=req.is_active,
-            deployed=True,
+            is_deployed=True,
             validation_report=req.validation_report,
         )
-        saved = _st()._paper_profiles.get_profile(
+        saved = await _st()._paper_profiles.get_profile(
             exchange=req.exchange,
             symbol=req.symbol,
             timeframe=req.timeframe,
@@ -88,7 +89,7 @@ def list_paper_profiles(
 ) -> dict[str, Any]:
     """List all saved per-asset paper trading profiles."""
     try:
-        profiles = _st()._paper_profiles.list_profiles(
+        profiles = _st()._paper_profiles.list_profiles_sync(
             exchange=exchange, active_only=active_only
         )
         return {
@@ -125,7 +126,7 @@ def get_paper_profile_for_symbol(
 ) -> dict[str, Any]:
     """Get the active paper profile for a specific exchange and symbol."""
     try:
-        profile = _st()._paper_profiles.get_profile(
+        profile = _st()._paper_profiles.get_profile_sync(
             exchange=exchange,
             symbol=symbol,
             timeframe=timeframe,
@@ -171,7 +172,7 @@ def toggle_paper_profile_active(
     profile_id: int, req: ToggleActiveRequest
 ) -> dict[str, Any]:
     """Toggle the active state of a paper profile."""
-    updated = _st()._paper_profiles.set_active(profile_id, req.is_active)
+    updated = asyncio.run(_st()._paper_profiles.set_active(profile_id, req.is_active))
     if not updated:
         raise HTTPException(status_code=404, detail="Paper profile not found.")
     return {"status": "success", "id": profile_id, "is_active": req.is_active}
@@ -180,7 +181,7 @@ def toggle_paper_profile_active(
 @router.delete("/api/paper/profiles/{profile_id}", dependencies=[Depends(get_api_key)])
 def delete_paper_profile(profile_id: int) -> dict[str, Any]:
     """Delete a paper profile by ID."""
-    deleted = _st()._paper_profiles.delete_profile(profile_id)
+    deleted = asyncio.run(_st()._paper_profiles.delete_profile(profile_id))
     if not deleted:
         raise HTTPException(status_code=404, detail="Paper profile not found.")
     return {"status": "success", "deleted": True, "id": profile_id}
@@ -198,7 +199,7 @@ def update_profile_trade_direction(
     profile_id: int, req: UpdateProfileTradeDirectionRequest
 ) -> dict[str, Any]:
     """Update the trade direction / account mode for a deployed paper profile."""
-    updated = _st()._paper_profiles.update_trade_direction(
+    updated = _st()._paper_profiles.update_trade_direction_sync(
         profile_id, req.trade_direction
     )
     if not updated:
@@ -280,16 +281,16 @@ def reconcile_paper_engine() -> dict[str, Any]:
 
 
 @router.get("/api/paper/engine/status")
-def get_paper_engine_status() -> dict[str, Any]:
+async def get_paper_engine_status() -> dict[str, Any]:
     """Get live execution engine runner status, positions, balance, and stats."""
-    return _st()._paper_engine.get_status()
+    return await _st()._paper_engine.get_status()
 
 
 @router.get("/api/paper/positions")
 def list_paper_positions(exchange: str | None = None) -> dict[str, Any]:
     """List all currently active open paper trading positions."""
     try:
-        positions = _st()._paper_ledger.list_positions(exchange=exchange)
+        positions = _st()._paper_ledger.list_positions_sync(exchange=exchange)
         return {
             "status": "success",
             "count": len(positions),
@@ -402,7 +403,7 @@ def list_paper_ledger_transactions(
 ) -> dict[str, Any]:
     """List double-entry paper ledger transaction audit logs."""
     try:
-        txs = _st()._paper_ledger.list_transactions(
+        txs = _st()._paper_ledger.list_transactions_sync(
             account_id=account_id, exchange=exchange, symbol=symbol, limit=limit
         )
         return {
@@ -431,28 +432,67 @@ def list_paper_ledger_transactions(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+class DepositPaperLedgerRequest(BaseModel):
+    account_id: str = "default"
+    amount: float = 10000.0
+    notes: str = "Deposit"
+    reset: bool = False
+
+
+class ResetPaperLedgerRequest(BaseModel):
+    account_id: str = "default"
+    initial_deposit: float = 10000.0
+
+
 @router.post("/api/paper/ledger/deposit", dependencies=[Depends(get_api_key)])
 def deposit_paper_ledger(
+    req: DepositPaperLedgerRequest | None = None,
     account_id: str = "default",
     amount: float = 10000.0,
     notes: str = "Deposit",
 ) -> dict[str, Any]:
-    """Deposit cash into paper trading account."""
+    """Deposit cash into paper trading account (supports reset + re-initialization)."""
     try:
+        act_id = req.account_id if req is not None else account_id
+        dep_amount = req.amount if req is not None else amount
+        dep_notes = req.notes if req is not None else notes
+        do_reset = req.reset if req is not None else False
+
         if (
-            not isinstance(amount, (int, float))
-            or not math.isfinite(amount)
-            or amount <= 0
+            not isinstance(dep_amount, (int, float))
+            or not math.isfinite(dep_amount)
+            or dep_amount <= 0
         ):
             raise HTTPException(
                 status_code=400, detail="Amount must be a finite positive number"
             )
 
-        tx = _st()._paper_ledger.deposit(
-            account_id=account_id, amount=amount, notes=notes
+        if do_reset:
+            # Atomic reset with initial deposit
+            result = _st()._paper_ledger.reset_sync(
+                account_id=act_id, initial_deposit=dep_amount
+            )
+            _st()._paper_engine.reset_state(account_id=act_id)
+            return {
+                "status": "success",
+                "message": f"Account '{act_id}' reset and reinitialized with ${dep_amount:,.2f}",
+                "balance_after": dep_amount,
+                "reset_result": result,
+                "transaction": {
+                    "account_id": act_id,
+                    "type": "DEPOSIT",
+                    "amount": dep_amount,
+                    "balance_after": dep_amount,
+                    "notes": dep_notes,
+                },
+            }
+
+        tx = _st()._paper_ledger.deposit_sync(
+            account_id=act_id, amount=dep_amount, notes=dep_notes
         )
         return {
             "status": "success",
+            "balance_after": tx.balance_after,
             "transaction": {
                 "transaction_id": tx.transaction_id,
                 "account_id": tx.account_id,
@@ -474,14 +514,21 @@ def deposit_paper_ledger(
 
 @router.post("/api/paper/ledger/reset", dependencies=[Depends(get_api_key)])
 def reset_paper_ledger(
+    req: ResetPaperLedgerRequest | None = None,
     account_id: str = "default",
 ) -> dict[str, Any]:
     """Reset paper ledger to initial state ($10,000 balance, no positions, no history)."""
     try:
-        result = _st()._paper_ledger.reset(account_id=account_id)
+        act_id = req.account_id if req is not None else account_id
+        init_dep = req.initial_deposit if req is not None else 10000.0
+        result = _st()._paper_ledger.reset_sync(
+            account_id=act_id, initial_deposit=init_dep
+        )
+        _st()._paper_engine.reset_state(account_id=act_id)
         return {
             "status": "success",
-            "message": f"Paper ledger for account '{account_id}' reset to initial state",
+            "message": f"Paper ledger for account '{act_id}' reset to initial state",
+            "balance_after": init_dep,
             "deleted": result,
         }
     except Exception as e:
@@ -498,7 +545,7 @@ def list_paper_trade_history(
 ) -> dict[str, Any]:
     """List completed round-trip paper trade history logs."""
     try:
-        trades = _st()._paper_ledger.list_trade_history(
+        trades = _st()._paper_ledger.list_trade_history_sync(
             exchange=exchange, symbol=symbol, exit_reason=exit_reason, limit=limit
         )
         return {
@@ -536,9 +583,11 @@ def get_paper_performance(
 ) -> dict[str, Any]:
     """Get aggregate paper trading performance metrics and equity stats."""
     try:
-        stats = _st()._paper_ledger.get_statistics(exchange=exchange, symbol=symbol)
-        balance = _st()._paper_ledger.get_balance()
-        positions = _st()._paper_ledger.list_positions(exchange=exchange)
+        stats = _st()._paper_ledger.get_statistics_sync(
+            exchange=exchange, symbol=symbol
+        )
+        balance = _st()._paper_ledger.get_balance_sync()
+        positions = _st()._paper_ledger.list_positions_sync(exchange=exchange)
         unrealized = sum(p.unrealized_pnl for p in positions)
         positions_market_value = sum(p.cost_basis + p.unrealized_pnl for p in positions)
         total_equity = balance + positions_market_value

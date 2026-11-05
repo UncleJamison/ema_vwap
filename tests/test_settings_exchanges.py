@@ -2,7 +2,6 @@
 Unit tests for Gemini, KuCoin, and Robinhood Crypto API Key Settings Management.
 """
 
-from src.database import CandleDatabase
 from src.settings import SettingsManager, is_secret_key, mask_secret_value
 
 
@@ -19,11 +18,24 @@ def test_secret_key_detection_and_masking():
     assert mask_secret_value("") == ""
 
 
-def test_crypto_exchange_credentials_storage(tmp_path):
+def test_crypto_exchange_credentials_storage(pg_container):
     """Verify storing and retrieving Gemini, KuCoin, and Robinhood credentials."""
-    db_path = str(tmp_path / "system_test_settings.db")
-    db = CandleDatabase(db_path=db_path)
-    sm = SettingsManager(db=db)
+    import asyncio as _asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
+
+        pool = get_pg_manager().get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM settings WHERE key LIKE 'gemini_%' "
+                "OR key LIKE 'kucoin_%' OR key LIKE 'robinhood_%'"
+            )
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(timeout=10)
+    sm = SettingsManager()
 
     # Save credentials via update_bulk
     payload = {

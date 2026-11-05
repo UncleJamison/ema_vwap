@@ -679,7 +679,8 @@ def mock_tear_sheet_deps():
     ) as mock_mc, patch(
         "src.routes.tear_sheet.get_optimal_lookback_days", return_value=30
     ):
-
+        mock_data_loader.resolve_canonical_symbol.return_value = ("gemini", "BTC/USD")
+        mock_data_loader.aresolve_canonical_symbol.return_value = ("gemini", "BTC/USD")
         yield mock_data_loader, mock_validator, mock_backtest, mock_mc
 
 

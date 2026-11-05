@@ -4,7 +4,7 @@ PDF Renderer for EMA+VWAP Strategy Tear Sheets.
 Uses WeasyPrint to render Jinja2 HTML templates to PDF.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -79,7 +79,7 @@ def build_tear_sheet_context(
         "symbol": symbol,
         "timeframe": timeframe,
         "exchange": exchange,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "timestamp": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "status": report.get("status", "UNKNOWN"),
         "status_lower": report.get("status", "UNKNOWN").lower(),
         "overall_score": report.get("overall_score", 0),
@@ -90,7 +90,7 @@ def build_tear_sheet_context(
         "trade_distribution": trade_distribution or {},
         "equity_curves": equity_curves or [],
         "monte_carlo_percentiles": monte_carlo_percentiles or {},
-        "report_id": f"{symbol}_{timeframe}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+        "report_id": f"{symbol}_{timeframe}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}",
     }
 
     return context

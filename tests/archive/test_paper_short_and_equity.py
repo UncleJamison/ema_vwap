@@ -2,7 +2,7 @@
 Unit tests for short trade accounting, total equity calculation, and trade direction configuration in Paper Trading.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -23,7 +23,7 @@ def test_paper_ledger_long_close_position(test_db):
     ledger = PaperLedger(db=test_db)
     account_id = "default"
     ledger.deposit(account_id=account_id, amount=90000.0)  # Total 100,000
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Buy 1 BTC at $50,000, fee $50
     ledger.record_buy(
@@ -71,7 +71,7 @@ def test_paper_ledger_short_close_position_win(test_db):
     ledger = PaperLedger(db=test_db)
     account_id = "default"
     ledger.deposit(account_id=account_id, amount=90000.0)  # Total 100,000
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Short 1 BTC at $50,000, collateral reserved = $50,000, fee $50
     ledger.record_buy(
@@ -118,7 +118,7 @@ def test_paper_ledger_short_close_position_loss(test_db):
     ledger = PaperLedger(db=test_db)
     account_id = "default"
     ledger.deposit(account_id=account_id, amount=90000.0)  # Total 100,000
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Short 1 BTC at $50,000, collateral reserved = $50,000, fee $50
     ledger.record_buy(
@@ -164,7 +164,7 @@ def test_paper_ledger_short_close_position_loss(test_db):
 def test_paper_engine_total_equity_with_open_position(test_db):
     engine = PaperTradingEngine(db=test_db)
     engine.ledger.deposit(account_id="default", amount=90000.0)  # Total 100,000
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Manually add an open position
     pos = PaperPosition(

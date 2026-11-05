@@ -153,6 +153,20 @@ class OptunaOptimizer:
                 warn_independent_sampling=False,
             )
 
+        # Pruner: early-stop unpromising trials (ema_vwap-0w9 / user request)
+        pruner = getattr(self.config, "pruner", "none")
+        if pruner == "median":
+            pruner_obj = optuna.pruners.MedianPruner(n_warmup_steps=5)
+        elif pruner == "hyperband":
+            pruner_obj = optuna.pruners.HyperbandPruner(
+                min_resource=1, max_resource=100
+            )
+        else:
+            pruner_obj = optuna.pruners.NopPruner()
+
+        # Initialize study to None to avoid UnboundLocalError if creation fails
+        study = None
+
         # Determine optimization direction(s)
         if self.config.enable_multi_objective:
             # Multi-objective: determine direction for each metric
@@ -167,13 +181,24 @@ class OptunaOptimizer:
                     directions.append("minimize")
                 else:
                     directions.append("maximize")
-            study = optuna.create_study(directions=directions, sampler=sampler)
+            study = optuna.create_study(
+                directions=directions, sampler=sampler, pruner=pruner_obj
+            )
         else:
             # Single-objective: minimize if target is a "lower is better" metric
-            minimize = self.config.target_metric in {"max_drawdown_pct", "ulcer_index"}
+            minimize = self.config.target_metric in {
+                "max_drawdown_pct",
+                "ulcer_index",
+            }
             study = optuna.create_study(
-                direction="minimize" if minimize else "maximize", sampler=sampler
+                direction="minimize" if minimize else "maximize",
+                sampler=sampler,
+                pruner=pruner_obj,
             )
+
+        # Defensive: ensure study was created
+        if study is None:
+            raise RuntimeError("Failed to create Optuna study")
 
         # Warm-start (ema_vwap-ddgr): if a previous sweep on the same combo
         # (strategy_mode + metric + EMA bounds) left trials in the in-memory cache,
@@ -216,6 +241,12 @@ class OptunaOptimizer:
         trend_delta_max = max(
             trend_delta_min + 10, self.config.trend_ema_max - self.config.slow_ema_min
         )
+
+        # Phase 1 (ema_vwap-0w9): regime-aware parameter adaptation (flexible approach)
+        # Same parameter ranges, but initial/default values vary by regime
+        # Multi-timeframe (Option A): 1m for classification, 5m for trading
+        # 1m data cached after first fetch; available for future optimization runs
+        regime_aware_active = getattr(self.config, "regime_aware_params", False)
 
         # Enqueue baseline strategy parameters as Trial #0 if enabled
         if self.config.seed_base_params:
@@ -338,6 +369,49 @@ class OptunaOptimizer:
                         ),
                     )
                 )
+
+            # Phase 1 (0w9): apply regime-aware default adjustments when regime_aware_params is enabled
+            if regime_aware_active:
+                current_regime = getattr(self.base_params, "current_regime", "ranging")
+                if current_regime == "ranging":
+                    base_trial_params["fast_ema"] = min(
+                        base_trial_params.get("fast_ema", self.base_params.fast_ema), 10
+                    )
+                    base_trial_params["atr_multiplier"] = max(
+                        base_trial_params.get(
+                            "atr_multiplier", self.base_params.atr_multiplier
+                        ),
+                        3.0,
+                    )
+                    base_trial_params["vwap_slope_min"] = min(
+                        base_trial_params.get(
+                            "vwap_slope_min", self.base_params.vwap_slope_min
+                        ),
+                        0.00005,
+                    )
+                elif current_regime == "trending":
+                    base_trial_params["fast_ema"] = max(
+                        base_trial_params.get("fast_ema", self.base_params.fast_ema), 10
+                    )
+                    base_trial_params["atr_multiplier"] = min(
+                        base_trial_params.get(
+                            "atr_multiplier", self.base_params.atr_multiplier
+                        ),
+                        2.5,
+                    )
+                    base_trial_params["vwap_slope_min"] = max(
+                        base_trial_params.get(
+                            "vwap_slope_min", self.base_params.vwap_slope_min
+                        ),
+                        0.0002,
+                    )
+                elif current_regime == "high_vol":
+                    base_trial_params["risk_reward_ratio"] = min(
+                        base_trial_params.get(
+                            "risk_reward_ratio", self.base_params.risk_reward_ratio
+                        ),
+                        2.0,
+                    )
 
             try:
                 study.enqueue_trial(base_trial_params)
@@ -499,10 +573,28 @@ class OptunaOptimizer:
                 max_position_pct=max_position_pct,
                 max_holding_bars=max_holding_bars,
                 trailing_stop_pct=trailing_stop_pct,
+                # Carry over activation threshold from base_params so the
+                # optimised trailing stop only kicks in after the required
+                # favourable move (previously this was silently reset to 0.0).
+                trailing_stop_activation_pct=self.base_params.trailing_stop_activation_pct,
                 initial_capital=self.base_params.initial_capital,
                 maker_fee_pct=self.base_params.maker_fee_pct,
                 taker_fee_pct=self.base_params.taker_fee_pct,
                 slippage_pct=self.base_params.slippage_pct,
+                # Market / execution context — must be forwarded so that stock
+                # backtests run with the correct asset type, session filter, and
+                # margin constraints (previously reset to crypto defaults).
+                asset_type=self.base_params.asset_type,
+                session_mode=self.base_params.session_mode,
+                vwap_anchor=self.base_params.vwap_anchor,
+                allow_fractional_shares=self.base_params.allow_fractional_shares,
+                enforce_margin_calls=self.base_params.enforce_margin_calls,
+                min_margin_equity=self.base_params.min_margin_equity,
+                long_buying_power_ratio=self.base_params.long_buying_power_ratio,
+                short_buying_power_ratio=self.base_params.short_buying_power_ratio,
+                sec_fee_per_million=self.base_params.sec_fee_per_million,
+                finra_taf_per_share=self.base_params.finra_taf_per_share,
+                position_size=self.base_params.position_size,
             )
 
             engine = BacktestEngine(candidate_params, precomputed_indicators=df_shared)
@@ -814,7 +906,18 @@ class OptunaOptimizer:
     def _validate_config(self) -> None:
         """Reject invalid optimization settings before creating an Optuna study."""
         config = self.config
-        if config.target_metric not in self._TARGET_METRICS:
+        if "|" in str(config.target_metric):
+            metrics = [
+                m.strip() for m in str(config.target_metric).split("|") if m.strip()
+            ]
+            config.enable_multi_objective = True
+            config.multi_objective_metrics = metrics
+            config.target_metric = metrics[0]
+
+        if (
+            not config.enable_multi_objective
+            and config.target_metric not in self._TARGET_METRICS
+        ):
             raise ValueError(
                 f"Unsupported Optuna target metric: {config.target_metric}"
             )

@@ -19,7 +19,7 @@ from src.three_kt import (
 # ════════════════════════════════════════════════════════
 
 
-def test_promote_only_one_active_version(tmp_path):
+def test_promote_only_one_active_version(tmp_path, pg_container):
     """promote(v2) must deactivate v1 — only one champion at a time."""
     db = StrategyVersionDB(db_path=str(tmp_path / "test_promote_demote.db"))
     v1 = StrategyVersion.from_config("v1", StrategyParams())
@@ -48,7 +48,7 @@ def test_promote_only_one_active_version(tmp_path):
 # ════════════════════════════════════════════════════════
 
 
-def test_from_dict_preserves_id_and_db_ref():
+def test_from_dict_preserves_id_and_db_ref(pg_container):
     """from_dict must restore _id and _db from serialized data."""
     sv = StrategyVersion.from_config("x", StrategyParams(strategy_mode="pullback"))
     db = StrategyVersionDB(db_path="beads/test_from_dict.db")
@@ -68,7 +68,7 @@ def test_from_dict_preserves_id_and_db_ref():
     db.close()
 
 
-def test_from_dict_roundtrip_preserves_db_ref():
+def test_from_dict_roundtrip_preserves_db_ref(pg_container):
     """from_dict round-trip must not lose _db reference."""
     db = StrategyVersionDB(db_path="beads/test_from_dict_roundtrip.db")
     sv = StrategyVersion.from_config("y", StrategyParams())
@@ -156,14 +156,22 @@ def test_statistical_fallback_different_metrics_also_not_significant():
     assert analysis["winner"] == "inconclusive"
 
 
-def test_get_current_champion_returns_none_when_no_versions():
+def test_get_current_champion_returns_none_when_no_versions(pg_container):
     """get_current_champion returns None when the DB has no versions at all."""
     db = StrategyVersionDB(db_path="beads/test_champion_empty.db")
+
+    # Isolation: tests share one PG database (unlike per-file SQLite).
+    # Clear any versions left behind by earlier tests in this session.
+
+    async def _clear(conn):
+        await conn.execute("DELETE FROM strategy_versions")
+
+    db._run(_clear)
     assert get_current_champion(db) is None
     db.close()
 
 
-def test_get_current_champion_returns_only_active_version(tmp_path):
+def test_get_current_champion_returns_only_active_version(tmp_path, pg_container):
     """After promote(v2), get_current_champion returns v2, not v1."""
     db = StrategyVersionDB(db_path=str(tmp_path / "test_champion_active.db"))
     v1 = StrategyVersion.from_config("old", StrategyParams())
@@ -177,7 +185,9 @@ def test_get_current_champion_returns_only_active_version(tmp_path):
     db.close()
 
 
-def test_get_current_champion_returns_latest_when_multiple_active(tmp_path):
+def test_get_current_champion_returns_latest_when_multiple_active(
+    tmp_path, pg_container
+):
     """When multiple versions are active (pre-fix bug), get_current_champion
     returns the most recently created one — but promote now prevents this state."""
     db = StrategyVersionDB(db_path=str(tmp_path / "test_champion_multi.db"))
@@ -193,7 +203,7 @@ def test_get_current_champion_returns_latest_when_multiple_active(tmp_path):
     db.close()
 
 
-def test_from_dict_roundtrip_preserves_config():
+def test_from_dict_roundtrip_preserves_config(pg_container):
     """from_dict round-trip must preserve config fields exactly."""
     db = StrategyVersionDB(db_path="beads/test_config_roundtrip.db")
     sv = StrategyVersion.from_config("x", StrategyParams(strategy_mode="pullback"))

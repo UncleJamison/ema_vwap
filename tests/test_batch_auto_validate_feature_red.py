@@ -6,19 +6,18 @@ Runs RED until the feature is implemented.
 """
 
 import json
+from unittest.mock import AsyncMock
 
+import pandas as pd
 from fastapi.testclient import TestClient
 
 import src.app as app_module
-import src.data_loader
 from src.app import app
-
-# Import BatchOptimizer so the backend endpoint can use it
 from src.database import CandleDatabase
 
 
 def test_batch_auto_validate_writes_status_for_all_results_after_sweep(
-    tmp_path, monkeypatch
+    pg_container, monkeypatch, auth_headers
 ):
     """RED expectation: the batch-auto-validate checkbox is dead code —
     after a sweep completes, no saved result has a non-null validation_status.
@@ -27,7 +26,43 @@ def test_batch_auto_validate_writes_status_for_all_results_after_sweep(
     receives a non-null validation_status and validation_json, and the
     leaderboard renders the corresponding validation badges.
     """
-    db = CandleDatabase(db_path=str(tmp_path / "batch_autovalidate.db"))
+    # Clean batch results for exact-count assertions
+    import asyncio as _asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
+
+        pool = get_pg_manager().get_pool("batch_results")
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE batch_results RESTART IDENTITY")
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(timeout=10)
+    db = CandleDatabase()
+
+    # Mock PostgreSQL functions for DataLoader
+    mock_save = AsyncMock(return_value=100)
+    mock_load = AsyncMock(
+        return_value=pd.DataFrame(
+            {
+                "timestamp": [],
+                "open": [],
+                "high": [],
+                "low": [],
+                "close": [],
+                "volume": [],
+                "exchange": [],
+                "symbol": [],
+                "timeframe": [],
+            }
+        )
+    )
+    monkeypatch.setattr("src.pg_database.save_candles_pg", mock_save)
+    monkeypatch.setattr("src.pg_database.load_candles_pg", mock_load)
+    monkeypatch.setattr("src.data_loader.save_candles_pg", mock_save)
+    monkeypatch.setattr("src.data_loader.load_candles_pg", mock_load)
+
     # Seed two results as if a sweep just finished
     db.save_batch_result(
         "kucoin",
@@ -62,16 +97,12 @@ def test_batch_auto_validate_writes_status_for_all_results_after_sweep(
         "2026-08-20T00:00:00+00:00",
     )
     monkeypatch.setattr(app_module, "_batch_db", db)
-    # Also monkeypatch DataLoader's db to use a CandleDatabase for the test DB so ETH/USD can be validated
-    monkeypatch.setattr(
-        src.data_loader,
-        "db",
-        CandleDatabase(db_path=str(tmp_path / "batch_autovalidate.db")),
-    )
     client = TestClient(app)
 
     # Simulate the frontend invoking auto-validate after sweep completion
-    resp = client.post("/api/batch_results/auto-validate", json={})
+    resp = client.post(
+        "/api/batch_results/auto-validate", json={}, headers=auth_headers
+    )
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["status"] == "success"

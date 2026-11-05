@@ -37,7 +37,7 @@ def execute_backtest(
         backtest_limit = None  # let DataLoader compute from days
 
     # Load Candles from Database Cache or Exchange API
-    df_candles = DataLoader.load_candles(
+    df_candles = DataLoader.load_candles_sync(
         exchange=exchange,
         symbol=symbol,
         timeframe=timeframe,

@@ -23,7 +23,7 @@ depends_on: str | Sequence[str] | None = None
 # Full schema as emitted by SQLite for a fresh init_db() run.
 SCHEMA_DDL = """
 CREATE TABLE alerts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     timestamp TEXT NOT NULL,
                     type TEXT NOT NULL,
                     message TEXT NOT NULL,
@@ -50,7 +50,7 @@ CREATE TABLE background_tasks (
                 );
 
 CREATE TABLE batch_results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     exchange TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
@@ -83,7 +83,7 @@ CREATE TABLE candles (
                 );
 
 CREATE TABLE optuna_profiles (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     exchange TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
@@ -96,7 +96,7 @@ CREATE TABLE optuna_profiles (
                 );
 
 CREATE TABLE paper_ledger (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     exchange TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
@@ -109,7 +109,7 @@ CREATE TABLE paper_ledger (
                 );
 
 CREATE TABLE paper_ledger_transactions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     transaction_id TEXT NOT NULL UNIQUE,
                     account_id TEXT NOT NULL DEFAULT 'default',
                     exchange TEXT NOT NULL,
@@ -126,7 +126,7 @@ CREATE TABLE paper_ledger_transactions (
                 );
 
 CREATE TABLE paper_positions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     exchange TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     account_id TEXT NOT NULL DEFAULT 'default',
@@ -147,7 +147,7 @@ CREATE TABLE paper_positions (
                 );
 
 CREATE TABLE paper_profiles (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     exchange TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
@@ -164,7 +164,7 @@ CREATE TABLE paper_profiles (
                 );
 
 CREATE TABLE paper_trade_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     trade_id TEXT NOT NULL UNIQUE,
                     exchange TEXT NOT NULL,
                     symbol TEXT NOT NULL,

@@ -3,6 +3,7 @@ Walk-Forward Optimization (WFO) Engine.
 Executes rolling / anchored in-sample (IS) parameter tuning and out-of-sample (OOS) validation to prevent strategy overfitting.
 """
 
+import logging
 import math
 from dataclasses import replace
 from typing import Any
@@ -14,6 +15,8 @@ from src.backtester import BacktestEngine
 from src.config import OptunaConfig, StrategyParams, WFOConfig
 from src.optimizer import OptunaOptimizer
 from src.regime import INSUFFICIENT_DATA, RegimeConfig, classify_regime
+
+logger = logging.getLogger(__name__)
 
 
 def get_default_target_oos_days(
@@ -110,8 +113,8 @@ def derive_bars_per_day(
                 bpd = round(86400.0 / med_sec, 2)
                 if bpd > 0:
                     return bpd
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("bars-per-day estimation failed, defaulting to 288.0: %s", e)
 
     return 288.0
 
@@ -123,23 +126,44 @@ def compute_wfo_auto_params(
     target_oos_days: float | None = None,
     bars_per_day: float | None = None,
     timeframe: str | None = None,
+    min_trials_floor: int = 25,
+    target_trials: int = 50,
+    explicit_num_windows: int | None = None,
 ) -> dict[str, int]:
     """
     Derive optimal WFO num_windows and trials_per_window from dataset size and
-    total Optuna trial budget.
+    Optuna trial budget using intelligent auto-balancing.
 
     Strategy:
     - Target OOS window length of ``target_oos_days`` trading days.
-    - num_windows = floor(n_bars * (1 - is_ratio) / oos_target_bars), clamped [3, 20].
-    - trials_per_window = floor(n_trials / num_windows), clamped [25, n_trials].
+    - Compute data-supported window ceiling:
+        data_windows = floor(n_bars / oos_target_bars - ratio_factor), clamped [3, 20].
+    - If explicit_num_windows is provided (> 0), use that window count and derive
+      trials_per_window = max(min_trials_floor, math.floor(n_trials / explicit_num_windows)).
+    - Otherwise, intelligently auto-balance num_windows and trials_per_window:
+        1. If budget is abundant (n_trials >= data_windows * target_trials):
+           num_windows = data_windows
+           trials_per_window = math.floor(n_trials / num_windows)
+        2. If budget can support >= 3 windows with target_trials (50) each:
+           num_windows = min(data_windows, math.floor(n_trials / target_trials))
+           trials_per_window = math.floor(n_trials / num_windows)
+        3. If budget can support >= 3 windows with min_trials_floor (25) each:
+           num_windows = min(data_windows, math.floor(n_trials / min_trials_floor))
+           trials_per_window = math.floor(n_trials / num_windows)
+        4. When budget is severely constrained (< 3 * min_trials_floor):
+           num_windows = 3
+           trials_per_window = max(min_trials_floor, math.floor(n_trials / num_windows))
 
     Args:
         n_bars: Total number of candles in the dataset.
-        n_trials: Total Optuna trial budget (e.g. the value from the UI).
+        n_trials: Optuna trial budget (e.g. the value from the UI).
         is_ratio: Fraction of each window allocated to in-sample training.
         target_oos_days: Desired OOS window length in trading days.
         bars_per_day: Candles per trading day (288 for 5m, 96 for 15m, 24 for 1h).
         timeframe: Optional timeframe string (e.g. "5m", "15m", "1h", "4h").
+        min_trials_floor: Absolute floor for trials per window (default: 25).
+        target_trials: Recommended minimum trials per window for convergence (default: 50).
+        explicit_num_windows: Optional pre-set number of windows.
 
     Returns:
         Dict with keys ``num_windows`` and ``trials_per_window``.
@@ -160,13 +184,30 @@ def compute_wfo_auto_params(
     # Rearranged: num_windows = n_bars / oos_target_bars - ratio_factor
     ratio_factor = is_ratio / (1.0 - is_ratio)
     raw_windows = math.floor(n_bars / oos_target_bars - ratio_factor)
-    num_windows = max(3, min(20, raw_windows))
+    data_windows = max(3, min(20, raw_windows))
 
-    raw_trials = math.floor(n_trials / num_windows)
-    # Ensure at least 50 trials per window when budget permits (n_trials >= num_windows * 50),
-    # otherwise clamp to at least 25 (or n_trials if budget < 25)
-    target_min = 50 if n_trials >= num_windows * 50 else min(25, raw_trials)
-    trials_per_window = max(min(n_trials, target_min), min(n_trials, raw_trials))
+    if explicit_num_windows is not None and explicit_num_windows > 0:
+        num_windows = explicit_num_windows
+        trials_per_window = max(min_trials_floor, math.floor(n_trials / num_windows))
+        return {"num_windows": num_windows, "trials_per_window": trials_per_window}
+
+    # Auto-balancing based on budget and data capacity:
+    # 1. Abundant budget: run full data-supported windows at >= target_trials each
+    if n_trials >= data_windows * target_trials:
+        num_windows = data_windows
+        trials_per_window = math.floor(n_trials / num_windows)
+    # 2. Moderate budget: support as many windows as possible at >= target_trials (50) each
+    elif n_trials >= 3 * target_trials:
+        num_windows = min(data_windows, math.floor(n_trials / target_trials))
+        trials_per_window = math.floor(n_trials / num_windows)
+    # 3. Constrained budget: scale down windows to guarantee >= min_trials_floor (25) each
+    elif n_trials >= 3 * min_trials_floor:
+        num_windows = min(data_windows, math.floor(n_trials / min_trials_floor))
+        trials_per_window = math.floor(n_trials / num_windows)
+    # 4. Severely constrained budget (< 75 trials total):
+    else:
+        num_windows = 3
+        trials_per_window = max(min_trials_floor, math.floor(n_trials / num_windows))
 
     return {"num_windows": num_windows, "trials_per_window": trials_per_window}
 
@@ -198,7 +239,7 @@ class WalkForwardEngine:
 
         # Guard: if trials_per_window is 0 (auto sentinel), use a safe fallback
         # until run() resolves the real value via compute_wfo_auto_params.
-        effective_trials = self.wfo_config.trials_per_window or 30
+        effective_trials = self.wfo_config.trials_per_window or 50
         self.opt_config = opt_config or OptunaConfig(n_trials=effective_trials)
 
     def generate_windows(self, df: pd.DataFrame) -> list[dict[str, Any]]:
@@ -302,13 +343,18 @@ class WalkForwardEngine:
             self.wfo_config.num_windows == 0 or self.wfo_config.trials_per_window == 0
         )
         if needs_auto:
-            budget = self.n_trials_total if self.n_trials_total > 0 else 30
+            budget = self.n_trials_total if self.n_trials_total > 0 else 100
             auto_scaled = compute_wfo_auto_params(
                 n_bars=len(df),
                 n_trials=budget,
                 is_ratio=max(0.5, min(0.9, self.wfo_config.in_sample_ratio)),
                 bars_per_day=self.bars_per_day,
                 timeframe=self.timeframe,
+                explicit_num_windows=(
+                    self.wfo_config.num_windows
+                    if self.wfo_config.num_windows > 0
+                    else None
+                ),
             )
             resolved_windows = (
                 auto_scaled["num_windows"]

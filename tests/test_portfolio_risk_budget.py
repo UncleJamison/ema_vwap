@@ -260,6 +260,7 @@ def test_portfolio_risk_budget_api_endpoint():
     from src.app import app
 
     client = TestClient(app)
+    headers = {"X-API-Key": "test-key-for-tests"}
 
     payload = {
         "symbols": ["BTC/USD", "ETH/USD", "AAPL", "SPY"],
@@ -269,7 +270,7 @@ def test_portfolio_risk_budget_api_endpoint():
         "mc_simulations": 100,
     }
 
-    resp = client.post("/api/portfolio/risk_budget", json=payload)
+    resp = client.post("/api/portfolio/risk_budget", json=payload, headers=headers)
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "success"

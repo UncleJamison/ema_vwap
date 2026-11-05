@@ -9,13 +9,12 @@ import logging
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
 import pandas as pd
 
 from src.config import get_optimal_lookback_days
-from src.db_connection_manager import get_database
 from src.providers.base import BaseDataProvider
 from src.settings import SettingsManager
 
@@ -57,7 +56,7 @@ class PolygonStockAdapter(BaseDataProvider):
     base_url: ClassVar[str] = "https://api.polygon.io/v2/aggs/ticker"
 
     def __init__(self, settings_manager: SettingsManager | None = None):
-        self.settings = settings_manager or SettingsManager(get_database("system"))
+        self.settings = settings_manager or SettingsManager()
 
     def format_symbol(self, symbol: str) -> str:
         """Strip quote currency and special characters (e.g., 'TSLA/USD' -> 'TSLA')."""
@@ -93,7 +92,7 @@ class PolygonStockAdapter(BaseDataProvider):
                 columns=["timestamp", "open", "high", "low", "close", "volume"]
             )
 
-        end_dt = datetime.now(timezone.utc)
+        end_dt = datetime.now(UTC)
         start_dt = end_dt - timedelta(days=days)
         start_str = start_dt.strftime("%Y-%m-%d")
         end_str = end_dt.strftime("%Y-%m-%d")
@@ -139,7 +138,7 @@ class PolygonStockAdapter(BaseDataProvider):
                         # Polygon format: t (Unix ms), o, h, l, c, v
                         ts_sec = r["t"] / 1000.0
                         ts_iso = datetime.fromtimestamp(
-                            ts_sec, tz=timezone.utc
+                            ts_sec, tz=UTC
                         ).isoformat()
                         all_bars.append(
                             {

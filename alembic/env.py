@@ -35,10 +35,8 @@ def run_migrations_offline() -> None:
     here as well.  By skipping the Engine creation
     we don't even need a DBAPI to be available.
 
-    Calls to context.execute() here emit the given string to the
-    script output.
-
     """
+
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -58,22 +56,26 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    # DB target resolution (ema_vwap-y7a3): ALEMBIC_DB_PATH wins, then DB_PATH,
-    # then the alembic.ini sqlalchemy.url. The parent directory is created so a
-    # fresh file works out of the box.
-    db_path = os.environ.get("ALEMBIC_DB_PATH") or os.environ.get("DB_PATH")
-    if db_path:
-        url = f"sqlite:///{db_path}"
-    else:
-        url = config.get_main_option("sqlalchemy.url")
+    # DB target resolution: environment variable PG_DSN wins,
+    # then the alembic.ini sqlalchemy.url (should be postgresql://...).
+    # If neither is set, we error out.
+    url = (
+        os.environ.get("ALEMBIC_DSN")
+        or os.environ.get("PG_DSN")
+        or config.get_main_option("sqlalchemy.url")
+    )
+
+    if not url:
+        raise RuntimeError(
+            "No database URL configured. Set ALEMBIC_DSN, PG_DSN, or sqlalchemy.url in alembic.ini"
+        )
+
+    if not url.startswith("postgresql://") and not url.startswith("postgres://"):
+        raise RuntimeError(
+            f"Alembic expects a PostgreSQL URL (postgresql://...), got: {url}"
+        )
 
     from sqlalchemy import create_engine
-
-    db_file = url.split("///")[-1] if url.startswith("sqlite:///") else None
-    if db_file and db_file not in (":memory:",):
-        parent = os.path.dirname(os.path.abspath(db_file))
-        if parent:
-            os.makedirs(parent, exist_ok=True)
 
     connectable = create_engine(url, poolclass=pool.NullPool)
 
@@ -81,7 +83,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            render_as_batch=True,
+            # render_as_batch=True is for SQLite, not needed for PostgreSQL
         )
 
         with context.begin_transaction():

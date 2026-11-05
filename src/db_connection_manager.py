@@ -1,77 +1,78 @@
 """
-DB Connection Manager — Sub-bead 462.5 (P2) of ema_vwap-462.
-Routes multi-DB access for the decomposed database architecture.
-Provides: get_connection(db_key) -> sqlite3.Connection
-         get_database(db_key) -> CandleDatabase instance for that domain
-DB mappings: candles -> candles.db, batch_results -> batch_results.db,
-paper_trading -> paper_trading.db, system -> system.db
+PostgreSQL Connection Manager — Phase 5 of ema_vwap-0n8p.
+Provides PostgreSQL connection pools for all domains.
+SQLite support completely removed.
 """
 
-import os
-import sqlite3
 from pathlib import Path
 from typing import Any
 
+try:
+    import asyncpg
+
+    PG_AVAILABLE = True
+except ImportError:
+    PG_AVAILABLE = False
+    asyncpg = None
+
+from src.pg_connection_manager import get_pg_manager
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-DB_MAP: dict[str, str] = {
-    "candles": str(PROJECT_ROOT / "data" / "candles.db"),
-    "batch_results": str(PROJECT_ROOT / "data" / "batch_results.db"),
-    "paper_trading": str(PROJECT_ROOT / "data" / "paper_trading.db"),
-    "system": str(PROJECT_ROOT / "data" / "system.db"),
+# Domain to PostgreSQL pool mapping (no more SQLite)
+DOMAIN_POOLS: dict[str, str] = {
+    "candles": "candles",
+    "batch_results": "batch_results",
+    "paper_trading": "paper_trading",
+    "system": "system",
 }
 
 
-def get_connection(db_key: str, timeout: float = 30.0) -> sqlite3.Connection:
-    """Return a SQLite connection for the named DB domain."""
-    path = DB_MAP.get(db_key)
-    if not path:
-        raise KeyError(f"Unknown db_key: {db_key}. Available: {list(DB_MAP)}")
-    conn = sqlite3.connect(path, timeout=timeout)
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    conn.execute("PRAGMA cache_size = -64000;")
-    conn.execute("PRAGMA temp_store = MEMORY;")
-    return conn
+def get_pg_pool(db_key: str):
+    """Return an asyncpg Pool for the named PostgreSQL domain."""
+    if not PG_AVAILABLE:
+        raise RuntimeError("asyncpg not installed. Install with: pip install asyncpg")
+    pg_manager = get_pg_manager()
+    domain = DOMAIN_POOLS.get(db_key)
+    if not domain:
+        raise KeyError(f"Unknown db_key: {db_key}. Available: {list(DOMAIN_POOLS)}")
+    return pg_manager.get_pool(domain)
+
+
+def get_pg_manager_instance():
+    """Return the PostgresConnectionManager instance."""
+    from src.pg_connection_manager import get_pg_manager
+
+    return get_pg_manager()
 
 
 def get_database(db_key: str):
-    """Return a CandleDatabase instance pointing at the named DB domain.
-
-    The ``domain`` parameter is forwarded so ``init_db()`` only creates
-    the tables that belong to this domain.
     """
-    from src.database import CandleDatabase
+    Deprecated: Returns a PG-aware database interface.
+    Use src.pg_database.{function}_pg() functions directly instead.
+    """
+    domain = DOMAIN_POOLS.get(db_key)
+    if not domain:
+        raise KeyError(f"Unknown db_key: {db_key}. Available: {list(DOMAIN_POOLS)}")
 
-    path = DB_MAP.get(db_key)
-    if not path:
-        raise KeyError(f"Unknown db_key: {db_key}. Available: {list(DB_MAP)}")
-    return CandleDatabase(db_path=path, domain=db_key)
+    # Return a dummy object that raises helpful errors if misused
+    class PGDatabaseProxy:
+        def __getattr__(self, name):
+            raise AttributeError(
+                f"'{db_key}' domain uses PostgreSQL. "
+                f"Use src.pg_database.{{name}}_pg() functions directly."
+            )
+
+    return PGDatabaseProxy()
 
 
 def get_db_info() -> dict[str, Any]:
+    """Return info about PostgreSQL domains (no SQLite)."""
     info: dict[str, Any] = {}
-    for key, path in DB_MAP.items():
-        if not os.path.exists(path):
-            info[key] = {
-                "path": path,
-                "exists": False,
-                "size_bytes": 0,
-                "table_count": 0,
-                "tables": [],
-            }
-            continue
-        conn = sqlite3.connect(path, timeout=5.0)
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        )
-        tables = [r[0] for r in cursor.fetchall()]
-        conn.execute("PRAGMA database_list")
+    for key, domain in DOMAIN_POOLS.items():
         info[key] = {
-            "path": path,
-            "exists": True,
-            "size_bytes": os.path.getsize(path) if os.path.exists(path) else 0,
-            "table_count": len(tables),
-            "tables": tables,
+            "domain": domain,
+            "type": "postgresql",
+            "pool_available": PG_AVAILABLE,
         }
-        conn.close()
     return info

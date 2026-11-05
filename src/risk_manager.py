@@ -5,10 +5,17 @@ Calculates dynamic position sizes based on equity risk %, stop losses (VWAP-base
 
 from src.config import StrategyParams
 
-# Regime-conditioned multipliers for position sizing / stop management
-# (trending = full risk; ranging = tighter; high_vol = reduced + wider stops)
+BACKTEST_RISK_MODEL_REVISION = "regime-stops-v1"
+
+# Regime-conditioned multipliers apply to the configured base parameters. With
+# the default 2x ATR multiplier, the effective ATR distances are 3x/2x/4x.
 _REGIME_RISK_MULTIPLIER = {"trending": 1.0, "ranging": 0.8, "high_vol": 0.7}
-_REGIME_STOP_MULTIPLIER = {"trending": 1.0, "ranging": 1.15, "high_vol": 1.4}
+_REGIME_STOP_MULTIPLIER = {"trending": 1.5, "ranging": 1.0, "high_vol": 2.0}
+_REGIME_VWAP_OFFSET_MULTIPLIER = {
+    "trending": 1.5,
+    "ranging": 0.8,
+    "high_vol": 2.0,
+}
 
 
 class RiskManager:
@@ -53,34 +60,47 @@ class RiskManager:
         return units, position_value_usd, risk_amount_usd
 
     def calculate_stop_and_target(
-        self, entry_price: float, side: int, vwap: float, atr: float
+        self,
+        entry_price: float,
+        side: int,
+        vwap: float,
+        atr: float,
+        regime: str = "trending",
     ) -> tuple[float, float]:
         """
         Calculate Stop Loss and Take Profit levels.
         side: 1 for Long, -1 for Short.
+        regime: "trending" | "ranging" | "high_vol" — adjusts stop distance and VWAP offset.
         Returns (stop_loss_price, take_profit_price).
         """
         if atr <= 0:
             atr = entry_price * 0.01  # Fallback to 1% ATR if zero
 
+        stop_mult = _REGIME_STOP_MULTIPLIER.get(regime, 1.0)
+
         if self.params.stop_loss_type == "vwap":
-            offset = vwap * (self.params.vwap_stop_offset_pct / 100.0)
+            offset_mult = _REGIME_VWAP_OFFSET_MULTIPLIER.get(regime, 1.0)
+            offset = vwap * (self.params.vwap_stop_offset_pct / 100.0) * offset_mult
             if side == 1:  # Long
                 stop_loss = vwap - offset
                 # Ensure stop loss is below entry price
                 if stop_loss >= entry_price:
-                    stop_loss = entry_price - (2.0 * atr)
+                    stop_loss = entry_price - (
+                        atr * self.params.atr_multiplier * stop_mult
+                    )
                 risk_dist = entry_price - stop_loss
                 take_profit = entry_price + (risk_dist * self.params.risk_reward_ratio)
             else:  # Short
                 stop_loss = vwap + offset
                 # Ensure stop loss is above entry price
                 if stop_loss <= entry_price:
-                    stop_loss = entry_price + (2.0 * atr)
+                    stop_loss = entry_price + (
+                        atr * self.params.atr_multiplier * stop_mult
+                    )
                 risk_dist = stop_loss - entry_price
                 take_profit = entry_price - (risk_dist * self.params.risk_reward_ratio)
         else:  # ATR-based trailing/fixed stop
-            risk_dist = atr * self.params.atr_multiplier
+            risk_dist = atr * self.params.atr_multiplier * stop_mult
             if side == 1:  # Long
                 stop_loss = entry_price - risk_dist
                 take_profit = entry_price + (risk_dist * self.params.risk_reward_ratio)
@@ -98,42 +118,55 @@ class RiskManager:
         atr: float,
         regime: str = "trending",
         entry_price: float | None = None,
+        entry_atr: float | None = None,
     ) -> float:
         """Update trailing stop loss if current price moves favorably.
 
-        Uses ATR as base distance; trailing_stop_pct acts as a MAXIMUM distance cap.
-        If entry_price is provided, can set initial trail from entry (Fix #18).
+        - Base distance: ATR * atr_multiplier * regime stop multiplier.
+        - Volatility Compression Protection: anchors ATR to max(atr, entry_atr)
+          to avoid artificial stop-tightening during quiet consolidations.
+        - Tiered Profit Lock: If trailing_stop_activation_pct is configured,
+          trailing_stop_pct cap only activates once unrealized profit >= activation threshold.
+          Prior to activation, base ATR distance provides breathing room.
         """
-        if atr <= 0:
+        # Volatility Compression Protection: anchor to entry_atr if available
+        effective_atr = (
+            max(atr, entry_atr) if (entry_atr is not None and entry_atr > 0) else atr
+        )
+        if effective_atr <= 0:
             return current_stop
 
-        # Base distance: ATR * multiplier * regime multiplier
+        # Base distance: effective ATR * multiplier * regime multiplier
         stop_mult = _REGIME_STOP_MULTIPLIER.get(regime, 1.0)
-        atr_distance = atr * self.params.atr_multiplier * stop_mult
+        atr_distance = effective_atr * self.params.atr_multiplier * stop_mult
 
-        # If trailing_stop_pct configured, use it as MAXIMUM distance (cap)
-        if (
-            hasattr(self.params, "trailing_stop_pct")
-            and self.params.trailing_stop_pct > 0
-        ):
-            pct_distance = current_price * (self.params.trailing_stop_pct / 100.0)
-            distance = min(atr_distance, pct_distance)  # ATR base, capped by %
+        # Determine if percentage profit lock cap applies
+        pct_cap_active = False
+        trailing_pct = getattr(self.params, "trailing_stop_pct", 0.0)
+        if trailing_pct and trailing_pct > 0:
+            activation_pct = getattr(self.params, "trailing_stop_activation_pct", 0.0)
+            if entry_price is not None and entry_price > 0:
+                favorable_move_pct = (
+                    ((current_price - entry_price) / entry_price * 100.0)
+                    if side == 1
+                    else ((entry_price - current_price) / entry_price * 100.0)
+                )
+                threshold = activation_pct if activation_pct > 0 else 0.0
+                if favorable_move_pct > threshold:
+                    pct_cap_active = True
+            else:
+                pct_cap_active = True
+
+        if pct_cap_active:
+            pct_distance = current_price * (trailing_pct / 100.0)
+            distance = min(atr_distance, pct_distance)
         else:
             distance = atr_distance
 
-        # Fix #18: If entry_price provided and no current stop (or very loose),
-        # set initial trail from entry (allows trailing from entry, not just in profit)
-        if entry_price is not None and current_stop <= 1e-9:
-            # Set initial stop at entry minus distance (Long) or entry plus distance (Short)
-            if side == 1:  # Long
-                return max(current_stop, entry_price - distance)
-            else:  # Short
-                return min(current_stop, entry_price + distance)
-
-        # Standard trailing logic: only ratchet in favorable direction
-        if side == 1:  # Long
+        # Ratchet stop in favorable direction only
+        if side == 1:  # Long: ratchet upward only
             new_stop = current_price - distance
-            return max(current_stop, new_stop)  # ratchet upward only
-        else:  # Short
+            return max(current_stop, new_stop)
+        else:  # Short: ratchet downward only
             new_stop = current_price + distance
             return min(current_stop, new_stop)

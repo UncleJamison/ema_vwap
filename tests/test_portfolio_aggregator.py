@@ -114,7 +114,10 @@ def test_portfolio_endpoints_with_test_client():
     assert len(pos_data["positions"]) > 0
 
     # 4. Refresh endpoint
-    resp_r = client.post("/api/portfolio/refresh?include_synthetic=true")
+    resp_r = client.post(
+        "/api/portfolio/refresh?include_synthetic=true",
+        headers={"X-API-Key": "test-key-for-tests"},
+    )
     assert resp_r.status_code == 200
     assert resp_r.json()["status"] == "success"
 

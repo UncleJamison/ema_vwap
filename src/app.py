@@ -4,6 +4,7 @@ Provides REST endpoints for candle fetching, indicator calculation, strategy bac
 background task management, system settings, and static file hosting for the Web Dashboard.
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -27,9 +28,16 @@ from slowapi.errors import RateLimitExceeded
 
 from src.app_limiter import limiter
 from src.auth import get_configured_api_key
-from src.db_connection_manager import get_database
+from src.database import CandleDatabase
 from src.logger import logger, setup_logging
+from src.metrics import (
+    API_REQUEST_COUNT,
+    API_REQUEST_DURATION,
+    get_content_type,
+    get_metrics,
+)
 from src.paper import PaperLedger, PaperProfileRegistry, PaperTradingEngine
+from src.pg_connection_manager import close_pg_pools, init_pg_pools
 
 # Route modules (ema_vwap-tq41): endpoints extracted verbatim into src/routes/.
 # Shared state stays module-level here; route modules read it through this
@@ -67,6 +75,12 @@ from src.routes.backtest_opt import (
 from src.routes.batch import BatchOptimizeRequest, _run_all_metrics_batch_task
 from src.settings import SettingsManager
 from src.tasks import global_task_manager
+from src.tracing import (
+    instrument_asyncpg,
+    instrument_fastapi,
+    instrument_httpx,
+    shutdown_tracing,
+)
 
 
 class ErrorCode(str, Enum):
@@ -160,14 +174,16 @@ def handle_generic_error(request: Request, exc: Exception) -> JSONResponse:
 
 # Initialize Rotating File & Console Logging
 setup_logging()
-_batch_db = get_database("batch_results")
-_candles_db = get_database("candles")
-_system_db = get_database("system")
-_paper_db = get_database("paper_trading")
-_settings_mgr = SettingsManager(_system_db)
-_paper_profiles = PaperProfileRegistry(_paper_db)
-_paper_ledger = PaperLedger(_paper_db)
-_paper_engine = PaperTradingEngine(db=_paper_db)
+_batch_db = CandleDatabase(domain="batch_results")
+_candles_db = CandleDatabase(domain="candles")
+_system_db = CandleDatabase(domain="system")
+_paper_db = CandleDatabase(domain="paper_trading")
+_settings_mgr = SettingsManager()
+_paper_profiles = PaperProfileRegistry()
+_paper_ledger = PaperLedger()
+# settings_mgr wired in so start/stop polling persists `paper_runner_enabled`
+# and the lifespan auto-resumes the runner after a container restart.
+_paper_engine = PaperTradingEngine(db=_paper_db, settings_mgr=_settings_mgr)
 
 
 class _PollFilter(logging.Filter):
@@ -188,55 +204,122 @@ logging.getLogger("uvicorn.access").addFilter(_PollFilter())
 async def lifespan(app: FastAPI):
     """FastAPI application lifespan manager for startup and graceful shutdown."""
     logger.info(
-        "[Lifespan] Initializing database and evaluating paper runner auto-start..."
+        "[Lifespan] Initializing PostgreSQL and evaluating paper runner auto-start..."
     )
-    # Initialize all domain databases
-    _candles_db.init_db()
-    _batch_db.init_db()
-    _system_db.init_db()
-    _paper_db.init_db()
+    # Register the main event loop for sync-bridge calls
+    import asyncio as _aio
 
-    # First-run bootstrap: if no API key is configured anywhere (env var or
-    # settings DB), generate a secure random key, persist it, and log it once.
-    # This prevents lockout: without it every authenticated endpoint fails
-    # closed and the Settings UI could never set a key.
-    from src.auth.security import get_configured_api_key
+    from src.sync_bridge import get_main_loop, set_main_loop
 
-    if not get_configured_api_key():
+    # Save any previously-set main loop (e.g., from pg_container test fixture)
+    # so we can restore it on shutdown — avoids clobbering test infrastructure.
+    _prev_main_loop = get_main_loop()
+    set_main_loop(_aio.get_running_loop())
+
+    # Initialize PostgreSQL connection pools first. If pools are already
+    # initialized by an external owner (e.g. the pytest pg_container session
+    # fixture), reuse them and do NOT close them on shutdown — closing pools
+    # we don't own killed every subsequent PG test in the session.
+    from src.pg_connection_manager import pg_pools_initialized
+
+    _owns_pools = not pg_pools_initialized()
+    await init_pg_pools()
+    logger.info("[Lifespan] PostgreSQL connection pools initialized")
+
+    if not _owns_pools:
+        # Pools belong to an external initializer (e.g. the pytest pg_container
+        # session fixture or an embedding orchestrator). They are bound to
+        # THAT owner's event loop: using them from this (app) loop would be a
+        # cross-loop asyncpg violation, and closing them would break the
+        # owner. Schema creation and first-run bootstrap are the owner's
+        # responsibility. In production nothing owns the pools before the app,
+        # so this branch is test/embedding-only.
+        logger.info(
+            "[Lifespan] Externally-owned PG pools detected: skipping schema "
+            "init, API-key bootstrap, and runner auto-resume (owner's "
+            "responsibility). Paper trading runner stays in standby."
+        )
+        yield
+    else:
+        # Initialize all domain schemas (PostgreSQL)
+        from src.pg_database import PostgresDatabase
+
+        for domain in ("candles", "batch_results", "system", "paper_trading"):
+            db = PostgresDatabase(domain=domain)
+            await db.initialize()
+        logger.info("[Lifespan] All domain schemas initialized")
+
+        # First-run bootstrap: if no API key is configured anywhere (env var or
+        # settings DB), generate a secure random key, persist it, and log it once.
+        # This prevents lockout: without it every authenticated endpoint fails
+        # closed and the Settings UI could never set a key.
         import secrets as _secrets
 
-        generated = _secrets.token_urlsafe(32)
-        _settings_mgr.set("app_api_key", generated, is_secret=True)
-        logger.warning(
-            "[Lifespan] No API key configured - generated a new one. "
-            "Retrieve it with: docker exec ema_vwap_trading_daemon python -c "
-            '"from src.settings import SettingsManager; '
-            "from src.db_connection_manager import get_database; "
-            "print(SettingsManager(get_database('system')).get('app_api_key'))\" "
-            "then set it in the Settings UI."
+        from src.pg_database import get_setting_pg, save_setting_pg
+
+        api_key_row = await get_setting_pg("app_api_key")
+        api_key_val = (
+            str(api_key_row["value"])
+            if api_key_row and api_key_row.get("value")
+            else None
         )
 
-    # Check if live paper polling was active prior to restart
-    runner_enabled = _settings_mgr.get("paper_runner_enabled", "false")
-    is_enabled = str(runner_enabled).lower() == "true"
-    interval_str = _settings_mgr.get("paper_polling_interval", "15")
-    try:
-        interval = int(interval_str or 15)
-    except ValueError:
-        interval = 15
+        if not api_key_val and not os.environ.get("API_KEY"):
+            generated = _secrets.token_urlsafe(32)
+            await save_setting_pg("app_api_key", generated, True)
+            logger.warning(
+                "[Lifespan] No API key configured - generated a new one. "
+                "Retrieve it from the Settings UI or settings table."
+            )
 
-    if is_enabled:
-        logger.info(
-            f"[Lifespan] Auto-resuming live paper trading runner (interval={interval}s)..."
+        # Check if live paper polling was active prior to restart
+        runner_row = await get_setting_pg("paper_runner_enabled")
+        runner_enabled = (
+            str(runner_row["value"])
+            if runner_row and runner_row.get("value")
+            else "false"
         )
-        _paper_engine.start_polling(interval_seconds=interval, persist=False)
-    else:
-        logger.info("[Lifespan] Paper trading runner is in standby mode.")
+        is_enabled = runner_enabled.lower() == "true"
+        interval_row = await get_setting_pg("paper_polling_interval")
+        interval_str = (
+            str(interval_row["value"])
+            if interval_row and interval_row.get("value")
+            else "15"
+        )
+        try:
+            interval = int(interval_str or 15)
+        except ValueError:
+            interval = 15
 
-    yield
+        if is_enabled:
+            logger.info(
+                f"[Lifespan] Auto-resuming live paper trading runner (interval={interval}s)..."
+            )
+            # Run in a worker thread: start_polling() -> reconcile uses sync
+            # ledger calls (run_async), which must not execute on the main loop.
+            await asyncio.to_thread(
+                _paper_engine.start_polling, interval_seconds=interval, persist=False
+            )
+        else:
+            logger.info("[Lifespan] Paper trading runner is in standby mode.")
 
+        yield
+
+    # Shutdown tracing
+    logger.info("[Lifespan] Shutting down OpenTelemetry tracing...")
+    shutdown_tracing()
     logger.info("[Lifespan] Shutting down: stopping paper polling runner...")
     _paper_engine.stop_polling(persist=False)
+    if _owns_pools:
+        logger.info("[Lifespan] Closing PostgreSQL connection pools...")
+        await close_pg_pools()
+    else:
+        logger.info(
+            "[Lifespan] Pools owned by an external initializer; leaving them open."
+        )
+    # Restore previously-set main loop (e.g., pg_container test fixture)
+    if _prev_main_loop is not None:
+        set_main_loop(_prev_main_loop)
 
 
 app = FastAPI(
@@ -245,6 +328,11 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Instrument FastAPI with OpenTelemetry
+instrument_fastapi(app)
+instrument_asyncpg()
+instrument_httpx()
 
 
 # Security headers (ema_vwap-d7o): CSP, HSTS, X-Frame-Options, etc.
@@ -273,8 +361,50 @@ async def add_security_headers(request: Request, call_next):
     )
     return response
 
+    # Trace ID Middleware for structured logging correlation
+    @app.middleware("http")
+    async def trace_id_middleware(request: Request, call_next):
+        """Inject trace_id into request state for structured logging correlation."""
+        import uuid
 
-# Rate limiting (ema_vwap-q81): shared Limiter instance (src.app_limiter) so
+        from src.logger import clear_trace_id, set_trace_id
+
+        # Generate or extract trace_id from headers
+        trace_id = request.headers.get("X-Trace-ID", str(uuid.uuid4())[:8])
+        set_trace_id(trace_id)
+
+        # Add trace_id to response headers for client correlation
+        response = await call_next(request)
+        response.headers["X-Trace-ID"] = trace_id
+
+        clear_trace_id()
+        return response
+
+    # Prometheus Metrics Middleware
+    @app.middleware("http")
+    async def metrics_middleware(request: Request, call_next):
+        """Track API request duration and count for Prometheus metrics."""
+        import time
+
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration = time.perf_counter() - start
+
+        # Record metrics
+        endpoint = request.url.path
+        method = request.method
+        status = str(response.status_code)
+
+        API_REQUEST_DURATION.labels(
+            endpoint=endpoint, method=method, status=status
+        ).observe(duration)
+        API_REQUEST_COUNT.labels(endpoint=endpoint, method=method, status=status).inc()
+
+        return response
+
+    # Rate limiting (ema_vwap-q81): shared Limiter instance (src.app_limiter) so
+
+
 # route modules decorate with the same limiter bound to app.state.
 
 app.state.limiter = limiter
@@ -310,6 +440,12 @@ app.include_router(audit_router)
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
     return Response(content=b"", status_code=204)
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics():
+    """Prometheus metrics endpoint."""
+    return Response(content=get_metrics(), media_type=get_content_type())
 
 
 # Enable CORS for local web UI
@@ -363,9 +499,12 @@ if web_dir and web_dir.is_dir():
         if os.path.exists(index_file):
             # Read the HTML and inject the API key
             try:
-                from src.auth.security import get_configured_api_key
+                # Async loader: read_root runs on the main event loop, where
+                # sync wrappers cross-loop-crash against bound pools. Await
+                # the PG read directly instead.
+                from src.auth.security import get_configured_api_key_async
 
-                api_key = get_configured_api_key()
+                api_key = await get_configured_api_key_async()
                 with open(index_file, "r", encoding="utf-8") as f:  # noqa: ASYNC230
                     html_content = f.read()
 

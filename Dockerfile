@@ -24,11 +24,12 @@ FROM python:3.13-slim AS runner
 
 WORKDIR /app
 
-# Install runtime utilities (curl for healthcheck, sqlite3 for integrity checks)
+# Install runtime utilities (curl for healthcheck)
 # + WeasyPrint dependencies: GTK/Cairo/Pango libraries for PDF generation
+# + PostgreSQL client (psql) for debugging/management
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    sqlite3 \
+    postgresql-client \
     libgobject-2.0-0 \
     libcairo2 \
     libpango-1.0-0 \
@@ -52,11 +53,11 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Default environment variables
+# PostgreSQL connection via environment variables (set in docker-compose.yml)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8080 \
-    HOST=0.0.0.0 \
-    DB_PATH=/app/data/candles.db
+    HOST=0.0.0.0
 
 EXPOSE 8080
 STOPSIGNAL SIGTERM

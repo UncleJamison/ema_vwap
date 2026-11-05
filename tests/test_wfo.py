@@ -1,5 +1,6 @@
 """Unit tests for Walk-Forward Optimization Engine."""
 
+import pandas as pd
 import pytest
 
 from src.config import OptunaConfig, StrategyParams, WFOConfig
@@ -41,6 +42,7 @@ def test_walk_forward_engine_basic():
 def test_walk_forward_window_ranges_rolling():
     """Verify that rolling windows produce contiguous, non-overlapping OOS ranges."""
     df = DataLoader.generate_synthetic_candles(num_bars=500, seed=42)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
     params = StrategyParams()
     wfo_config = WFOConfig(num_windows=5, in_sample_ratio=0.7, window_type="rolling")
     wfo_engine = WalkForwardEngine(base_params=params, wfo_config=wfo_config)
@@ -427,3 +429,111 @@ def test_walk_forward_engine_timeframe_awareness():
     res = engine.run(df)
     assert res["bars_per_day"] == 24.0
     assert res["timeframe"] == "1h"
+
+
+def test_wfo_intelligent_auto_balancing_large_dataset():
+    """Verify that large datasets on small budgets auto-scale window counts
+
+    rather than starving windows to 2-3 trials (ema_vwap-5u1t).
+    """
+    # 100k bars (e.g. 1 year of 5m candles) with 50 total budget
+    res_50 = compute_wfo_auto_params(n_bars=100000, n_trials=50, timeframe="5m")
+    assert res_50["num_windows"] == 3
+    assert res_50["trials_per_window"] >= 25
+
+    # 100k bars with 100 total budget
+    res_100 = compute_wfo_auto_params(n_bars=100000, n_trials=100, timeframe="5m")
+    assert res_100["num_windows"] >= 3
+    assert res_100["trials_per_window"] >= 25
+    assert res_100["trials_per_window"] * res_100["num_windows"] <= 100
+
+    # 100k bars with 250 total budget
+    res_250 = compute_wfo_auto_params(n_bars=100000, n_trials=250, timeframe="5m")
+    assert res_250["num_windows"] == 5
+    assert res_250["trials_per_window"] == 50
+    assert res_250["trials_per_window"] * res_250["num_windows"] <= 250
+
+    # 100k bars with 500 total budget
+    res_500 = compute_wfo_auto_params(n_bars=100000, n_trials=500, timeframe="5m")
+    assert res_500["num_windows"] == 10
+    assert res_500["trials_per_window"] == 50
+    assert res_500["trials_per_window"] * res_500["num_windows"] <= 500
+
+
+def test_wfo_explicit_num_windows_preserves_trial_floor():
+    """Verify explicit_num_windows preserves minimum trial floor."""
+    res = compute_wfo_auto_params(
+        n_bars=50000, n_trials=100, explicit_num_windows=5, timeframe="15m"
+    )
+    assert res["num_windows"] == 5
+    assert res["trials_per_window"] >= 25
+
+
+@pytest.mark.asyncio
+async def test_run_walk_forward_defaults_to_optimal_lookback():
+    """Verify run_walk_forward loads candles with optimal lookback when days is None or 0."""
+    from unittest.mock import AsyncMock, patch
+
+    from src.config import get_optimal_lookback_days
+    from src.routes.backtest_opt import WFORequest, run_walk_forward
+
+    req = WFORequest(
+        symbol="BTC/USD",
+        timeframe="5m",
+        days=None,
+        limit=500,
+        num_windows=2,
+        trials_per_window=2,
+    )
+    with patch(
+        "src.routes.backtest_opt.DataLoader.load_candles", new_callable=AsyncMock
+    ) as mock_load, patch(
+        "src.routes.backtest_opt.DataLoader.aresolve_canonical_symbol",
+        new_callable=AsyncMock,
+    ) as mock_resolve:
+        mock_resolve.return_value = ("kucoin", "BTC/USDT")
+        mock_load.return_value = DataLoader.generate_synthetic_candles(
+            num_bars=300, seed=42
+        )
+
+        res = await run_walk_forward(req)
+        assert res["status"] == "success"
+        mock_load.assert_called_once()
+        call_kwargs = mock_load.call_args[1]
+        assert call_kwargs["days"] == get_optimal_lookback_days(
+            "5m"
+        )  # 90 days, NOT 365!
+        assert call_kwargs["limit"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_walk_forward_respects_explicit_days():
+    """Verify run_walk_forward respects explicit days parameter."""
+    from unittest.mock import AsyncMock, patch
+
+    from src.routes.backtest_opt import WFORequest, run_walk_forward
+
+    req = WFORequest(
+        symbol="BTC/USD",
+        timeframe="5m",
+        days=180,
+        limit=500,
+        num_windows=2,
+        trials_per_window=2,
+    )
+    with patch(
+        "src.routes.backtest_opt.DataLoader.load_candles", new_callable=AsyncMock
+    ) as mock_load, patch(
+        "src.routes.backtest_opt.DataLoader.aresolve_canonical_symbol",
+        new_callable=AsyncMock,
+    ) as mock_resolve:
+        mock_resolve.return_value = ("kucoin", "BTC/USDT")
+        mock_load.return_value = DataLoader.generate_synthetic_candles(
+            num_bars=300, seed=42
+        )
+
+        res = await run_walk_forward(req)
+        assert res["status"] == "success"
+        mock_load.assert_called_once()
+        call_kwargs = mock_load.call_args[1]
+        assert call_kwargs["days"] == 180

@@ -13,6 +13,10 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from src.app import app
+
+AUTH_HEADERS = {"X-API-Key": "test-key-for-tests"}
+
+
 from src.routes.api_diagnostics import (
     ConnectionTestRequest,
     ConnectionTestResponse,
@@ -161,13 +165,13 @@ class TestTestConnectionEndpoint:
 
     def test_unsupported_exchange_returns_400(self):
         """Unsupported exchange should return 400."""
-        with patch("src.auth.get_api_key", return_value="valid-key"):
-            response = client.post(
-                "/api/diagnostics/test_connection",
-                json={"exchange": "binance", "api_key": "test", "api_secret": "secret"},
-            )
-            assert response.status_code == 400
-            assert "Unsupported exchange" in response.json()["detail"]
+        response = client.post(
+            "/api/diagnostics/test_connection",
+            json={"exchange": "binance", "api_key": "test", "api_secret": "secret"},
+            headers=AUTH_HEADERS,
+        )
+        assert response.status_code == 400
+        assert "Unsupported exchange" in response.json()["detail"]
 
     @patch("src.routes.api_diagnostics._test_gemini")
     def test_gemini_success_with_credentials(self, mock_test_gemini):
@@ -181,15 +185,15 @@ class TestTestConnectionEndpoint:
         )
         mock_test_gemini.return_value = mock_response
 
-        with patch("src.auth.get_api_key", return_value="valid-key"):
-            response = client.post(
-                "/api/diagnostics/test_connection",
-                json={
-                    "exchange": "gemini",
-                    "api_key": "test-key",
-                    "api_secret": "test-secret",
-                },
-            )
+        response = client.post(
+            "/api/diagnostics/test_connection",
+            json={
+                "exchange": "gemini",
+                "api_key": "test-key",
+                "api_secret": "test-secret",
+            },
+            headers=AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -210,16 +214,16 @@ class TestTestConnectionEndpoint:
         )
         mock_test_kucoin.return_value = mock_response
 
-        with patch("src.auth.get_api_key", return_value="valid-key"):
-            response = client.post(
-                "/api/diagnostics/test_connection",
-                json={
-                    "exchange": "kucoin",
-                    "api_key": "test-key",
-                    "api_secret": "test-secret",
-                    "passphrase": "test-passphrase",
-                },
-            )
+        response = client.post(
+            "/api/diagnostics/test_connection",
+            json={
+                "exchange": "kucoin",
+                "api_key": "test-key",
+                "api_secret": "test-secret",
+                "passphrase": "test-passphrase",
+            },
+            headers=AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -238,15 +242,15 @@ class TestTestConnectionEndpoint:
         )
         mock_test_alpaca.return_value = mock_response
 
-        with patch("src.auth.get_api_key", return_value="valid-key"):
-            response = client.post(
-                "/api/diagnostics/test_connection",
-                json={
-                    "exchange": "alpaca",
-                    "api_key": "test-key",
-                    "api_secret": "test-secret",
-                },
-            )
+        response = client.post(
+            "/api/diagnostics/test_connection",
+            json={
+                "exchange": "alpaca",
+                "api_key": "test-key",
+                "api_secret": "test-secret",
+            },
+            headers=AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -265,16 +269,16 @@ class TestTestConnectionEndpoint:
         )
         mock_test_robinhood.return_value = mock_response
 
-        with patch("src.auth.get_api_key", return_value="valid-key"):
-            response = client.post(
-                "/api/diagnostics/test_connection",
-                json={
-                    "exchange": "robinhood",
-                    "api_key": "test-key",
-                    "private_key": "private-key",
-                    "account_number": "12345",
-                },
-            )
+        response = client.post(
+            "/api/diagnostics/test_connection",
+            json={
+                "exchange": "robinhood",
+                "api_key": "test-key",
+                "private_key": "private-key",
+                "account_number": "12345",
+            },
+            headers=AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -609,11 +613,11 @@ class TestIntegration:
             details={"sandbox": True},
         )
 
-        with patch("src.auth.get_api_key", return_value="valid-key"):
-            response = client.post(
-                "/api/diagnostics/test_connection",
-                json={"exchange": "gemini", "api_key": "key", "api_secret": "secret"},
-            )
+        response = client.post(
+            "/api/diagnostics/test_connection",
+            json={"exchange": "gemini", "api_key": "key", "api_secret": "secret"},
+            headers=AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -631,17 +635,17 @@ class TestIntegration:
             details={"sandbox": True},
         )
 
-        with patch("src.auth.get_api_key", return_value="valid-key"):
-            response = client.post(
-                "/api/diagnostics/test_connection",
-                json={
-                    "exchange": "kucoin",
-                    "api_key": "key",
-                    "api_secret": "secret",
-                    "passphrase": "pass",
-                    "sandbox": True,
-                },
-            )
+        response = client.post(
+            "/api/diagnostics/test_connection",
+            json={
+                "exchange": "kucoin",
+                "api_key": "key",
+                "api_secret": "secret",
+                "passphrase": "pass",
+                "sandbox": True,
+            },
+            headers=AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -658,16 +662,16 @@ class TestIntegration:
             details={"paper": False},
         )
 
-        with patch("src.auth.get_api_key", return_value="valid-key"):
-            response = client.post(
-                "/api/diagnostics/test_connection",
-                json={
-                    "exchange": "alpaca",
-                    "api_key": "key",
-                    "api_secret": "secret",
-                    "paper": False,
-                },
-            )
+        response = client.post(
+            "/api/diagnostics/test_connection",
+            json={
+                "exchange": "alpaca",
+                "api_key": "key",
+                "api_secret": "secret",
+                "paper": False,
+            },
+            headers=AUTH_HEADERS,
+        )
 
         assert response.status_code == 200
         data = response.json()

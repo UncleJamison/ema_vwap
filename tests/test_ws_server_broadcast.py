@@ -11,7 +11,7 @@ Tests for WebSocket Server Broadcast/Cleanup (src/ws_server.py):
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -328,7 +328,7 @@ class TestWebSocketMessageHandling:
             # Simulate pong response
             pong_msg = {
                 "type": "pong",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
             assert pong_msg["type"] == "pong"
             assert "timestamp" in pong_msg
@@ -342,7 +342,7 @@ class TestWebSocketMessageHandling:
         response = {
             "type": "subscribed",
             "channels": ["positions", "trades"],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
         assert response["type"] == "subscribed"
@@ -357,7 +357,7 @@ class TestWebSocketMessageHandling:
         response = {
             "type": "status_update",
             "data": status,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
         assert response["type"] == "status_update"
@@ -374,7 +374,7 @@ class TestWebSocketMessageHandling:
         response = {
             "type": "positions_update",
             "data": [{"symbol": "BTC/USD"}],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
         assert response["type"] == "positions_update"
@@ -388,7 +388,7 @@ class TestWebSocketMessageHandling:
         response = {
             "type": "error",
             "data": "step_engine command disabled: WebSocket requires API key authentication via X-API-Key header.",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
         assert response["type"] == "error"
@@ -442,7 +442,7 @@ class TestWebSocketPeriodicUpdate:
                 {
                     "type": "status_update",
                     "data": status,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                 }
             )
 

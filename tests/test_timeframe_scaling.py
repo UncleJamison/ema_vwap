@@ -105,12 +105,22 @@ def test_min_max_lookback_inequality(db):
 # ── Multi-timeframe candle loading tests ─────────────────────────────────
 
 
-def test_multi_tf_candle_load_basic(db):
+def test_multi_tf_candle_load_basic(db, monkeypatch):
     """Verify that candles can be loaded across multiple timeframes without error."""
+    from unittest.mock import AsyncMock
+
+    import pandas as pd
+
     from src.data_loader import DataLoader
 
+    # Mock PostgreSQL functions
+    mock_save = AsyncMock(return_value=100)
+    mock_load = AsyncMock(return_value=pd.DataFrame())
+    monkeypatch.setattr("src.data_loader.save_candles_pg", mock_save)
+    monkeypatch.setattr("src.data_loader.load_candles_pg", mock_load)
+
     # Use synthetic provider so tests run without network
-    df = DataLoader.load_candles(
+    df = DataLoader.load_candles_sync(
         exchange="synthetic",
         symbol="BTC/USD",
         timeframe="1m",
@@ -123,11 +133,21 @@ def test_multi_tf_candle_load_basic(db):
 
 
 @pytest.mark.parametrize("tf", ("1m", "5m", "15m", "1h", "2h"))
-def test_multi_tf_candle_load_variety(db, tf):
+def test_multi_tf_candle_load_variety(db, tf, monkeypatch):
     """Verify candles load across the common timeframe set."""
+    from unittest.mock import AsyncMock
+
+    import pandas as pd
+
     from src.data_loader import DataLoader
 
-    df = DataLoader.load_candles(
+    # Mock PostgreSQL functions
+    mock_save = AsyncMock(return_value=100)
+    mock_load = AsyncMock(return_value=pd.DataFrame())
+    monkeypatch.setattr("src.data_loader.save_candles_pg", mock_save)
+    monkeypatch.setattr("src.data_loader.load_candles_pg", mock_load)
+
+    df = DataLoader.load_candles_sync(
         exchange="synthetic",
         symbol="BTC/USD",
         timeframe=tf,
@@ -193,17 +213,27 @@ def test_unknown_timeframe_fallback():
 @pytest.mark.parametrize(
     "tf", ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "1d")
 )
-def test_candle_loading_minimum(db, tf):
+def test_candle_loading_minimum(db, tf, monkeypatch):
     """Verify that loading candles for a timeframe yields at least expected minimum."""
+    from unittest.mock import AsyncMock
+
+    import pandas as pd
+
     from src.config import get_timeframe_spec
     from src.data_loader import DataLoader
+
+    # Mock PostgreSQL functions
+    mock_save = AsyncMock(return_value=100)
+    mock_load = AsyncMock(return_value=pd.DataFrame())
+    monkeypatch.setattr("src.data_loader.save_candles_pg", mock_save)
+    monkeypatch.setattr("src.data_loader.load_candles_pg", mock_load)
 
     # Use synthetic so no network needed
     days = 1
     spec = get_timeframe_spec(tf, "crypto")
     bars_per_day = spec.bars_per_day_crypto
     expected_min = int(bars_per_day * days)  # minimum expected from days * bars_per_day
-    df = DataLoader.load_candles(
+    df = DataLoader.load_candles_sync(
         exchange="synthetic",
         symbol="BTC/USD",
         timeframe=tf,

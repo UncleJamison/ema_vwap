@@ -21,7 +21,7 @@ import argparse
 import shutil
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -105,7 +105,7 @@ def migrate(dry_run: bool = False) -> dict:
 
         # Backup the source DB before copying anything
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backup_path = BACKUP_DIR / f"candles_pre_migration_{stamp}.db"
         shutil.copy2(str(MONOLITHIC_DB), str(backup_path))
         summary["backup_path"] = str(backup_path)

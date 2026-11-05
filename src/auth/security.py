@@ -28,11 +28,9 @@ def get_configured_api_key() -> str | None:
 
     # Fall back to settings database (for persistent config via UI)
     try:
-        from src.db_connection_manager import get_database
         from src.settings import SettingsManager
 
-        db = get_database("system")
-        mgr = SettingsManager(db)
+        mgr = SettingsManager()
         key = mgr.get("app_api_key")
         if key and key.strip() and key.strip() != "default-key-for-dev":
             return key.strip()
@@ -42,12 +40,39 @@ def get_configured_api_key() -> str | None:
     return None
 
 
-def verify_api_key(provided_key: str | None) -> bool:
+async def get_configured_api_key_async() -> str | None:
+    """
+    Async version of get_configured_api_key.
+    Use this from async contexts (FastAPI dependencies, lifespan).
+    """
+    key = os.environ.get("API_KEY")
+    if key and key.strip() and key.strip() != "default-key-for-dev":
+        return key.strip()
+
+    env_key = os.environ.get("API_KEY")
+    if env_key and env_key.strip() == "default-key-for-dev":
+        return None
+
+    try:
+        from src.pg_database import get_setting_pg
+
+        row = await get_setting_pg("app_api_key")
+        if row and row.get("value"):
+            val = str(row["value"])
+            if val.strip() and val.strip() != "default-key-for-dev":
+                return val.strip()
+    except Exception as e:
+        logger.debug(f"Failed to load API key from settings: {e}")
+
+    return None
+
+
+async def verify_api_key(provided_key: str | None) -> bool:
     """
     Timing-attack safe comparison between the provided API key and configured API key.
     Always executes in constant time to prevent timing side-channel attacks.
     """
-    configured_key = get_configured_api_key()
+    configured_key = await get_configured_api_key_async()
     if not configured_key or not provided_key:
         return False
     return secrets.compare_digest(provided_key, configured_key)
@@ -69,7 +94,9 @@ async def get_api_key(api_key: str | None = Header(None, alias="X-API-Key")) -> 
             detail="Invalid or missing API key",
         )
 
-    if not verify_api_key(api_key):
+    configured_key = await get_configured_api_key_async()
+
+    if not configured_key or not secrets.compare_digest(api_key, configured_key):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid or missing API key",

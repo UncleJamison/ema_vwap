@@ -5,11 +5,22 @@ Tests for UI layer traceability fixes:
 - /api/optimizer/* route aliases (optimize, batch_optimize, status)
 """
 
+from unittest.mock import AsyncMock
+
+import pytest
 from fastapi.testclient import TestClient
 
 from src.app import app
 from src.auth import get_api_key
 from src.db_maintenance_multi import vacuum_database_all
+
+
+@pytest.fixture(autouse=True)
+def mock_pg_lifespan(monkeypatch):
+    """Mock PG lifespan to avoid connection leaks from TestClient."""
+    monkeypatch.setattr("src.app.init_pg_pools", AsyncMock())
+    monkeypatch.setattr("src.app.close_pg_pools", AsyncMock())
+    monkeypatch.setattr("src.app_limiter.limiter.reset", lambda: None)
 
 
 def test_db_vacuum_requires_authentication():
@@ -42,7 +53,7 @@ def test_vacuum_database_all_function():
     assert isinstance(res["results_per_db"], dict)
 
 
-def test_db_export_csv_supports_get_and_post():
+def test_db_export_csv_supports_get_and_post(pg_container):
     """Export CSV endpoint must accept both GET and POST requests."""
     client = TestClient(app)
     # Test GET
@@ -62,7 +73,7 @@ def test_db_export_csv_supports_get_and_post():
     assert "text/csv" in post_res.headers.get("content-type", "")
 
 
-def test_db_export_json_supports_get_and_post():
+def test_db_export_json_supports_get_and_post(pg_container):
     """Export JSON endpoint must accept both GET and POST requests."""
     client = TestClient(app)
     # Test GET

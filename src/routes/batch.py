@@ -15,12 +15,18 @@ from src.auth import get_api_key
 from src.batch_optimizer import (
     BatchOptimizer,
     BatchOptimizerConfig,
+    _update_state,
     cancel_batch,
     get_batch_state,
 )
 from src.config import StrategyParams, get_optimal_lookback_days
 from src.data_loader import DataLoader
 from src.logger import logger
+from src.pg_database import (
+    get_batch_result_pg,
+    load_batch_results_pg,
+    update_batch_result_validation_pg,
+)
 
 router = APIRouter(tags=["Batch Operations"])
 
@@ -86,6 +92,10 @@ class BatchResultsPurgeRequest(BaseModel):
 class BatchResultsAutoValidateRequest(BaseModel):
     target_metric: str | None = None
     exchange: str = "kucoin"
+    symbols: list[str] | None = None
+    timeframes: list[str] | None = None
+    n_trials: int | None = None
+    criteria: dict[str, Any] | None = None
 
 
 class BatchResultFavoriteRequest(BaseModel):
@@ -94,18 +104,35 @@ class BatchResultFavoriteRequest(BaseModel):
 
 def _run_batch_task(cfg: BatchOptimizerConfig) -> None:
     """Background thread target — runs the full sweep without blocking the HTTP response."""
+    import asyncio
     import traceback
 
+    async def _run_optimizer():
+        optimizer = BatchOptimizer(cfg)
+        await optimizer.run()
+
     try:
-        BatchOptimizer(cfg).run()
+        # Offload the entire batch optimization to a thread pool to avoid
+        # blocking the main event loop (which must stay responsive for
+        # API requests, WebSocket messages, and paper trading polling).
+        # Create a new event loop for this thread to run the async work.
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            # Run the async function directly in this thread's event loop.
+            # This runs the async work in this thread's event loop, not the main loop.
+            loop.run_until_complete(_run_optimizer())
+        finally:
+            loop.close()
     except Exception as exc:
         import traceback
 
+        tb = traceback.format_exc()
+
         from src.batch_optimizer import _update_state
 
-        _update_state(running=False, error=str(exc))
-        logger.error(f"[BatchOptimizer] _run_batch_task failed: {exc}")
-        traceback.print_exc()
+        _update_state(running=False, error=str(exc), debug_error=tb)
+        logger.error(f"[BatchOptimizer] _run_batch_task failed: {exc}\n{tb}")
 
 
 @router.post("/api/batch_optimize", dependencies=[Depends(get_api_key)])
@@ -114,9 +141,21 @@ def start_batch_optimize(
     request: Request, req: BatchOptimizeRequest, background_tasks: BackgroundTasks
 ) -> dict[str, Any]:
     """Start a multi-coin/multi-timeframe Optuna sweep in the background."""
+    # Immediately set running state so UI doesn't show stale "Complete" from previous run
+    _update_state(
+        running=True,
+        done=0,
+        total=0,
+        current_combo="Starting...",
+        combo_progress=0.0,
+        error=None,
+        cancelled=False,
+    )
+
     state = get_batch_state()
     if state["running"]:
-        raise HTTPException(status_code=409, detail="A batch sweep is already running.")
+        # Double-check after setting our own state
+        pass  # We just set it, so it's expected to be running
     cfg = BatchOptimizerConfig(
         symbols=req.symbols,
         timeframes=req.timeframes,
@@ -127,6 +166,8 @@ def start_batch_optimize(
         strategy_mode=req.strategy_mode,
         min_trades=req.min_trades,
         trade_direction=req.trade_direction,
+        # enable_multi_objective and multi_objective_metrics are set by
+        # BatchOptimizerConfig.__post_init__ based on target_metric
         enable_multi_objective=req.enable_multi_objective,
         multi_objective_metrics=(
             req.multi_objective_metrics
@@ -253,8 +294,17 @@ def get_batch_status() -> dict[str, Any]:
     """Poll the current batch sweep progress (error details sanitized)."""
     state = get_batch_state()
     # Sanitize: don't expose raw exception strings to clients (ema_vwap-3w1)
+    # But include a debug_error field with full traceback for debugging
     if state.get("error"):
         state = {**state, "error": "An internal error occurred during the batch sweep."}
+    return state
+
+
+@router.get("/api/batch_status_debug", dependencies=[Depends(get_api_key)])
+def get_batch_status_debug() -> dict[str, Any]:
+    """Poll the current batch sweep progress with full error details for debugging."""
+    state = get_batch_state()
+    # Return full error details for debugging
     return state
 
 
@@ -275,11 +325,11 @@ def cancel_batch_endpoint() -> dict[str, Any]:
 
 
 @router.get("/api/batch_results", dependencies=[Depends(get_api_key)])
-def get_batch_results(
+async def get_batch_results(
     target_metric: str | None = None, limit: int = 50
 ) -> dict[str, Any]:
     """Return the leaderboard from the batch_results table, sorted by best_value."""
-    rows = _st()._batch_db.load_batch_results(target_metric=target_metric, limit=limit)
+    rows = await load_batch_results_pg(target_metric=target_metric, limit=limit)
     return {"status": "success", "count": len(rows), "results": rows}
 
 
@@ -333,10 +383,10 @@ def set_batch_result_deployed(
     return {"status": "success", "id": result_id, "deployed": req.deployed}
 
 
-@router.post(
-    "/api/batch_results/{result_id}/import_profile", dependencies=[Depends(get_api_key)]
+@router.patch(
+    "/api/batch_results/{result_id}/import", dependencies=[Depends(get_api_key)]
 )
-def import_batch_result_as_profile(
+async def import_batch_result_as_profile(
     result_id: int,
     deploy: bool = True,
 ) -> dict[str, Any]:
@@ -347,13 +397,13 @@ def import_batch_result_as_profile(
         raise HTTPException(status_code=400, detail="Provide a valid result ID.")
 
     # Get the batch result
-    batch_result = _st()._batch_db.get_batch_result(result_id)
+    batch_result = await get_batch_result_pg(result_id)
     if not batch_result:
         raise HTTPException(status_code=404, detail="Batch result not found.")
 
     # Import as paper profile
     try:
-        profile_id = _st()._paper_profiles.import_batch_result_as_profile(
+        profile_id = await _st()._paper_profiles.import_batch_result_as_profile(
             exchange=batch_result["exchange"],
             symbol=batch_result["symbol"],
             timeframe=batch_result["timeframe"],
@@ -384,7 +434,7 @@ def import_batch_result_as_profile(
 
 
 @router.post("/api/batch_results/auto-validate", dependencies=[Depends(get_api_key)])
-def auto_validate_batch_results(
+async def auto_validate_batch_results(
     req: BatchResultsAutoValidateRequest,
 ) -> dict[str, Any]:
     """Auto-validate all saved batch results (or a filtered subset) after a sweep.
@@ -392,14 +442,28 @@ def auto_validate_batch_results(
     Runs the 3-gate robustness check on each result and persists the
     validation_status / validation_json back to the batch_results table.
     Designed to be triggered by the Batch Sweep tab's Auto-Validate checkbox.
+
+    All PG access goes through run_async (submits to the app main loop) so
+    pools stay loop-bound even when invoked from a foreign loop (tests,
+    nested runtimes). Candle loads are already sync-bridged.
     """
-    from src.validator import StrategyValidator
+    from src.sync_bridge import run_pg
+    from src.validator import StrategyValidator, ValidationCriteria
 
     try:
-        # Load results to validate (optionally filtered by target_metric)
-        rows = _st()._batch_db.load_batch_results(
-            target_metric=req.target_metric, limit=1000
-        )
+        # Load results to validate (optionally filtered by target_metric, symbols, timeframes).
+        # If symbols/timeframes provided, filter to only the recent sweep results.
+        # run_pg: direct await on the app main loop (pools stay loop-bound),
+        # wrapped to the main loop from foreign loops (tests).
+        load_kwargs = {
+            "target_metric": req.target_metric,
+            "limit": 1000,
+        }
+        if req.symbols is not None:
+            load_kwargs["symbols"] = req.symbols
+        if req.timeframes is not None:
+            load_kwargs["timeframes"] = req.timeframes
+        rows = await run_pg(load_batch_results_pg(**load_kwargs))
         if not rows:
             return {
                 "status": "success",
@@ -432,7 +496,11 @@ def auto_validate_batch_results(
                     val_days = get_optimal_lookback_days(timeframe)
                     val_limit = None  # let DataLoader compute from days
 
-                df_candles = DataLoader.load_candles(
+                # Async candle load: this endpoint runs ON the app main loop,
+                # where the sync bridge (run_async) is forbidden — it would
+                # raise the loop-guard and skip every result (the
+                # "Validated 0 results" bug).
+                df_candles = await DataLoader.load_candles(
                     exchange=exchange,
                     symbol=symbol,
                     timeframe=timeframe,
@@ -444,20 +512,37 @@ def auto_validate_batch_results(
                     if params_dict
                     else StrategyParams()
                 )
-                validator = StrategyValidator()
+                crit = (
+                    ValidationCriteria(**req.criteria)
+                    if req.criteria
+                    else ValidationCriteria()
+                )
+                validator = StrategyValidator(crit)
                 report = validator.validate(
                     df_candles=df_candles,
                     params=strat_params,
+                    n_trials=req.n_trials,
                     target_metric=resolved_target,
                     enable_multi_objective=is_multi,
                     multi_objective_metrics=multi_metrics,
                     timeframe=timeframe,
                 )
-                _st()._batch_db.update_batch_result_validation(
-                    result_id=row["id"],
-                    status=report.status,
-                    report_json=json.dumps(report.to_dict()),
+                # Gate 1 key is "gate1_backtest" in ValidationReport
+                gate_results = getattr(report, "gate_results", None)
+                g1 = (
+                    gate_results.get("gate1_backtest")
+                    if isinstance(gate_results, dict)
+                    else None
                 )
+                g1_metrics = getattr(g1, "metrics", None) if g1 else None
+                update_kwargs = {
+                    "result_id": row["id"],
+                    "status": report.status,
+                    "report_json": json.dumps(report.to_dict()),
+                }
+                if g1_metrics is not None:
+                    update_kwargs["metrics"] = g1_metrics
+                await run_pg(update_batch_result_validation_pg(**update_kwargs))
                 validated += 1
             except Exception as exc:
                 errors.append(
@@ -533,11 +618,11 @@ class BatchToPortfolioRequest(BaseModel):
     "/api/batch_results/export_to_portfolio",
     dependencies=[Depends(get_api_key)],
 )
-def export_batch_to_portfolio(req: BatchToPortfolioRequest) -> dict[str, Any]:
+async def export_batch_to_portfolio(req: BatchToPortfolioRequest) -> dict[str, Any]:
     """Export selected batch sweep results to portfolio rebalancer with computed target weights."""
     try:
         # Load the selected batch results
-        all_rows = _st()._batch_db.load_batch_results(limit=1000)
+        all_rows = await load_batch_results_pg(limit=1000)
         selected = [r for r in all_rows if r["id"] in req.result_ids]
 
         if not selected:
@@ -660,6 +745,7 @@ def export_batch_to_portfolio(req: BatchToPortfolioRequest) -> dict[str, Any]:
 
 
 def _run_all_metrics_batch_task(configs: list) -> None:
+    import asyncio
     import traceback
 
     from src.batch_optimizer import (
@@ -670,25 +756,59 @@ def _run_all_metrics_batch_task(configs: list) -> None:
     )
 
     reset_batch_state()
-    _update_state(running=True, total=len(configs), done=0, current_combo="")
-    total = len(configs)
-    for i, cfg in enumerate(configs):
-        if get_batch_state().get("cancelled"):
-            _update_state(running=False, error="Batch sweep cancelled")
-            return
-        label = f"[{cfg.target_metric} — {i+1}/{total}] "
-        try:
-            BatchOptimizer(cfg).run(
-                reset_state=(i == 0),
-                done_offset=i,
-                total_override=total,
-                combo_label_prefix=label,
-                mark_complete=(i == total - 1),
-            )
-        except Exception as exc:
-            _update_state(running=False, error=f"Batch sweep failed: {exc}")
-            logger.error(f"[BatchOptimizer] _run_all_metrics_batch_task failed: {exc}")
-            traceback.print_exc()
-            return
-        _update_state(done=i + 1, current_combo=label)
-    _update_state(running=False, done=total, total=total, current_combo="Complete")
+    # Total combos = metrics * symbols * timeframes
+    combos_per_metric = (
+        len(configs[0].symbols) * len(configs[0].timeframes) if configs else 0
+    )
+    total_all = combos_per_metric * len(configs)
+    _update_state(running=True, total=total_all, done=0, current_combo="")
+
+    # Create a single event loop for the entire batch sweep to reuse
+    # connection pools and avoid "too many clients" errors.
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        for i, cfg in enumerate(configs):
+            if get_batch_state().get("cancelled"):
+                _update_state(running=False, error="Batch sweep cancelled")
+                return
+            label = f"[{cfg.target_metric} — {i+1}/{len(configs)}] "
+            try:
+                # Offload each metric's optimization to thread pool to avoid
+                # blocking the main event loop.
+                async def _run_optimizer(
+                    _cfg=cfg, _i=i, _total=total_all, _label=label
+                ):
+                    optimizer = BatchOptimizer(_cfg)
+                    res = optimizer.run(
+                        reset_state=(_i == 0),
+                        done_offset=_i * combos_per_metric,
+                        total_override=_total,
+                        combo_label_prefix=_label,
+                        mark_complete=(_i == len(configs) - 1),
+                    )
+                    import inspect
+
+                    if inspect.isawaitable(res):
+                        await res
+
+                # Run the async function in the shared event loop.
+                # This reuses the same connection pool for all metrics.
+                loop.run_until_complete(_run_optimizer())
+            except Exception as exc:
+                import traceback
+
+                tb = traceback.format_exc()
+                _update_state(
+                    running=False, error=f"Batch sweep failed: {exc}", debug_error=tb
+                )
+                logger.error(
+                    f"[BatchOptimizer] _run_all_metrics_batch_task failed: {exc}\n{tb}"
+                )
+                return
+            _update_state(done=(i + 1) * combos_per_metric, current_combo=label)
+    finally:
+        loop.close()
+    _update_state(
+        running=False, done=total_all, total=total_all, current_combo="Complete"
+    )

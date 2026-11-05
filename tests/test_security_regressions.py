@@ -27,6 +27,18 @@ class TestRateLimiting:
 
     def test_settings_sensitive_rate_limited(self, client, monkeypatch):
         """GET /api/settings/sensitive is 5/min — hammer it and expect a 429 or 200s then 429."""
+
+        # The route reads settings via the PG-backed manager; unit tests have
+        # no pools initialized, so isolate the storage read and test only the
+        # limiter behavior (which is this test's regression subject).
+        async def _fake_sensitive():
+            return {}
+
+        import src.app as app_module
+
+        monkeypatch.setattr(
+            app_module._settings_mgr, "aget_all_sensitive", _fake_sensitive
+        )
         statuses = []
         for _ in range(10):
             resp = client.get("/api/settings/sensitive")
@@ -37,11 +49,39 @@ class TestRateLimiting:
         if 429 in statuses:
             assert statuses[-1] == 429  # once tripped, stays tripped within window
 
-    def test_backtest_rate_limited(self, client):
+    def test_backtest_rate_limited(self, client, monkeypatch):
         # Reset limiter counters so other tests' requests don't pre-trip this one.
         from src.app_limiter import limiter
 
         limiter.reset()
+
+        # Mock DataLoader.load_candles to avoid DB connection in test environment
+        async def _fake_load_candles(*args, **kwargs):
+            import pandas as pd
+
+            return pd.DataFrame(
+                {
+                    "timestamp": pd.date_range(
+                        "2024-01-01", periods=100, freq="5min", tz="UTC"
+                    ),
+                    "open": [100.0] * 100,
+                    "high": [101.0] * 100,
+                    "low": [99.0] * 100,
+                    "close": [100.0] * 100,
+                    "volume": [1000.0] * 100,
+                }
+            )
+
+        async def _fake_resolve(*args, **kwargs):
+            return ("kucoin", "BTC/USD")
+
+        monkeypatch.setattr(
+            "src.data_loader.DataLoader.load_candles", _fake_load_candles
+        )
+        monkeypatch.setattr(
+            "src.settings.SettingsManager.aresolve_exchange_symbol", _fake_resolve
+        )
+
         statuses = [
             client.post("/api/backtest", json={}).status_code for _ in range(35)
         ]
@@ -75,9 +115,22 @@ class TestWebSocketAuth:
     def test_ws_accepts_valid_api_key(self, client, monkeypatch):
         """Valid key must be accepted — regression for the route never passing api_key."""
 
+        async def _fake_key_async():
+            return "test-key"
+
+        async def _fake_status():
+            # Engine status is PG-backed (ledger/pool awaits); isolate the WS
+            # auth + init-message plumbing from it in unit-test conditions
+            # where no main loop / PG is available (would otherwise stall
+            # the init send and time the test out).
+            return {"status": "ok"}
+
         monkeypatch.setattr(
-            "src.auth.security.get_configured_api_key", lambda: "test-key"
+            "src.auth.security.get_configured_api_key_async", _fake_key_async
         )
+        import src.app as app_module
+
+        monkeypatch.setattr(app_module._paper_engine, "get_status", _fake_status)
         with client.websocket_connect("/ws/dashboard?api_key=test-key") as ws:
             # Connection accepted: the init message must arrive (or stay open)
             data = ws.receive_text()
@@ -123,8 +176,11 @@ class TestMutatingEndpointAuth:
     @pytest.mark.parametrize("path,method", ENDPOINTS)
     def test_mutating_endpoints_reject_missing_key(self, path, method, monkeypatch):
         # No dependency override: exercise the REAL get_api_key dependency with no key sent.
+        async def _fake_key_async():
+            return "test-key"
+
         monkeypatch.setattr(
-            "src.auth.security.get_configured_api_key", lambda: "test-key"
+            "src.auth.security.get_configured_api_key_async", _fake_key_async
         )
         app.dependency_overrides.pop(get_api_key, None)
         c = TestClient(app)
@@ -141,8 +197,11 @@ class TestMutatingEndpointAuth:
     @pytest.mark.parametrize("path,method", ENDPOINTS)
     def test_mutating_endpoints_reject_invalid_key(self, path, method, monkeypatch):
         # No dependency override: exercise the REAL get_api_key dependency with a wrong key.
+        async def _fake_key_async():
+            return "test-key"
+
         monkeypatch.setattr(
-            "src.auth.security.get_configured_api_key", lambda: "test-key"
+            "src.auth.security.get_configured_api_key_async", _fake_key_async
         )
         app.dependency_overrides.pop(get_api_key, None)
         c = TestClient(app)

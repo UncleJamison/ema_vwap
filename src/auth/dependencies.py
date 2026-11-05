@@ -15,7 +15,6 @@ from src.auth.models import (
     User,
     UserManager,
 )
-from src.db_connection_manager import get_database
 
 # API Key header
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -30,8 +29,7 @@ def get_user_manager() -> UserManager:
     """Get the global UserManager instance."""
     global _user_manager
     if _user_manager is None:
-        db = get_database("system")
-        _user_manager = UserManager(db)
+        _user_manager = UserManager()
     return _user_manager
 
 
@@ -61,16 +59,28 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Look up user by API key
-    user = user_manager.get_user_by_api_key(credentials)
+    # Look up user by API key in the users table (RBAC path)
+    user = await user_manager.get_user_by_api_key(credentials)
     if not user:
-        # Also try to find by Bearer token (if it's a session token)
-        # For now, only API key is supported
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key or token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        # Fallback: the administrator API key (stored in settings, not users)
+        # authenticates as a synthetic superuser so RBAC-protected routes
+        # work out of the box without creating user records.
+        from src.auth.security import get_configured_api_key_async
+
+        configured = await get_configured_api_key_async()
+        if configured and credentials == configured:
+            user = User(
+                username="admin",
+                email="admin@local",
+                role=RoleName.ADMIN,
+                is_superuser=True,
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key or token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
     # Check if user is active
     if not user.is_active:

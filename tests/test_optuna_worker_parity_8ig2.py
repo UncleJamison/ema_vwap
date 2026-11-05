@@ -77,15 +77,19 @@ def test_evaluator_drawdown_constraint_pruning():
     config = OptunaConfig(
         n_trials=5,
         enable_hard_drawdown_constraint=True,
-        max_drawdown_constraint_pct=1.0,
+        max_drawdown_constraint_pct=0.0001,
         min_trades=0,
         vwap_slope_min=0.0,
         vwap_slope_max=0.0,
+        sampler_seed=42,
     )
     spec = OptunaTrialSpec.create(base_params, config)
     evaluator = OptunaObjectiveEvaluator(spec=spec, df=df)
 
-    study = optuna.create_study(direction="maximize")
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=42),
+    )
 
     # If any trial trades, it will breach 0.00001% drawdown and be pruned
     study.optimize(evaluator, n_trials=5)

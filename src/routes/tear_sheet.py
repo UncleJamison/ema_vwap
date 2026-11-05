@@ -5,7 +5,8 @@ The endpoint bodies are moved verbatim; shared state is read through
 `src.app` at call time so tests that monkeypatch `src.app._*` keep working.
 """
 
-from datetime import datetime, timezone
+import inspect
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -65,12 +66,21 @@ async def generate_tear_sheet_pdf(request: Request, req: TearSheetRequest) -> Re
         # Load candles for backtest and validation
         # "Auto (Optimal Lookback)" mode: use optimal lookback based on timeframe
         ts_days = get_optimal_lookback_days(req.timeframe)
-        df_candles = DataLoader.load_candles(
-            exchange=req.exchange,
-            symbol=req.symbol,
+        # Use async variant to avoid run_async() from main event loop
+        sym_res = DataLoader.aresolve_canonical_symbol(req.symbol, live_mode=False)
+        resolved_exchange, resolved_symbol = (
+            await sym_res if inspect.isawaitable(sym_res) else sym_res
+        )
+        # Use async load_candles directly to avoid run_async() from main event loop
+        candles_res = DataLoader.load_candles(
+            exchange=resolved_exchange,
+            symbol=resolved_symbol,
             timeframe=req.timeframe,
             limit=None,
             days=ts_days,
+        )
+        df_candles = (
+            await candles_res if inspect.isawaitable(candles_res) else candles_res
         )
 
         # If no validation report provided, run validation
@@ -151,7 +161,7 @@ async def generate_tear_sheet_pdf(request: Request, req: TearSheetRequest) -> Re
             monte_carlo_percentiles=mc_percentiles,
         )
 
-        filename = f"ema_vwap_tear_sheet_{req.symbol.replace('/', '_')}_{req.timeframe}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}...."
+        filename = f"ema_vwap_tear_sheet_{req.symbol.replace('/', '_')}_{req.timeframe}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}...."
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
@@ -175,12 +185,21 @@ async def generate_tear_sheet_html(request: Request, req: TearSheetRequest) -> R
         # Load candles for backtest and validation
         # "Auto (Optimal Lookback)" mode: use optimal lookback based on timeframe
         ts_days = get_optimal_lookback_days(req.timeframe)
-        df_candles = DataLoader.load_candles(
-            exchange=req.exchange,
-            symbol=req.symbol,
+        # Use async variant to avoid run_async() from main event loop
+        sym_res = DataLoader.aresolve_canonical_symbol(req.symbol, live_mode=False)
+        resolved_exchange, resolved_symbol = (
+            await sym_res if inspect.isawaitable(sym_res) else sym_res
+        )
+        # Use async load_candles directly to avoid run_async() from main event loop
+        candles_res = DataLoader.load_candles(
+            exchange=resolved_exchange,
+            symbol=resolved_symbol,
             timeframe=req.timeframe,
             limit=None,
             days=ts_days,
+        )
+        df_candles = (
+            await candles_res if inspect.isawaitable(candles_res) else candles_res
         )
 
         # If no validation report provided, run validation
@@ -278,12 +297,21 @@ async def generate_tear_sheet_json(
         # Load candles for backtest and validation
         # "Auto (Optimal Lookback)" mode: use optimal lookback based on timeframe
         ts_days = get_optimal_lookback_days(req.timeframe)
-        df_candles = DataLoader.load_candles(
-            exchange=req.exchange,
-            symbol=req.symbol,
+        # Use async variant to avoid run_async() from main event loop
+        sym_res = DataLoader.aresolve_canonical_symbol(req.symbol, live_mode=False)
+        resolved_exchange, resolved_symbol = (
+            await sym_res if inspect.isawaitable(sym_res) else sym_res
+        )
+        # Use async load_candles directly to avoid run_async() from main event loop
+        candles_res = DataLoader.load_candles(
+            exchange=resolved_exchange,
+            symbol=resolved_symbol,
             timeframe=req.timeframe,
             limit=None,
             days=ts_days,
+        )
+        df_candles = (
+            await candles_res if inspect.isawaitable(candles_res) else candles_res
         )
 
         # If no validation report provided, run validation
@@ -358,7 +386,7 @@ async def generate_tear_sheet_json(
             "symbol": req.symbol,
             "timeframe": req.timeframe,
             "exchange": req.exchange,
-            "generated_at": datetime.now(timezone.utc).isoformat() + "Z",
+            "generated_at": datetime.now(UTC).isoformat() + "Z",
             "report": validation_report,
             "strategy_params": req.params,
             "trade_distribution": trade_distribution,

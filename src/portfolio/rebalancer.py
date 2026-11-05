@@ -76,7 +76,7 @@ class PortfolioRebalancingEngine:
             snapshot = portfolio_aggregator.get_unified_snapshot()
 
         total_nav = max(1000.0, snapshot.total_nav_usd)
-        now_str = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00:00")
+        now_str = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M:%S+00:00")
 
         # Map current holdings
         current_holdings: dict[str, dict[str, Any]] = {}

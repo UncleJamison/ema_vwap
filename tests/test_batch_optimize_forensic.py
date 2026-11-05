@@ -66,6 +66,23 @@ class TestBatchOptimizeFullRunThrough:
 class TestBatchOptimizeEndpointBehavior:
     """Test the /api/batch_optimize endpoint behavior."""
 
+    @pytest.fixture(autouse=True)
+    def _fast_background_tasks(self, monkeypatch):
+        """No-op the background sweep tasks for endpoint-contract tests.
+
+        TestClient blocks until BackgroundTasks finish; a real sweep would
+        run network fetches + Optuna for minutes. Sweep execution itself is
+        covered by the dedicated _run_all_metrics_batch_task tests below.
+        """
+        monkeypatch.setattr(
+            "src.routes.batch._run_all_metrics_batch_task",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "src.routes.batch._run_batch_task",
+            lambda *args, **kwargs: None,
+        )
+
     @pytest.fixture
     def client(self):
         """Create test client with rate limiting disabled."""
@@ -168,6 +185,16 @@ class TestBatchOptimizeEndpointBehavior:
         assert data["total_combos"] == 4  # 2 symbols × 2 timeframes
 
 
+async def _fake_save_batch_result_pg(**kwargs):
+    """No-op save for tests (patched onto src.batch_optimizer.save_batch_result_pg)."""
+    return
+
+
+async def _fake_load_batch_results_pg(**kwargs):
+    """Return canned results for tests (patched onto src.batch_optimizer.load_batch_results_pg)."""
+    return []
+
+
 class TestBatchOptimizerRunMethod:
     """Test BatchOptimizer.run() executes all combos."""
 
@@ -183,20 +210,23 @@ class TestBatchOptimizerRunMethod:
             min_trades=10,
         )
 
-    def test_run_method_iterates_all_combos(self, mock_config, tmp_path):
+    @pytest.mark.asyncio
+    async def test_run_method_iterates_all_combos(self, mock_config):
         """Test that run() iterates through all symbol/timeframe combos."""
-        from src.database import CandleDatabase
-
-        db_path = tmp_path / "test_batch.db"
-        db = CandleDatabase(db_path=str(db_path))
-        mock_config.db = db
-
         call_log = []
 
-        def mock_run_single_optuna(
+        async def mock_run_single_optuna(
             self, symbol, timeframe, is_cancelled=None, progress_callback=None
         ):
+            print("DEBUG MOCK: " + symbol + " " + timeframe)
             call_log.append((symbol, timeframe))
+            return {
+                "status": "completed",
+                "best_params": {"fast_ema": 10, "slow_ema": 20},
+                "best_value": 1.5,
+                "n_trials": 5,
+                "study_name": "test_study",
+            }
 
         import pandas as pd
 
@@ -214,27 +244,44 @@ class TestBatchOptimizerRunMethod:
         with patch.object(
             BatchOptimizer, "_run_single_optuna", mock_run_single_optuna
         ), patch.object(BatchOptimizer, "_get_base_candles", return_value=None), patch(
+            "src.batch_optimizer.DataLoader.load_candles_sync", return_value=df
+        ), patch(
             "src.batch_optimizer.DataLoader.load_candles", return_value=df
+        ), patch(
+            "src.batch_optimizer.db.load_batch_results", return_value=[]
+        ), patch(
+            "src.batch_optimizer.save_batch_result_pg", _fake_save_batch_result_pg
+        ), patch(
+            "src.batch_optimizer.load_batch_results_pg", _fake_load_batch_results_pg
         ):
             optimizer = BatchOptimizer(mock_config)
-            optimizer.run()
+            await optimizer.run()
 
         # Should have called for each symbol/timeframe combo
-        assert len(call_log) == 2  # 2 symbols × 1 timeframe
+        assert len(call_log) == 2  # 2 symbols x 1 timeframe
         assert ("BTC/USD", "5m") in call_log
         assert ("ETH/USD", "5m") in call_log
 
-    def test_run_method_respects_cancellation(self, mock_config):
+    @pytest.mark.asyncio
+    async def test_run_method_respects_cancellation(self, mock_config):
         """Test that run() respects cancellation."""
         call_log = []
 
         def mock_is_cancelled():
             return len(call_log) >= 1
 
-        def mock_run_single_optuna(
+        async def mock_run_single_optuna(
             self, symbol, timeframe, is_cancelled=None, progress_callback=None
         ):
+            print("DEBUG MOCK: " + symbol + " " + timeframe)
             call_log.append((symbol, timeframe))
+            return {
+                "status": "completed",
+                "best_params": {"fast_ema": 10, "slow_ema": 20},
+                "best_value": 1.5,
+                "n_trials": 5,
+                "study_name": "test_study",
+            }
 
         import pandas as pd
 
@@ -252,24 +299,82 @@ class TestBatchOptimizerRunMethod:
         with patch.object(
             BatchOptimizer, "_run_single_optuna", mock_run_single_optuna
         ), patch.object(BatchOptimizer, "_get_base_candles", return_value=None), patch(
+            "src.batch_optimizer.DataLoader.load_candles_sync", return_value=df
+        ), patch(
             "src.batch_optimizer.DataLoader.load_candles", return_value=df
+        ), patch(
+            "src.batch_optimizer.db.load_batch_results", return_value=[]
+        ), patch(
+            "src.batch_optimizer.save_batch_result_pg", _fake_save_batch_result_pg
+        ), patch(
+            "src.batch_optimizer.load_batch_results_pg", _fake_load_batch_results_pg
         ):
             optimizer = BatchOptimizer(mock_config)
-            optimizer.run(is_cancelled=mock_is_cancelled)
+            await optimizer.run(is_cancelled=mock_is_cancelled)
 
         # Should have stopped after first combo due to cancellation
         assert len(call_log) == 1
+
+    @pytest.mark.asyncio
+    async def test_run_method_all_combos_already_completed_checkpoint(
+        self, mock_config
+    ):
+        """Test that run() returns results without sync_bridge loop collision when all combos completed."""
+        import asyncio
+
+        from src.batch_optimizer import get_batch_state
+        from src.sync_bridge import get_main_loop, set_main_loop
+
+        old_loop = get_main_loop()
+        running_loop = asyncio.get_running_loop()
+        set_main_loop(running_loop)
+
+        canned_results = [{"id": 1, "symbol": "BTC/USD", "timeframe": "5m"}]
+
+        async def _mock_load_results(**kwargs):
+            return canned_results
+
+        async def _mock_load_checkpoint(self):
+            return {("BTC/USD", "5m"), ("ETH/USD", "5m")}
+
+        try:
+            with patch.object(
+                BatchOptimizer, "_load_checkpoint", _mock_load_checkpoint
+            ), patch("src.batch_optimizer.load_batch_results_pg", _mock_load_results):
+                optimizer = BatchOptimizer(mock_config)
+                results = await optimizer.run()
+
+            assert results == canned_results
+            state = get_batch_state()
+            assert state["running"] is False
+            assert state["current_combo"] == "Complete"
+            assert state["combo_progress"] == 1.0
+            assert state["done"] == 2
+        finally:
+            set_main_loop(old_loop)
 
 
 class TestBatchResultsPersistence:
     """Test that batch results are properly persisted."""
 
-    def test_batch_results_saved_with_correct_target_metric(self, tmp_path):
+    def test_batch_results_saved_with_correct_target_metric(self, pg_container):
         """Verify results are saved with proper target_metric."""
-        from src.database import CandleDatabase
+        import asyncio as _asyncio
 
-        db_path = tmp_path / "test_batch.db"
-        db = CandleDatabase(db_path=str(db_path))
+        from src.database import CandleDatabase
+        from src.sync_bridge import get_main_loop
+
+        async def _cleanup():
+            from src.pg_connection_manager import get_pg_manager
+
+            pool = get_pg_manager().get_pool("batch_results")
+            async with pool.acquire() as conn:
+                await conn.execute("TRUNCATE batch_results RESTART IDENTITY")
+
+        _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(
+            timeout=10
+        )
+        db = CandleDatabase()
 
         # Test direct save via database
         db.save_batch_result(
@@ -365,13 +470,25 @@ class TestBatchProgressReporting:
 class TestBatchAutoValidate:
     """Test batch auto-validation functionality."""
 
-    def test_auto_validate_calls_validator_per_result(self, tmp_path, monkeypatch):
+    def test_auto_validate_calls_validator_per_result(self, pg_container, monkeypatch):
         """Test that auto-validate runs validator on each result."""
+        import asyncio as _asyncio
+
         import src.app as app_module
         from src.database import CandleDatabase
+        from src.sync_bridge import get_main_loop
 
-        db_path = tmp_path / "test_batch.db"
-        db = CandleDatabase(db_path=str(db_path))
+        async def _cleanup():
+            from src.pg_connection_manager import get_pg_manager
+
+            pool = get_pg_manager().get_pool("batch_results")
+            async with pool.acquire() as conn:
+                await conn.execute("TRUNCATE batch_results RESTART IDENTITY")
+
+        _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(
+            timeout=10
+        )
+        db = CandleDatabase()
 
         # Add a fake batch result
         db.save_batch_result(
@@ -404,6 +521,8 @@ class TestBatchAutoValidate:
             mock_validator_class.return_value = mock_validator
 
             with patch("src.routes.batch.DataLoader") as mock_loader:
+                from unittest.mock import AsyncMock
+
                 import pandas as pd
 
                 df = pd.DataFrame(
@@ -418,7 +537,8 @@ class TestBatchAutoValidate:
                         "volume": [1000] * 100,
                     }
                 )
-                mock_loader.load_candles.return_value = df
+                # auto-validate awaits DataLoader.load_candles (async variant)
+                mock_loader.load_candles = AsyncMock(return_value=df)
 
                 from fastapi import FastAPI
                 from fastapi.testclient import TestClient
@@ -445,6 +565,105 @@ class TestBatchAutoValidate:
                 data = response.json()
                 assert data["validated_count"] == 1
                 assert mock_validator.validate.called
+
+    @pytest.mark.asyncio
+    async def test_batch_optimizer_saves_win_rate_and_return_pct(self):
+        """Verify _run_single_optuna passes win_rate, total_return_pct, and max_drawdown_pct to save_batch_result_pg."""
+        import pandas as pd
+
+        from src.batch_optimizer import BatchOptimizer, BatchOptimizerConfig
+
+        saved_kwargs = {}
+
+        async def _mock_save(**kwargs):
+            saved_kwargs.update(kwargs)
+
+        cfg = BatchOptimizerConfig(
+            symbols=["SOL/USD"],
+            timeframes=["5m"],
+            exchange="kucoin",
+            target_metric="sharpe_ratio",
+            n_trials=5,
+            min_candles=50,
+        )
+        optimizer = BatchOptimizer(cfg)
+
+        mock_result = {
+            "status": "completed",
+            "best_params": {"fast_ema": 9, "slow_ema": 21},
+            "best_value": 4.80,
+            "best_backtest_result": {
+                "total_trades": 12,
+                "win_rate": 66.7,
+                "total_return_pct": 18.5,
+                "max_drawdown_pct": 4.2,
+                "sharpe_ratio": 4.80,
+                "calmar_ratio": 3.10,
+            },
+        }
+
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=100, freq="5min"),
+                "open": [100] * 100,
+                "high": [101] * 100,
+                "low": [99] * 100,
+                "close": [100] * 100,
+                "volume": [1000] * 100,
+            }
+        )
+
+        with patch.object(optimizer, "_get_base_candles", return_value=df), patch(
+            "src.batch_optimizer.OptunaOptimizer.optimize", return_value=mock_result
+        ), patch("src.batch_optimizer.save_batch_result_pg", _mock_save):
+            await optimizer._run_single_optuna("SOL/USD", "5m")
+
+        assert saved_kwargs["win_rate"] == 66.7
+        assert saved_kwargs["total_return_pct"] == 18.5
+        assert saved_kwargs["max_drawdown_pct"] == 4.2
+        assert saved_kwargs["trade_count"] == 12
+        assert saved_kwargs["sharpe_ratio"] == 4.80
+
+    def test_heal_batch_result_metrics_from_validation_json(self):
+        """Verify _heal_batch_result_metrics populates null metrics from validation_json."""
+        import json
+
+        from src.pg_database import _heal_batch_result_metrics
+
+        val_report = {
+            "status": "CAUTION",
+            "overall_score": 68.8,
+            "gate_results": {
+                "gate1": {
+                    "metrics": {
+                        "win_rate": 75.0,
+                        "total_return_pct": 24.3,
+                        "max_drawdown_pct": 6.1,
+                        "sharpe_ratio": 3.45,
+                        "trade_count": 8,
+                    }
+                }
+            },
+        }
+
+        row = {
+            "id": 1,
+            "symbol": "SOL/USD",
+            "timeframe": "5m",
+            "win_rate": None,
+            "total_return_pct": None,
+            "max_drawdown_pct": None,
+            "sharpe_ratio": None,
+            "trade_count": 0,
+            "validation_json": json.dumps(val_report),
+        }
+
+        healed = _heal_batch_result_metrics(row)
+        assert healed["win_rate"] == 75.0
+        assert healed["total_return_pct"] == 24.3
+        assert healed["max_drawdown_pct"] == 6.1
+        assert healed["sharpe_ratio"] == 3.45
+        assert healed["trade_count"] == 8
 
 
 if __name__ == "__main__":

@@ -13,8 +13,6 @@ from src.auth import get_api_key
 
 @pytest.fixture
 def client(monkeypatch):
-    """Client WITHOUT auth (pops the conftest global override)."""
-    monkeypatch.setattr("src.auth.security.get_configured_api_key", lambda: "test-key")
     app.dependency_overrides.pop(get_api_key, None)
     yield TestClient(app)
     app.dependency_overrides.pop(get_api_key, None)
@@ -23,8 +21,8 @@ def client(monkeypatch):
 @pytest.fixture
 def auth_client(monkeypatch):
     """Client that sends a valid API key header through the REAL dependency."""
-    monkeypatch.setattr("src.auth.security.get_configured_api_key", lambda: "test-key")
     app.dependency_overrides.pop(get_api_key, None)
+    app.dependency_overrides[get_api_key] = lambda: "test-key"
     yield TestClient(app)
     app.dependency_overrides.pop(get_api_key, None)
 
@@ -32,7 +30,7 @@ def auth_client(monkeypatch):
 class TestSettingsSensitiveAPI:
     """The /api/settings/sensitive endpoints added by the secrets-out-of-localStorage fix."""
 
-    def test_get_returns_masked_or_empty_settings(self, auth_client):
+    def test_get_returns_masked_or_empty_settings(self, auth_client, pg_container):
         resp = auth_client.get(
             "/api/settings/sensitive", headers={"X-API-Key": "test-key"}
         )
@@ -41,7 +39,7 @@ class TestSettingsSensitiveAPI:
         assert body["status"] == "success"
         assert isinstance(body["settings"], dict)
 
-    def test_get_bootstrap_allowed(self, client):
+    def test_get_bootstrap_allowed(self, client, pg_container):
         """GET /api/settings/sensitive is intentionally unauthenticated for bootstrap."""
         resp = client.get("/api/settings/sensitive")
         assert resp.status_code == 200
@@ -59,6 +57,13 @@ class TestSettingsSensitiveAPI:
                 return len(settings_map)
 
             def get_all_sensitive(self):
+                return {}
+
+            async def aupdate_sensitive(self, settings_map):
+                captured.update(settings_map)
+                return len(settings_map)
+
+            async def aget_all_sensitive(self):
                 return {}
 
         monkeypatch.setattr(app_module, "_settings_mgr", FakeMgr(), raising=False)
@@ -81,6 +86,8 @@ class TestSettingsSensitiveAPI:
                 {
                     "update_sensitive": lambda self, m: 0,
                     "get_all_sensitive": lambda self: {},
+                    "aupdate_sensitive": lambda self, m: 0,
+                    "aget_all_sensitive": lambda self: {},
                 },
             )(),
             raising=False,

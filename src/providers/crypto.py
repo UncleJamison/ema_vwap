@@ -6,10 +6,14 @@ import time
 from typing import ClassVar
 
 import pandas as pd
-import requests
 
 from src.config import get_optimal_lookback_days
 from src.providers.base import BaseDataProvider, normalize_symbol
+from src.providers.resilience import (
+    ExponentialBackoff,
+    get_breaker,
+    resilient_get,
+)
 
 
 class GeminiAdapter(BaseDataProvider):
@@ -52,8 +56,19 @@ class GeminiAdapter(BaseDataProvider):
         url = f"https://api.gemini.com/v2/candles/{gemini_symbol}/{g_tf}"
 
         try:
-            resp = requests.get(url, timeout=10)
-            resp.raise_for_status()
+            resp = resilient_get(
+                url,
+                breaker=get_breaker("gemini"),
+                backoff=ExponentialBackoff(),
+                timeout=10,
+            )
+            if resp is None:
+                # Partition / rate-limited / persistent client error: fall
+                # back to caller's cache path with an empty frame.
+                print(f"[GeminiAdapter] Request failed for {url} (resilience).")
+                return pd.DataFrame(
+                    columns=["timestamp", "open", "high", "low", "close", "volume"]
+                )
             raw_data = resp.json()
 
             if not isinstance(raw_data, list) or len(raw_data) == 0:
@@ -165,8 +180,20 @@ class KuCoinAdapter(BaseDataProvider):
             )
 
             try:
-                resp = requests.get(url, timeout=10)
-                resp.raise_for_status()
+                resp = resilient_get(
+                    url,
+                    breaker=get_breaker("kucoin"),
+                    backoff=ExponentialBackoff(),
+                    timeout=10,
+                )
+                if resp is None:
+                    # Breaker open / retries exhausted: keep what we have;
+                    # DataLoader falls back to the DB cache.
+                    print(
+                        "[KuCoinAdapter] Pagination stopped (breaker/backoff "
+                        "exhausted); returning partial data."
+                    )
+                    break
                 res_json = resp.json()
 
                 if res_json.get("code") != "200000" or "data" not in res_json:
@@ -178,7 +205,7 @@ class KuCoinAdapter(BaseDataProvider):
 
                 all_candles.extend(chunk)
                 current_end = current_start - 1
-                time.sleep(0.1)  # Respect API rate limits
+                time.sleep(0.1)  # Respect API rate limits (pagination pacing)
             except Exception as e:
                 print(f"[KuCoinAdapter] Pagination error: {e}")
                 break

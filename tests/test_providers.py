@@ -171,10 +171,11 @@ class TestGeminiAdapter:
         assert adapter.format_symbol("BTC/USDT") == "btcusd"
         assert adapter.format_symbol("ETH/USD") == "ethusd"
 
-    @patch("src.providers.crypto.requests.get")
+    @patch("src.providers.resilience.requests.get")
     def test_fetch_historical_candles_success(self, mock_get):
         adapter = GeminiAdapter()
         mock_response = Mock()
+        mock_response.status_code = 200
         mock_response.json.return_value = [
             [1704067200000, "50000", "50200", "49900", "50100", "100"],
             [1704067260000, "50100", "50300", "50000", "50200", "200"],
@@ -196,7 +197,7 @@ class TestGeminiAdapter:
             df["close"].iloc[0] == 50100.0
         )  # Gemini returns chronological, first candle is oldest
 
-    @patch("src.providers.crypto.requests.get")
+    @patch("src.providers.resilience.requests.get")
     def test_fetch_historical_candles_empty(self, mock_get):
         adapter = GeminiAdapter()
         mock_response = Mock()
@@ -207,7 +208,7 @@ class TestGeminiAdapter:
         df = adapter.fetch_historical_candles()
         assert len(df) == 0
 
-    @patch("src.providers.crypto.requests.get")
+    @patch("src.providers.resilience.requests.get")
     def test_fetch_historical_candles_error(self, mock_get):
         adapter = GeminiAdapter()
         mock_get.side_effect = Exception("Network error")
@@ -230,11 +231,12 @@ class TestKuCoinAdapter:
         assert adapter.format_symbol("BTC/USDT") == "BTC-USDT"
         assert adapter.format_symbol("ETH/USD") == "ETH-USDT"
 
-    @patch("src.providers.crypto.requests.get")
+    @patch("src.providers.resilience.requests.get")
     def test_fetch_historical_candles_pagination(self, mock_get):
         adapter = KuCoinAdapter()
         # First page
         resp1 = Mock()
+        resp1.status_code = 200
         resp1.json.return_value = {
             "code": "200000",
             "data": [
@@ -244,6 +246,7 @@ class TestKuCoinAdapter:
         }
         # Second page (empty - ends pagination)
         resp2 = Mock()
+        resp2.status_code = 200
         resp2.json.return_value = {"code": "200000", "data": []}
         mock_get.side_effect = [resp1, resp2]
 
@@ -253,7 +256,7 @@ class TestKuCoinAdapter:
             df["close"].iloc[0] == 50200.0
         )  # KuCoin returns reverse chronological, normalized sorts ascending
 
-    @patch("src.providers.crypto.requests.get")
+    @patch("src.providers.resilience.requests.get")
     def test_fetch_historical_candles_error(self, mock_get):
         adapter = KuCoinAdapter()
         mock_get.side_effect = Exception("Network error")

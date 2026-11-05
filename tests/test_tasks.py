@@ -2,17 +2,33 @@
 Unit tests for TaskManager background job worker, progress polling, and task cancellation.
 """
 
-import os
 import time
 
-from src.database import CandleDatabase
+import pytest
+
 from src.tasks import TaskCancelledException, TaskManager, TaskStatus
 
 
-def test_task_manager_lifecycle(tmp_path):
-    db_file = os.path.join(tmp_path, "system_test_tasks.db")
-    db = CandleDatabase(db_path=db_file)
-    mgr = TaskManager(db=db)
+@pytest.fixture
+def clean_task_db(pg_container):
+    """Real PG with a clean background_tasks table per test."""
+    import asyncio as _asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
+
+        pool = get_pg_manager().get_pool("system")
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE background_tasks")
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(timeout=10)
+    yield
+
+
+def test_task_manager_lifecycle(clean_task_db):
+    mgr = TaskManager()
 
     task_id = mgr.create_task("Test Optimization Job")
     assert task_id.startswith("task_")
@@ -39,10 +55,8 @@ def test_task_manager_lifecycle(tmp_path):
     assert task_list[0]["task_id"] == task_id
 
 
-def test_task_cancellation(tmp_path):
-    db_file = os.path.join(tmp_path, "system_test_cancel.db")
-    db = CandleDatabase(db_path=db_file)
-    mgr = TaskManager(db=db)
+def test_task_cancellation(clean_task_db):
+    mgr = TaskManager()
 
     task_id = mgr.create_task("Long Running Task")
     mgr.update_progress(task_id, 10.0, "Working...")
@@ -61,10 +75,8 @@ def test_task_cancellation(tmp_path):
         pass
 
 
-def test_background_thread_execution(tmp_path):
-    db_file = os.path.join(tmp_path, "system_test_thread.db")
-    db = CandleDatabase(db_path=db_file)
-    mgr = TaskManager(db=db)
+def test_background_thread_execution(clean_task_db):
+    mgr = TaskManager()
 
     def worker_job(task_id, manager, items_count):
         for i in range(items_count):

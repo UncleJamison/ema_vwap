@@ -7,7 +7,6 @@ import datetime as dt
 import logging
 from typing import Any
 
-from src.db_connection_manager import get_database
 from src.portfolio.connectors import (
     AlpacaBalanceConnector,
     BaseVenueConnector,
@@ -29,7 +28,7 @@ class PortfolioAggregator:
     """Aggregates and normalizes multi-venue assets into a unified portfolio snapshot."""
 
     def __init__(self, settings: SettingsManager | None = None):
-        self.settings = settings or SettingsManager(get_database("system"))
+        self.settings = settings or SettingsManager()
         self.connectors: dict[str, BaseVenueConnector] = {
             "gemini": GeminiBalanceConnector(self.settings),
             "kucoin": KuCoinBalanceConnector(self.settings),
@@ -112,7 +111,7 @@ class PortfolioAggregator:
         for p in all_positions:
             p.allocation_pct = round((p.market_value_usd / denom) * 100.0, 2)
 
-        now_str = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00:00")
+        now_str = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M:%S+00:00")
 
         return UnifiedPortfolioSnapshot(
             timestamp=now_str,
@@ -144,7 +143,7 @@ class PortfolioAggregator:
         total_cash = snapshot.total_cash_usd + snapshot.total_stablecoin_usd
 
         positions = snapshot.positions
-        now = dt.datetime.now(dt.timezone.utc)
+        now = dt.datetime.now(dt.UTC)
 
         if not positions:
             return [
@@ -162,7 +161,7 @@ class PortfolioAggregator:
         for p in positions:
             exchange = "synthetic_stock" if p.asset_type == "stock" else "synthetic"
             try:
-                df = DataLoader.load_candles(
+                df = DataLoader.load_candles_sync(
                     exchange=exchange,
                     symbol=p.symbol,
                     timeframe="1d",

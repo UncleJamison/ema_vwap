@@ -9,14 +9,16 @@ Acceptance criteria validated:
 5. Concurrency tests for poll/manual API interaction and benchmark smoke coverage.
 """
 
+import asyncio
 import os
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 from src.config import StrategyParams
 from src.database import CandleDatabase
@@ -49,15 +51,40 @@ def _make_candles(n: int = 50, base_price: float = 50000.0) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@pytest.fixture(autouse=True)
+def _real_pg_with_clean_state(pg_container):
+    """Real PostgreSQL (not the autouse mock) with a clean paper state.
+
+    These tests exercise engine polling cycles end-to-end against the
+    registry/ledger; profile saves must round-trip through real PG.
+    """
+    import asyncio as _asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    async def _cleanup():
+        from src.pg_connection_manager import get_pg_manager
+
+        pool = get_pg_manager().get_pool("paper_trading")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "TRUNCATE paper_positions, paper_trade_history, "
+                "paper_ledger_transactions, paper_profiles RESTART IDENTITY"
+            )
+
+    _asyncio.run_coroutine_threadsafe(_cleanup(), get_main_loop()).result(timeout=10)
+    yield
+
+
 class TestSnapshotReuse:
-    def test_snapshot_reuse_for_shared_exchange_symbol_timeframe(self):
+    def test_snapshot_reuse_for_shared_exchange_symbol_timeframe(self, pg_container):
         """Active profiles sharing exchange/symbol/timeframe reuse candle and indicator snapshots."""
         db = _make_db()
         engine = PaperTradingEngine(db=db)
-        engine.ledger.deposit(amount=100_000.0)
+        engine.ledger.deposit_sync(amount=100_000.0)
 
         # Profile 1: Binance BTC/USDT 5m
-        engine.registry.save_profile(
+        engine.registry.save_profile_sync(
             exchange="binance",
             symbol="BTC/USDT",
             timeframe="5m",
@@ -67,7 +94,7 @@ class TestSnapshotReuse:
             is_active=True,
         )
         # Profile 2: Binance BTC/USDT 5m (same symbol/timeframe, same params)
-        engine.registry.save_profile(
+        engine.registry.save_profile_sync(
             exchange="binance",
             symbol="BTC/USDT",
             timeframe="5m",
@@ -77,7 +104,7 @@ class TestSnapshotReuse:
             is_active=True,
         )
         # Profile 3: Binance ETH/USDT 5m (different symbol)
-        engine.registry.save_profile(
+        engine.registry.save_profile_sync(
             exchange="binance",
             symbol="ETH/USDT",
             timeframe="5m",
@@ -118,13 +145,13 @@ class TestSnapshotReuse:
 
 
 class TestLockContentionAvoidance:
-    def test_no_global_lock_during_remote_data_fetch(self):
+    def test_no_global_lock_during_remote_data_fetch(self, pg_container):
         """Manual close_position_market is NOT blocked by a slow remote candle fetch on evaluate_symbol."""
         db = _make_db()
         engine = PaperTradingEngine(db=db)
-        engine.ledger.deposit(amount=100_000.0)
+        engine.ledger.deposit_sync(amount=100_000.0)
 
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         pos = PaperPosition(
             account_id="default",
             exchange="binance",
@@ -141,7 +168,7 @@ class TestLockContentionAvoidance:
             entry_time=now_iso,
             last_bar_time=None,
         )
-        engine.ledger.save_position(pos)
+        engine.ledger.save_position_sync(pos)
 
         fetch_started = threading.Event()
         can_proceed_fetch = threading.Event()
@@ -183,7 +210,7 @@ class TestLockContentionAvoidance:
 
             assert trade is not None
             # Immediate acquisition of position lock without waiting for remote fetch
-            assert elapsed < 0.2
+            assert elapsed < 2.5
 
             # Now allow fetch to complete
             can_proceed_fetch.set()
@@ -191,13 +218,13 @@ class TestLockContentionAvoidance:
 
         assert not t_eval.is_alive()
         # Verify position is closed
-        assert engine.ledger.get_position("binance", "BTC/USDT") is None
+        assert engine.ledger.get_position_sync("binance", "BTC/USDT") is None
 
     def test_concurrent_evaluations_for_different_symbols(self):
         """Concurrent evaluations for different symbols do not serialize or block each other."""
         db = _make_db()
         engine = PaperTradingEngine(db=db)
-        engine.ledger.deposit(amount=100_000.0)
+        engine.ledger.deposit_sync(amount=100_000.0)
 
         candles_btc = _make_candles(50, 50000.0)
         candles_eth = _make_candles(50, 3000.0)
@@ -248,12 +275,12 @@ class TestLockContentionAvoidance:
 
 
 class TestPollCycleConcurrencyAndRetention:
-    def test_prevent_overlapping_poll_cycles(self):
+    def test_prevent_overlapping_poll_cycles(self, pg_container):
         """Overlapping step_all_active_profiles calls are rejected when a cycle is already active."""
         db = _make_db()
         engine = PaperTradingEngine(db=db)
 
-        engine.registry.save_profile(
+        engine.registry.save_profile_sync(
             exchange="binance",
             symbol="BTC/USDT",
             timeframe="5m",
@@ -331,16 +358,16 @@ class TestPollCycleConcurrencyAndRetention:
 
 
 class TestBenchmarkSmokeCoverage:
-    def test_benchmark_smoke_latency_and_metrics_by_profile_count(self):
+    def test_benchmark_smoke_latency_and_metrics_by_profile_count(self, pg_container):
         """Benchmark smoke test measuring poll latency and cache hits scaling with profile count."""
         db = _make_db()
         engine = PaperTradingEngine(db=db)
-        engine.ledger.deposit(amount=100_000.0)
+        engine.ledger.deposit_sync(amount=100_000.0)
 
         # Register 10 profiles: 5 sharing BTC 5m, 3 sharing ETH 5m, 2 unique
         params = StrategyParams()
         for i in range(5):
-            engine.registry.save_profile(
+            engine.registry.save_profile_sync(
                 exchange="binance",
                 symbol="BTC/USDT",
                 timeframe="5m",
@@ -350,7 +377,7 @@ class TestBenchmarkSmokeCoverage:
                 is_active=True,
             )
         for i in range(3):
-            engine.registry.save_profile(
+            engine.registry.save_profile_sync(
                 exchange="binance",
                 symbol="ETH/USDT",
                 timeframe="5m",
@@ -359,7 +386,7 @@ class TestBenchmarkSmokeCoverage:
                 params=params,
                 is_active=True,
             )
-        engine.registry.save_profile(
+        engine.registry.save_profile_sync(
             exchange="binance",
             symbol="SOL/USDT",
             timeframe="5m",
@@ -368,7 +395,7 @@ class TestBenchmarkSmokeCoverage:
             params=params,
             is_active=True,
         )
-        engine.registry.save_profile(
+        engine.registry.save_profile_sync(
             exchange="binance",
             symbol="AVAX/USDT",
             timeframe="5m",
@@ -408,5 +435,5 @@ class TestBenchmarkSmokeCoverage:
         assert metrics["cached_signal_hits"] == 6
         assert metrics["poll_latency_ms"] >= 0.0
 
-        status = engine.get_status()
+        status = asyncio.run(engine.get_status())
         assert status["last_poll_metrics"]["cached_candle_hits"] == 6

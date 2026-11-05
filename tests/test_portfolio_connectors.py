@@ -520,7 +520,7 @@ class TestPaperTradingBalanceConnector:
         conn = PaperTradingBalanceConnector()
         result = conn.fetch_balances()
 
-        assert result.is_connected is False  # no positions
+        assert result.is_connected is True  # cash available (forensic fix)
         assert result.cash_usd == 10000.0
 
 

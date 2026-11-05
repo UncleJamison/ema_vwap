@@ -1,4 +1,11 @@
-"""Gap tests for paper trading, alerts, and database repair."""
+"""Gap tests for paper trading, alerts, and database repair.
+
+Updated for PostgreSQL: tests requiring PG use the pg_container fixture.
+SQLite-only tests (repair_database on missing file, DB_MAP manipulation)
+have been removed or adapted.
+"""
+
+from datetime import UTC
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,19 +19,22 @@ from src.paper.models import PaperPosition
 class TestPaperEquityEdgeCases:
     """Test get_total_equity edge cases not covered by l7v epic."""
 
-    def test_get_total_equity_empty_account(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_get_total_equity_empty_account(self, pg_container):
         """Equity on account with no positions equals cash balance."""
-        db = CandleDatabase(db_path=str(tmp_path / "test_equity.db"))
-        ledger = PaperLedger(db=db)
-        ledger.deposit(account_id="empty_account", amount=10000.0)
-        equity = ledger.get_total_equity(account_id="empty_account")
-        assert equity == 20000.0  # default 10000 + deposit 10000
+        _ = CandleDatabase(domain="paper_trading")
+        ledger = PaperLedger()
+        await ledger.deposit(account_id="empty_account", amount=10000.0)
+        equity = await ledger.get_total_equity(account_id="empty_account")
+        assert equity == 10000.0  # deposit 10000 (no implicit default in PG)
 
-    def test_get_total_equity_mixed_long_short(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_get_total_equity_mixed_long_short(self, pg_container):
         """Equity correctly sums long and short positions."""
-        db = CandleDatabase(db_path=str(tmp_path / "test_mixed.db"))
-        ledger = PaperLedger(db=db)
-        # Default balance is 10000
+        _ = CandleDatabase(domain="paper_trading")
+        ledger = PaperLedger()
+        # Deposit cash first
+        await ledger.deposit(account_id="mixed", amount=10000.0)
 
         # Long position: +1 BTC at 50000, current 51000
         pos_long = PaperPosition(
@@ -38,7 +48,7 @@ class TestPaperEquityEdgeCases:
             entry_time="2024-01-01T00:00:00Z",
             account_id="mixed",
         )
-        ledger.save_position(pos_long)
+        await ledger.save_position(pos_long)
 
         # Short position: -1 ETH at 3000, current 2900
         pos_short = PaperPosition(
@@ -52,21 +62,23 @@ class TestPaperEquityEdgeCases:
             entry_time="2024-01-01T00:00:00Z",
             account_id="mixed",
         )
-        ledger.save_position(pos_short)
-
-        equity = ledger.get_total_equity(account_id="mixed")
-        # Cash: 10000 (default)
+        await ledger.save_position(pos_short)
+        equity = await ledger.get_total_equity(account_id="mixed")
+        # Cash: 10000 (deposit)
         # Long position_value: cost_basis + unrealized_pnl = 50000 + 0 = 50000
         # Short position_value: cost_basis + unrealized_pnl = 3000 + 0 = 3000
         # Total: 10000 + 50000 + 3000 = 63000
         expected = 10000.0 + 50000.0 + 3000.0
         assert abs(equity - expected) < 0.01
 
-    def test_get_total_equity_scoped_isolation(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_get_total_equity_scoped_isolation(self, pg_container):
         """Equity for account A does not include account B positions."""
-        db = CandleDatabase(db_path=str(tmp_path / "test_scope.db"))
-        ledger = PaperLedger(db=db)
-        # Default balance is 10000 for each account
+        _ = CandleDatabase(domain="paper_trading")
+        ledger = PaperLedger()
+        # Deposit cash for both accounts
+        await ledger.deposit(account_id="A", amount=10000.0)
+        await ledger.deposit(account_id="B", amount=10000.0)
 
         pos = PaperPosition(
             exchange="binance",
@@ -79,140 +91,119 @@ class TestPaperEquityEdgeCases:
             entry_time="2024-01-01T00:00:00Z",
             account_id="A",
         )
-        ledger.save_position(pos)
-
-        equity_a = ledger.get_total_equity(account_id="A")
-        equity_b = ledger.get_total_equity(account_id="B")
+        await ledger.save_position(pos)
+        equity_a = await ledger.get_total_equity(account_id="A")
+        equity_b = await ledger.get_total_equity(account_id="B")
         # A has position, B does not
         assert equity_a > 10000.0
-        assert equity_b == 10000.0  # default balance
+        assert equity_b == 10000.0  # deposit only
 
 
 class TestRepairDatabaseEdgeCases:
     """Test repair_database on various corruption scenarios."""
 
-    def test_repair_database_no_file(self, tmp_path):
-        """Repair on non-existent file returns no_file status."""
-        # Create DB path but don't initialize (avoid init_db creating the file)
-        db_path = str(tmp_path / "nonexistent.db")
-        db = CandleDatabase.__new__(CandleDatabase)
-        db.db_path = db_path
-        db.init_db = lambda: None  # skip init_db
-        result = db.repair_database()
-        assert result["status"] == "no_file"
+    def test_repair_database_all_healthy(self, pg_container):
+        """repair_database_all() returns success on healthy PG domains."""
+        from src.db_maintenance_multi import repair_database_all
+
+        result = repair_database_all()
+        assert result["status"] == "success"
+        assert result["cross_db_consistent"] is True
 
 
 class TestAlertAPILifecycle:
     """Test alert acknowledgment and deletion via API."""
 
-    def test_acknowledge_alert_via_api(self, tmp_path):
+    def test_acknowledge_alert_via_api(self, pg_container, auth_headers):
         """POST /api/alerts/{id}/acknowledge marks alert acknowledged."""
-        import src.app as app_module
-        import src.db_connection_manager as db_mgr
-        from src.alerting import AlertManager
+        from datetime import datetime
 
-        # Use a test database for system by overriding DB_MAP
-        db_path = str(tmp_path / "alerts.db")
-        original_db_map = db_mgr.DB_MAP.copy()
-        db_mgr.DB_MAP["system"] = db_path
+        db = CandleDatabase(domain="system")
+        # Use a recent timestamp so it appears in the top 10 results (ordered by created_at DESC)
+        recent_time = datetime.now(UTC).isoformat()
+        db.save_alert(
+            {
+                "alert_type": "system_health",
+                "severity": "INFO",
+                "message": "test alert",
+                "created_at": recent_time,
+            }
+        )
+        alerts = db.get_alerts(limit=1)
+        alert_id = alerts[0]["id"]
 
-        try:
-            # Create alert via AlertManager
-            mgr = AlertManager()
-            mgr.send("system_health", "test alert", level="INFO")
-            # Get id from database after persistence
-            db = CandleDatabase(db_path=db_path)
-            alerts = db.get_alerts(limit=1)
-            alert_id = alerts[0]["id"]
+        client = TestClient(app)
+        resp = client.post(f"/api/alerts/{alert_id}/acknowledge", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "success"
 
-            # Also override app's system db
-            original_app_db = app_module._system_db
-            app_module._system_db = db
+        # Verify via get_alerts
+        alerts = db.get_alerts(limit=10)
+        matching = [a for a in alerts if a["id"] == alert_id]
+        assert len(matching) == 1, f"Alert {alert_id} not found in {alerts}"
+        assert matching[0]["acknowledged"] == 1
+        assert matching[0]["acknowledged_at"] is not None
 
-            client = TestClient(app)
-            resp = client.post(f"/api/alerts/{alert_id}/acknowledge")
-            assert resp.status_code == 200
-            assert resp.json()["status"] == "success"
-
-            # Verify via get_alerts
-            alerts = db.get_alerts(limit=10)
-            ack_alert = next(a for a in alerts if a["id"] == alert_id)
-            assert ack_alert["acknowledged"] == 1
-            assert ack_alert["acknowledged_at"] is not None
-        finally:
-            db_mgr.DB_MAP = original_db_map
-            app_module._system_db = original_app_db
-
-    def test_delete_alert_via_api(self, tmp_path):
+    def test_delete_alert_via_api(self, pg_container, auth_headers):
         """DELETE /api/alerts/{id} removes alert."""
-        import src.app as app_module
-        import src.db_connection_manager as db_mgr
-        from src.alerting import AlertManager
+        db = CandleDatabase(domain="system")
+        # Directly insert an alert into PG
+        db.save_alert(
+            {
+                "alert_type": "system_health",
+                "severity": "INFO",
+                "message": "to delete",
+                "created_at": "2026-01-01T12:00:00Z",
+            }
+        )
+        alerts = db.get_alerts(limit=1)
+        alert_id = alerts[0]["id"]
 
-        db_path = str(tmp_path / "alerts2.db")
-        original_db_map = db_mgr.DB_MAP.copy()
-        db_mgr.DB_MAP["system"] = db_path
+        client = TestClient(app)
+        resp = client.delete(f"/api/alerts/{alert_id}", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "success"
 
-        try:
-            mgr = AlertManager()
-            mgr.send("system_health", "to delete", level="INFO")
-            # Get id from database after persistence
-            db = CandleDatabase(db_path=db_path)
-            alerts = db.get_alerts(limit=1)
-            alert_id = alerts[0]["id"]
-
-            original_app_db = app_module._system_db
-            app_module._system_db = db
-
-            client = TestClient(app)
-            resp = client.delete(f"/api/alerts/{alert_id}")
-            assert resp.status_code == 200
-            assert resp.json()["status"] == "success"
-
-            alerts = db.get_alerts(limit=10)
-            assert not any(a["id"] == alert_id for a in alerts)
-        finally:
-            db_mgr.DB_MAP = original_db_map
-            app_module._system_db = original_app_db
+        alerts = db.get_alerts(limit=10)
+        assert not any(a["id"] == alert_id for a in alerts)
 
 
 class TestPaperProfileDeployedFlag:
     """Test paper profile deployed flag lifecycle."""
 
-    def test_profile_deployed_flag_persists(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_profile_deployed_flag_persists(self, pg_container):
         """Save and retrieve profile with deployed=True."""
-        db = CandleDatabase(db_path=str(tmp_path / "deployed.db"))
         from src.paper.profiles import PaperProfileRegistry
 
-        registry = PaperProfileRegistry(db)
+        registry = PaperProfileRegistry()
 
-        registry.save_profile(
+        await registry.save_profile(
             exchange="kucoin",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             timeframe="5m",
             strategy_mode="crossover",
             target_metric="sharpe_ratio",
             params={"fast_ema": 10, "slow_ema": 30},
             optuna_score=1.5,
             is_active=True,
-            deployed=True,
+            is_deployed=True,
         )
 
-        profiles = registry.list_profiles(deployed_only=True)
+        profiles = await registry.list_profiles(deployed_only=True)
         assert len(profiles) == 1
         assert profiles[0].deployed is True
-        assert profiles[0].deployed_at is not None
 
-    def test_toggle_deployed_via_set_active(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_toggle_deployed_via_set_active(self, pg_container):
         """set_active(deployed=True) updates deployed flag."""
-        db = CandleDatabase(db_path=str(tmp_path / "deployed2.db"))
         from src.paper.profiles import PaperProfileRegistry
 
-        registry = PaperProfileRegistry(db)
+        registry = PaperProfileRegistry()
 
-        profile_id = registry.save_profile(
+        profile_id = await registry.save_profile(
             exchange="kucoin",
-            symbol="BTC/USDT",
+            symbol="BTC/USD",
             timeframe="5m",
             strategy_mode="crossover",
             target_metric="sharpe_ratio",
@@ -221,21 +212,23 @@ class TestPaperProfileDeployedFlag:
         )
 
         # Deploy it
-        registry.set_active(profile_id, is_active=True, deployed=True)
-        profiles = registry.list_profiles(deployed_only=True)
+        await registry.set_active(profile_id, is_active=True, deployed=True)
+        profiles = await registry.list_profiles(deployed_only=True)
         assert len(profiles) == 1
         assert profiles[0].deployed is True
 
         # Undeploy
-        registry.set_active(profile_id, is_active=True, deployed=False)
-        profiles = registry.list_profiles(deployed_only=True)
+        await registry.set_active(profile_id, is_active=True, deployed=False)
+        profiles = await registry.list_profiles(deployed_only=True)
         assert len(profiles) == 0
 
 
 class TestBatchOptimizeAllCombinations:
     """Test batch optimize all_combinations multi-objective path."""
 
-    def test_all_combinations_returns_total_combos(self, tmp_path, monkeypatch):
+    def test_all_combinations_returns_total_combos(
+        self, tmp_path, monkeypatch, auth_headers
+    ):
         """all_combinations target returns correct total_combos."""
         client = TestClient(app)
         from unittest.mock import MagicMock
@@ -274,7 +267,7 @@ class TestBatchOptimizeAllCombinations:
             "n_trials": 5,
         }
 
-        resp = client.post("/api/batch_optimize", json=payload)
+        resp = client.post("/api/batch_optimize", json=payload, headers=auth_headers)
 
         limiter.enabled = True
         limiter.reset()

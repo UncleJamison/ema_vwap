@@ -4,12 +4,14 @@ Extracted from src/app.py (ema_vwap-tq41). Shared state is read through
 `src.app` at call time so monkeypatched tests keep working.
 """
 
+import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from src.logger import logger
+from src.pg_database import get_alerts_pg
 
 router = APIRouter(tags=["WebSocket"])
 
@@ -39,13 +41,13 @@ async def dashboard_websocket(websocket: WebSocket):
     await _ws().connect(websocket, api_key=api_key)
     try:
         # Send initial status
-        status = _st()._paper_engine.get_status()
+        status = await _st()._paper_engine.get_status()
         await _ws().send_personal(
             websocket,
             {
                 "type": "init",
                 "data": status,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             },
         )
 
@@ -61,57 +63,61 @@ async def dashboard_websocket(websocket: WebSocket):
                         websocket,
                         {
                             "type": "pong",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         },
                     )
                 elif msg_type == "get_status":
-                    status = _st()._paper_engine.get_status()
+                    status = await _st()._paper_engine.get_status()
                     await _ws().send_personal(
                         websocket,
                         {
                             "type": "status_update",
                             "data": status,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         },
                     )
                 elif msg_type == "get_positions":
-                    positions = _st()._paper_engine.ledger.list_positions()
+                    positions = await _st()._paper_engine.ledger.alist_positions()
                     await _ws().send_personal(
                         websocket,
                         {
                             "type": "positions_update",
                             "data": [p.to_dict() for p in positions],
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         },
                     )
                 elif msg_type == "get_alerts":
-                    alerts = _st()._system_db.get_alerts(limit=50)
+                    alerts = await get_alerts_pg(limit=50)
                     await _ws().send_personal(
                         websocket,
                         {
                             "type": "alerts_update",
                             "data": alerts,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         },
                     )
                 elif msg_type == "step_engine":
-                    # Trigger a single engine step
-                    results = _st()._paper_engine.step_all_active_profiles()
+                    # Trigger a single engine step (run in worker thread so
+                    # internal run_async() calls submit to the main loop
+                    # instead of being raised as main-loop violations)
+                    results = await asyncio.to_thread(
+                        _st()._paper_engine.step_all_active_profiles
+                    )
                     await _ws().send_personal(
                         websocket,
                         {
                             "type": "engine_step_result",
                             "data": results,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         },
                     )
                     # Broadcast updated status to all
-                    status = _st()._paper_engine.get_status()
+                    status = await _st()._paper_engine.get_status()
                     await _ws().broadcast(
                         {
                             "type": "status_update",
                             "data": status,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": datetime.now(UTC).isoformat(),
                         },
                     )
 

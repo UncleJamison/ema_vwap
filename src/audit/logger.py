@@ -16,8 +16,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from src.database import CandleDatabase
-from src.db_connection_manager import get_database
+from src.pg_database import save_audit_log_pg
 
 
 class AuditEventType(str, Enum):
@@ -56,44 +55,56 @@ class AuditEventType(str, Enum):
     OPTIMIZATION_COMPLETED = "optimization.completed"
     OPTIMIZATION_FAILED = "optimization.failed"
 
-    # Batch Optimization
-    BATCH_STARTED = "batch.started"
-    BATCH_COMPLETED = "batch.completed"
-    BATCH_CANCELLED = "batch.cancelled"
+    # Batch Operations
+    BATCH_OPTIMIZATION_STARTED = "batch_optimization.started"
+    BATCH_OPTIMIZATION_COMPLETED = "batch_optimization.completed"
+    BATCH_OPTIMIZATION_FAILED = "batch_optimization.failed"
 
     # Paper Trading
-    PAPER_PROFILE_CREATED = "paper.profile_created"
-    PAPER_PROFILE_UPDATED = "paper.profile_updated"
-    PAPER_PROFILE_DELETED = "paper.profile_deleted"
-    PAPER_ENGINE_STARTED = "paper.engine_started"
-    PAPER_ENGINE_STOPPED = "paper.engine_stopped"
-    PAPER_TRADE_EXECUTED = "paper.trade_executed"
-    PAPER_POSITION_CLOSED = "paper.position_closed"
-
-    # Portfolio
-    PORTFOLIO_REBALANCED = "portfolio.rebalanced"
-    PORTFOLIO_ORDER_ROUTED = "portfolio.order_routed"
+    PAPER_TRADE_OPENED = "paper_trade.opened"
+    PAPER_TRADE_CLOSED = "paper_trade.closed"
+    PAPER_TRADE_EXECUTED = "paper_trade.executed"
     ORDER_EXECUTED = "order.executed"
+    PAPER_POSITION_LIQUIDATED = "paper_position.liquidated"
+    PAPER_ENGINE_STARTED = "paper_engine.started"
+    PAPER_ENGINE_STOPPED = "paper_engine.stopped"
+    PAPER_PROFILE_DEPLOYED = "paper_profile.deployed"
+    PAPER_PROFILE_UNDEPLOYED = "paper_profile.undeployed"
+
+    # Paper Profiles
+    PAPER_PROFILE_CREATED = "paper_profile.created"
+    PAPER_PROFILE_UPDATED = "paper_profile.updated"
+    PAPER_PROFILE_DELETED = "paper_profile.deleted"
 
     # Settings
     SETTINGS_UPDATED = "settings.updated"
-    SETTINGS_RESET = "settings.reset"
+    SETTINGS_API_KEY_ROTATED = "settings.api_key_rotated"
 
     # System
-    SYSTEM_DB_REPAIR = "system.db_repair"
-    SYSTEM_DB_VACUUM = "system.db_vacuum"
-    SYSTEM_CACHE_CLEARED = "system.cache_cleared"
+    SYSTEM_STARTUP = "system.startup"
+    SYSTEM_SHUTDOWN = "system.shutdown"
+    SYSTEM_ERROR = "system.error"
+    SYSTEM_BACKUP_CREATED = "system.backup_created"
+    SYSTEM_BACKUP_RESTORED = "system.backup_restored"
 
-    # API Key
+    # Data Management
+    DATA_SYNC_STARTED = "data.sync_started"
+    DATA_SYNC_COMPLETED = "data.sync_completed"
+    DATA_SYNC_FAILED = "data.sync_failed"
+
+    # Security
+    SECURITY_API_KEY_INVALID = "security.api_key_invalid"
+    SECURITY_RATE_LIMIT_EXCEEDED = "security.rate_limit_exceeded"
+    SECURITY_UNAUTHORIZED_ACCESS = "security.unauthorized_access"
 
 
 @dataclass
 class AuditEvent:
-    """Audit event record."""
+    """Represents a single audit event."""
 
-    event_id: str = field(default_factory=lambda: str(uuid4()))
+    event_id: str = field(default_factory=lambda: uuid4().hex[:12])
     timestamp: datetime = field(default_factory=datetime.utcnow)
-    event_type: AuditEventType = AuditEventType.LOGIN
+    event_type: AuditEventType = AuditEventType.SYSTEM_STARTUP
     user_id: str | None = None
     username: str | None = None
     ip_address: str | None = None
@@ -127,19 +138,22 @@ class AuditEvent:
 
 
 class AuditLogger:
-    """Thread-safe audit logger with database persistence."""
+    """Thread-safe audit logger with PostgreSQL persistence."""
 
-    def __init__(self, db: CandleDatabase):
-        self.db = db
+    def __init__(self):
         self._lock = threading.Lock()
-        self._ensure_table()
         self._logger = logging.getLogger("audit")
         self._logger.setLevel(logging.INFO)
 
-    def _ensure_table(self):
+    async def _ensure_table(self):
         """Create audit log table if it doesn't exist."""
-        with self.db.get_connection() as conn:
-            conn.execute(
+        from src.pg_database import get_pg_manager
+
+        pg_manager = get_pg_manager()
+        pool = pg_manager.get_pool("system")
+
+        async with pool.acquire() as conn:
+            await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS audit_log (
                     event_id TEXT PRIMARY KEY,
@@ -158,24 +172,23 @@ class AuditLogger:
                 )
             """
             )
-            conn.execute(
+            await conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)
             """
             )
-            conn.execute(
+            await conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)
             """
             )
-            conn.execute(
+            await conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_log(event_type)
             """
             )
-            conn.commit()
 
-    def log(
+    async def log(
         self,
         event_type: AuditEventType,
         user_id: str | None = None,
@@ -204,56 +217,90 @@ class AuditLogger:
             error_message=error_message,
         )
 
-        # Persist to database
-        with self._lock, self.db.get_connection() as conn:
-            conn.execute(
-                """
-                    INSERT INTO audit_log (
-                        event_id, timestamp, event_type, user_id, username,
-                        ip_address, user_agent, resource_id, resource_type,
-                        action, details, success, error_message
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event.event_id,
-                    event.timestamp.isoformat(),
-                    event_type.value,
-                    user_id,
-                    username,
-                    ip_address,
-                    user_agent,
-                    resource_id,
-                    resource_type,
-                    action,
-                    json.dumps(details or {}),
-                    int(success),
-                    error_message,
-                ),
-            )
-            conn.commit()
+        # Ensure the table exists (fresh DB: nothing has been logged yet)
+        await self._ensure_table()
+
+        # Persist to PostgreSQL
+        await save_audit_log_pg(event.to_dict())
 
         # Also log to standard logger
-        log_level = logging.INFO if success else logging.WARNING
-        self._logger.log(
-            log_level,
-            f"AUDIT: {event_type.value} | user={username or user_id} | "
-            f"action={action} | resource={resource_type}:{resource_id} | "
-            f"success={success} | details={json.dumps(details or {})}",
+        self._logger.info(
+            f"AUDIT: {event.event_type.value} - User: {username} - Action: {action}"
         )
 
         return event
 
-    def log_login(
+    async def query(
         self,
-        user_id: str,
-        username: str,
-        ip: str,
-        success: bool,
+        event_type: AuditEventType | None = None,
+        user_id: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Query audit logs with optional filters."""
+        from src.pg_database import get_pg_manager
+
+        # Ensure the table exists (fresh DB: nothing has been logged yet)
+        await self._ensure_table()
+
+        query = "SELECT * FROM audit_log WHERE 1=1"
+        params = []
+        param_idx = 1
+
+        if event_type:
+            query += f" AND event_type = ${param_idx}"
+            params.append(event_type.value)
+            param_idx += 1
+        if user_id:
+            query += f" AND user_id = ${param_idx}"
+            params.append(user_id)
+            param_idx += 1
+        if start_time:
+            query += f" AND timestamp >= ${param_idx}"
+            params.append(start_time.isoformat())
+            param_idx += 1
+        if end_time:
+            query += f" AND timestamp <= ${param_idx}"
+            params.append(end_time.isoformat())
+            param_idx += 1
+
+        query += f" ORDER BY timestamp DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        params.extend([limit, offset])
+
+        async with get_pg_manager().get_pool("system").acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            result = []
+            for r in rows:
+                d = dict(r)
+                # details is stored as JSON text — parse back to dict (route models
+                # expect dict; sqlite-era behaviour returned dicts too)
+                if isinstance(d.get("details"), str):
+                    try:
+                        d["details"] = json.loads(d["details"])
+                    except (json.JSONDecodeError, TypeError):
+                        d["details"] = {}
+                if "success" in d and not isinstance(d["success"], bool):
+                    d["success"] = bool(d["success"])
+                result.append(d)
+            return result
+
+    # ── Convenience helpers (historical AuditLogger API surface) ──
+
+    async def log_login(
+        self,
+        user_id: str | None = None,
+        username: str | None = None,
+        ip: str | None = None,
+        success: bool = True,
         error: str | None = None,
-    ):
-        """Log login attempt."""
-        return self.log(
-            AuditEventType.LOGIN if success else AuditEventType.LOGIN_FAILED,
+    ) -> AuditEvent:
+        """Log a login attempt (or failure)."""
+        return await self.log(
+            event_type=(
+                AuditEventType.LOGIN if success else AuditEventType.LOGIN_FAILED
+            ),
             user_id=user_id,
             username=username,
             ip_address=ip,
@@ -262,11 +309,16 @@ class AuditLogger:
             error_message=error,
         )
 
-    def log_api_key_created(
-        self, user_id: str, username: str, key_name: str, key_prefix: str
-    ):
-        return self.log(
-            AuditEventType.API_KEY_CREATED,
+    async def log_api_key_created(
+        self,
+        user_id: str | None = None,
+        username: str | None = None,
+        key_name: str = "",
+        key_prefix: str = "",
+    ) -> AuditEvent:
+        """Log an API key creation."""
+        return await self.log(
+            event_type=AuditEventType.API_KEY_CREATED,
             user_id=user_id,
             username=username,
             action="api_key_created",
@@ -274,16 +326,17 @@ class AuditLogger:
             details={"key_name": key_name, "key_prefix": key_prefix},
         )
 
-    def log_strategy_change(
+    async def log_strategy_change(
         self,
-        user_id: str,
-        username: str,
-        event_type: AuditEventType,
-        strategy_id: str,
-        details: dict | None = None,
-    ):
-        return self.log(
-            event_type,
+        user_id: str | None = None,
+        username: str | None = None,
+        event_type: AuditEventType = AuditEventType.STRATEGY_UPDATED,
+        strategy_id: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> AuditEvent:
+        """Log a strategy lifecycle change."""
+        return await self.log(
+            event_type=event_type,
             user_id=user_id,
             username=username,
             resource_id=strategy_id,
@@ -292,88 +345,77 @@ class AuditLogger:
             details=details or {},
         )
 
-    def log_paper_trade(self, user_id: str, username: str, trade_data: dict):
-        return self.log(
-            AuditEventType.PAPER_TRADE_EXECUTED,
+    async def log_paper_trade(
+        self,
+        user_id: str | None = None,
+        username: str | None = None,
+        trade_data: dict[str, Any] | None = None,
+    ) -> AuditEvent:
+        """Log a paper trade execution."""
+        return await self.log(
+            event_type=AuditEventType.PAPER_TRADE_EXECUTED,
             user_id=user_id,
             username=username,
             resource_type="paper_trade",
-            action="executed",
-            details=trade_data,
+            action="paper_trade_executed",
+            details=trade_data or {},
         )
 
-    def log_order_execution(self, user_id: str, username: str, order_data: dict):
-        return self.log(
-            AuditEventType.ORDER_EXECUTED,
+    async def log_order_execution(
+        self,
+        user_id: str | None = None,
+        username: str | None = None,
+        order_data: dict[str, Any] | None = None,
+    ) -> AuditEvent:
+        """Log an order execution."""
+        return await self.log(
+            event_type=AuditEventType.ORDER_EXECUTED,
             user_id=user_id,
             username=username,
             resource_type="order",
-            action="executed",
-            details=order_data,
+            action="order_executed",
+            details=order_data or {},
         )
 
-    def query(
-        self,
-        user_id: str | None = None,
-        event_type: AuditEventType | None = None,
-        start_time: datetime | None = None,
-        end_time: datetime | None = None,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[dict]:
-        """Query audit log with filters."""
-        query = "SELECT * FROM audit_log WHERE 1=1"
-        params = []
 
-        if user_id:
-            query += " AND user_id = ?"
-            params.append(user_id)
-
-        if event_type:
-            query += " AND event_type = ?"
-            params.append(event_type.value)
-
-        if start_time:
-            query += " AND timestamp >= ?"
-            params.append(start_time.isoformat())
-
-        if end_time:
-            query += " AND timestamp <= ?"
-            params.append(end_time.isoformat())
-
-        query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-
-        with self.db.get_connection() as conn:
-            rows = conn.execute(query, params).fetchall()
-            return [self._row_to_dict(row) for row in rows]
-
-    def _row_to_dict(self, row) -> dict:
-        return {
-            "event_id": row[0],
-            "timestamp": row[1],
-            "event_type": row[2],
-            "user_id": row[3],
-            "username": row[4],
-            "ip_address": row[5],
-            "user_agent": row[6],
-            "resource_id": row[7],
-            "resource_type": row[8],
-            "action": row[9],
-            "details": json.loads(row[10]) if row[10] else {},
-            "success": bool(row[11]),
-            "error_message": row[12],
-        }
-
-
-# Global audit logger instance
-_audit_logger: AuditLogger | None = None
+# Singleton instance for shared state
+_audit_logger_instance: AuditLogger | None = None
 
 
 def get_audit_logger() -> AuditLogger:
-    """Get the global audit logger instance."""
-    global _audit_logger
-    if _audit_logger is None:
-        db = get_database("system")
-        _audit_logger = AuditLogger(db)
-    return _audit_logger
+    """Return the singleton AuditLogger (reuse across calls)."""
+    global _audit_logger_instance
+    if _audit_logger_instance is None:
+        _audit_logger_instance = AuditLogger()
+    return _audit_logger_instance
+
+
+async def log_audit(
+    event_type: AuditEventType,
+    user_id: str | None = None,
+    username: str | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    resource_id: str | None = None,
+    resource_type: str | None = None,
+    action: str = "",
+    details: dict[str, Any] | None = None,
+    success: bool = True,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    """Global convenience wrapper: log via the singleton AuditLogger."""
+    logger = get_audit_logger()
+    event = await logger.log(
+        event_type=event_type,
+        user_id=user_id,
+        username=username,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        resource_id=resource_id,
+        resource_type=resource_type,
+        action=action,
+        details=details,
+        success=success,
+        error_message=error_message,
+    )
+    return event.to_dict()

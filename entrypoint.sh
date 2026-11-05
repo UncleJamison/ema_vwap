@@ -8,34 +8,13 @@ elif [ -f ".env" ]; then
     set -a; . ".env"; set +a
 elif [ -f "/app/.env" ]; then
     set -a; . "/app/.env"; set +a
-elif [ -f "/app/data/.env" ]; then
-    set -a; . "/app/data/.env"; set +a
 elif [ -f "/.env" ]; then
     set -a; . "/.env"; set +a
 fi
 
-# Ensure data and logs directories exist and are writable
-mkdir -p /app/data /app/logs
-chmod 777 /app/data /app/logs 2>/dev/null || true
-
-# Clean up any leftover SQLite WAL/SHM files that could cause corruption
-# when switching from WAL mode to DELETE mode
-for db_file in candles.db system.db paper_trading.db batch_results.db; do
-    rm -f /app/data/${db_file}-shm /app/data/${db_file}-wal 2>/dev/null || true
-done
-
-# Optional startup integrity check (opt-in via CHECK_DB_INTEGRITY=true to avoid slow boot on large volume-mounted databases)
-if [ "${CHECK_DB_INTEGRITY}" = "true" ]; then
-    echo "[Entrypoint] Running database integrity checks..."
-    for db_file in candles.db system.db paper_trading.db batch_results.db; do
-        db_path="/app/data/${db_file}"
-        if [ -f "$db_path" ]; then
-            if ! sqlite3 "$db_path" "PRAGMA quick_check;" 2>/dev/null | grep -q "ok"; then
-                echo "[Entrypoint] WARNING: ${db_file} quick_check reported issues."
-            fi
-        fi
-    done
-fi
+# Ensure logs directory exists and is writable
+mkdir -p /app/logs
+chmod 777 /app/logs 2>/dev/null || true
 
 echo "==================================================="
 echo "  EMA + VWAP Crypto Trading Suite Daemon Started"

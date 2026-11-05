@@ -4,11 +4,12 @@ Executes strategy signals in simulated real-time, models fees/slippage, manages 
 and tracks mark-to-market balances and positions.
 """
 
+import asyncio
 import json
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
@@ -42,8 +43,8 @@ class PaperTradingEngine:
         self.db = db
         self.account_id = account_id
         self.settings_mgr = settings_mgr
-        self.registry = PaperProfileRegistry(db=self.db)
-        self.ledger = PaperLedger(db=self.db)
+        self.registry = PaperProfileRegistry()
+        self.ledger = PaperLedger()
 
         self._running: bool = False
         self._poll_thread: threading.Thread | None = None
@@ -214,7 +215,7 @@ class PaperTradingEngine:
                 "from the same candle frame being evaluated."
             )
         # 1. Retrieve configured or fallback strategy parameters (no lock)
-        params = self.registry.get_strategy_params(
+        params = self.registry.get_strategy_params_sync(
             exchange=exchange,
             symbol=symbol,
             timeframe=timeframe,
@@ -224,14 +225,14 @@ class PaperTradingEngine:
         if force_candles is not None:
             df_candles = force_candles.copy()
         elif fetch_live:
-            df_candles = DataLoader.fetch_and_update_candles(
+            df_candles = DataLoader.fetch_and_update_candles_sync(
                 exchange=exchange,
                 symbol=symbol,
                 timeframe=timeframe,
                 limit=200,
             )
         else:
-            df_candles = DataLoader.load_candles(
+            df_candles = DataLoader.load_candles_sync(
                 exchange=exchange,
                 symbol=symbol,
                 timeframe=timeframe,
@@ -245,7 +246,7 @@ class PaperTradingEngine:
                 "timeframe": timeframe,
                 "status": "insufficient_data",
                 "action": "NONE",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
             self._record_evaluation(f"{exchange}:{symbol}:{timeframe}", result)
             self._record_evaluation(f"{exchange}:{symbol}", result)
@@ -262,7 +263,11 @@ class PaperTradingEngine:
         close_price = float(latest_bar["close"])
         high_price = float(latest_bar["high"])
         low_price = float(latest_bar["low"])
+        # Use isoformat() for consistent timestamp format (T separator)
+        # to match what PG round-trip produces via datetime.isoformat()
         bar_time = str(latest_bar["timestamp"])
+        if hasattr(latest_bar["timestamp"], "isoformat"):
+            bar_time = latest_bar["timestamp"].isoformat()
         vwap_val = (
             float(latest_bar["vwap"])
             if "vwap" in latest_bar and not pd.isna(latest_bar["vwap"])
@@ -274,15 +279,32 @@ class PaperTradingEngine:
             else close_price * 0.01
         )
         signal = int(latest_bar["signal"])
+        # Determine regime for risk management (from strategy signals)
+        if "regime" in df_signals.columns:
+            regime = df_signals["regime"].iloc[-1]
+            if regime == "insufficient_data":
+                regime = "trending"
+        else:
+            regime = "trending"  # fallback
 
         # 4. Serialized settlement per position
         pos_lock = self._get_position_lock(exchange, symbol)
         with pos_lock:
-            pos = self.ledger.get_position(exchange, symbol, account_id=self.account_id)
+            pos = self.ledger.get_position_sync(
+                exchange, symbol, account_id=self.account_id
+            )
 
             if pos is not None:
                 # --- Idempotency guard: skip if we already processed this bar ---
-                if pos.last_bar_time is not None and bar_time == pos.last_bar_time:
+                # Normalize timestamps for comparison (DB returns datetime, DataFrame uses ISO string)
+                pos_time = None
+                if pos.last_bar_time:
+                    if isinstance(pos.last_bar_time, str):
+                        pos_time = pos.last_bar_time.replace(" ", "T")
+                    else:
+                        # datetime object - convert to ISO format
+                        pos_time = pos.last_bar_time.isoformat()
+                if pos_time is not None and bar_time == pos_time:
                     result = {
                         "exchange": exchange,
                         "symbol": symbol,
@@ -386,7 +408,7 @@ class PaperTradingEngine:
                             realized_pnl / (pos.cost_basis or 1.0)
                         ) * 100.0
 
-                    self.ledger.record_close_position(
+                    self.ledger.record_close_position_sync(
                         account_id=self.account_id,
                         pos=pos,
                         exit_price=exit_price,
@@ -430,8 +452,8 @@ class PaperTradingEngine:
                         exit_reason=exit_reason,
                         params=params.to_dict(),
                     )
-                    self.ledger.record_completed_trade(trade_record)
-                    self.ledger.close_position(
+                    self.ledger.record_completed_trade_sync(trade_record)
+                    self.ledger.close_position_sync(
                         exchange, symbol, account_id=self.account_id
                     )
 
@@ -484,7 +506,7 @@ class PaperTradingEngine:
                             realized_pnl_pct = (
                                 realized_pnl / (pos.cost_basis or 1.0)
                             ) * 100.0
-                            self.ledger.record_close_position(
+                            self.ledger.record_close_position_sync(
                                 account_id=self.account_id,
                                 pos=pos,
                                 exit_price=close_price,
@@ -510,8 +532,8 @@ class PaperTradingEngine:
                                 exit_reason="TIMEOUT",
                                 params=params.to_dict(),
                             )
-                            self.ledger.record_completed_trade(trade_record)
-                            self.ledger.close_position(
+                            self.ledger.record_completed_trade_sync(trade_record)
+                            self.ledger.close_position_sync(
                                 exchange, symbol, account_id=self.account_id
                             )
                             result = {
@@ -534,19 +556,26 @@ class PaperTradingEngine:
                         logger.debug(f"[PaperEngine] Entry time parse failed: {e}")
 
                     # Trailing stop (Fix #18: activate from entry, not just in profit)
-                    if pos.stop_loss is not None:
+                    if pos.stop_loss is not None and pos.unrealized_pnl_pct >= 0:
                         rm = self._get_risk_manager(params)
                         side_int = 1 if pos.side == "LONG" else -1
+                        pos_entry_atr = (
+                            pos.metadata.get("entry_atr")
+                            if isinstance(pos.metadata, dict)
+                            else None
+                        )
                         pos.stop_loss = rm.update_trailing_stop(
                             side_int,
                             close_price,
                             pos.stop_loss,
                             atr_val,
+                            regime=regime,
                             entry_price=pos.entry_price,  # Fix #18: pass entry_price
+                            entry_atr=pos_entry_atr,
                         )
 
                     pos.last_bar_time = bar_time  # l7v.3: market-bar checkpoint
-                    self.ledger.save_position(pos)
+                    self.ledger.save_position_sync(pos)
                     result = {
                         "exchange": exchange,
                         "symbol": symbol,
@@ -565,19 +594,26 @@ class PaperTradingEngine:
 
                 else:
                     # Trailing stop (Fix #18: activate from entry, not just in profit)
-                    if pos.stop_loss is not None:
+                    if pos.stop_loss is not None and pos.unrealized_pnl_pct >= 0:
                         rm = self._get_risk_manager(params)
                         side_int = 1 if pos.side == "LONG" else -1
+                        pos_entry_atr = (
+                            pos.metadata.get("entry_atr")
+                            if isinstance(pos.metadata, dict)
+                            else None
+                        )
                         pos.stop_loss = rm.update_trailing_stop(
                             side_int,
                             close_price,
                             pos.stop_loss,
                             atr_val,
+                            regime=regime,
                             entry_price=pos.entry_price,  # Fix #18: pass entry_price
+                            entry_atr=pos_entry_atr,
                         )
 
                     pos.last_bar_time = bar_time  # l7v.3: market-bar checkpoint
-                    self.ledger.save_position(pos)
+                    self.ledger.save_position_sync(pos)
                     result = {
                         "exchange": exchange,
                         "symbol": symbol,
@@ -610,18 +646,44 @@ class PaperTradingEngine:
                     side_int = -1
 
                 if should_enter:
+                    # Apply VWAP slope and volume filters before entry
+                    strategy = self._get_strategy(params)
+                    # Only apply filters if required columns exist in df_signals
+                    required_cols = ["vwap_slope", "volume", "vol_sma"]
+                    if all(col in df_signals.columns for col in required_cols):
+                        slope_pass, volume_pass = strategy.evaluate_filters(df_signals)
+                        if not (
+                            bool(slope_pass.iloc[-1]) and bool(volume_pass.iloc[-1])
+                        ):
+                            should_enter = False
+                            result = {
+                                "exchange": exchange,
+                                "symbol": symbol,
+                                "timeframe": timeframe,
+                                "action": "NONE",
+                                "current_price": close_price,
+                                "signal": signal,
+                                "timestamp": bar_time,
+                                "note": "entry_blocked_by_filters",
+                            }
+                            self._record_evaluation(
+                                f"{exchange}:{symbol}:{timeframe}", result
+                            )
+                            self._record_evaluation(f"{exchange}:{symbol}", result)
+                            return result
+                    # If required columns missing, skip filter check (default to pass)
                     # Use total equity (cash + position values) for risk-based sizing
-                    total_equity = self.ledger.get_total_equity(self.account_id)
-                    current_balance = self.ledger.get_balance(self.account_id)
+                    total_equity = self.ledger.get_total_equity_sync(self.account_id)
+                    current_balance = self.ledger.get_balance_sync(self.account_id)
 
-                    # Determine regime for risk calculation
-                    regime = "trending"  # default
-                    if atr_val > 0 and vwap_val > 0:
-                        atr_pct = atr_val / close_price
-                        if atr_pct > 0.05:
-                            regime = "high_vol"
-                        elif vwap_val < close_price * 0.98:
-                            regime = "ranging"
+                    # Determine regime from strategy signals (real classifier, not heuristic)
+                    # df_signals has "regime" column from strategy.generate_signals()
+                    if "regime" in df_signals.columns:
+                        regime = df_signals["regime"].iloc[-1]
+                        if regime == "insufficient_data":
+                            regime = "trending"
+                    else:
+                        regime = "trending"  # fallback
 
                     # Risk-based sizing using profile risk_per_trade_pct
                     rm = self._get_risk_manager(params)
@@ -639,6 +701,7 @@ class PaperTradingEngine:
                         side=side_int,
                         vwap=vwap_val,
                         atr=atr_val,
+                        regime=regime,
                     )
 
                     units, pos_val, _risk_amount = rm.calculate_position_size(
@@ -663,7 +726,9 @@ class PaperTradingEngine:
                     )
                     current_position_value = sum(
                         p.cost_basis + p.unrealized_pnl
-                        for p in self.ledger.list_positions(account_id=self.account_id)
+                        for p in self.ledger.list_positions_sync(
+                            account_id=self.account_id
+                        )
                     )
                     max_new_position_value = max(
                         0.0,
@@ -706,7 +771,7 @@ class PaperTradingEngine:
                         # Long entries continue through record_buy.
                         if side_str == "SHORT":
                             cost_basis_val = units * fill_price
-                            self.ledger.record_sell_short(
+                            self.ledger.record_sell_short_sync(
                                 account_id=self.account_id,
                                 exchange=exchange,
                                 symbol=symbol,
@@ -717,7 +782,7 @@ class PaperTradingEngine:
                                 notes="Paper Signal Short Entry",
                             )
                         else:
-                            self.ledger.record_buy(
+                            self.ledger.record_buy_sync(
                                 account_id=self.account_id,
                                 exchange=exchange,
                                 symbol=symbol,
@@ -742,7 +807,10 @@ class PaperTradingEngine:
                             unrealized_pnl_pct=0.0,
                             entry_time=bar_time,
                             last_bar_time=bar_time,  # l7v.3: set checkpoint at entry
-                            metadata={"params": params.to_dict()},
+                            metadata={
+                                "params": params.to_dict(),
+                                "entry_atr": atr_val,
+                            },
                         )
                         # Fix #18: Initialize trailing stop from entry (allows trailing from entry)
                         rm = self._get_risk_manager(params)
@@ -752,9 +820,11 @@ class PaperTradingEngine:
                             fill_price,
                             new_pos.stop_loss,
                             atr_val,
+                            regime=regime,
                             entry_price=fill_price,  # Fix #18: pass entry_price for initial trail
+                            entry_atr=atr_val,
                         )
-                        self.ledger.save_position(new_pos)
+                        self.ledger.save_position_sync(new_pos)
 
                         result = {
                             "exchange": exchange,
@@ -763,7 +833,7 @@ class PaperTradingEngine:
                             "action": f"ENTER_{side_str}",
                             "entry_price": round(fill_price, 4),
                             "quantity": units,
-                            "stop_loss": round(stop_loss, 4),
+                            "stop_loss": round(new_pos.stop_loss, 4),
                             "take_profit": round(take_profit, 4),
                             "timestamp": bar_time,
                         }
@@ -795,12 +865,26 @@ class PaperTradingEngine:
         """Manually close an open paper position at market price."""
         pos_lock = self._get_position_lock(exchange, symbol)
         with pos_lock, self._lock:
-            pos = self.ledger.get_position(exchange, symbol, account_id=self.account_id)
+            pos = self.ledger.get_position_sync(
+                exchange, symbol, account_id=self.account_id
+            )
             if not pos:
                 return None
 
-            price = current_price or pos.current_price
-            params = self.registry.get_strategy_params(exchange, symbol)
+            price = current_price
+            if price is None or price <= 0:
+                try:
+                    df_live = DataLoader.load_candles_sync(
+                        exchange, symbol, timeframe="1m", limit=2
+                    )
+                    if not df_live.empty and "close" in df_live:
+                        price = float(df_live.iloc[-1]["close"])
+                except Exception:
+                    price = None
+            if price is None or price <= 0:
+                price = pos.current_price or pos.entry_price
+
+            params = self.registry.get_strategy_params_sync(exchange, symbol)
             exit_fee = pos.quantity * price * (params.taker_fee_pct / 100.0)
             # l7v.1: include entry fee for consistent lifecycle PnL accounting
             entry_fee = pos.quantity * pos.entry_price * (params.taker_fee_pct / 100.0)
@@ -815,13 +899,13 @@ class PaperTradingEngine:
                 )
 
             realized_pnl_pct = (realized_pnl / (pos.cost_basis or 1.0)) * 100.0
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = datetime.now(UTC).isoformat()
 
             # l7v.10: derive actual bars held from entry_time
             bars_held = 0
             if pos.entry_time:
                 try:
-                    profile = self.registry.get_profile(exchange, symbol)
+                    profile = self.registry.get_profile_sync(exchange, symbol)
                     tf = profile.timeframe if profile else "5m"
                     entry_dt = pd.to_datetime(pos.entry_time, utc=True)
                     now_dt = pd.to_datetime(now_iso, utc=True)
@@ -835,7 +919,7 @@ class PaperTradingEngine:
                 except Exception:
                     bars_held = 0
 
-            self.ledger.record_close_position(
+            self.ledger.record_close_position_sync(
                 account_id=self.account_id,
                 pos=pos,
                 exit_price=price,
@@ -861,8 +945,10 @@ class PaperTradingEngine:
                 exit_reason="MANUAL",
                 params=params.to_dict(),
             )
-            self.ledger.record_completed_trade(trade)
-            self.ledger.close_position(exchange, symbol, account_id=self.account_id)
+            self.ledger.record_completed_trade_sync(trade)
+            self.ledger.close_position_sync(
+                exchange, symbol, account_id=self.account_id
+            )
             return trade
 
     def step_all_active_profiles(self) -> list[dict[str, Any]]:
@@ -882,7 +968,7 @@ class PaperTradingEngine:
 
         start_perf = time.perf_counter()
         try:
-            profiles = self.registry.list_profiles(active_only=True)
+            profiles = self.registry.list_profiles_sync(active_only=True)
             results = []
 
             candle_snapshots: dict[tuple[str, str, str], pd.DataFrame] = {}
@@ -900,7 +986,7 @@ class PaperTradingEngine:
                         df_candles = candle_snapshots[candle_key]
                         cached_candle_hits += 1
                     else:
-                        df_candles = DataLoader.fetch_and_update_candles(
+                        df_candles = DataLoader.fetch_and_update_candles_sync(
                             exchange=p.exchange,
                             symbol=p.symbol,
                             timeframe=p.timeframe,
@@ -909,7 +995,7 @@ class PaperTradingEngine:
                         candle_snapshots[candle_key] = df_candles
                         provider_fetches += 1
 
-                    params = self.registry.get_strategy_params(
+                    params = self.registry.get_strategy_params_sync(
                         exchange=p.exchange,
                         symbol=p.symbol,
                         timeframe=p.timeframe,
@@ -953,7 +1039,7 @@ class PaperTradingEngine:
                     )
 
             latency_ms = (time.perf_counter() - start_perf) * 1000.0
-            self._last_poll_time = datetime.now(timezone.utc).isoformat()
+            self._last_poll_time = datetime.now(UTC).isoformat()
             self._last_poll_metrics = {
                 "poll_latency_ms": round(latency_ms, 2),
                 "active_profiles_count": len(profiles),
@@ -981,7 +1067,7 @@ class PaperTradingEngine:
         Evaluates chronologically bar-by-bar if Stop-Loss or Take-Profit levels were breached
         while the server was offline, executing backfilled fills with historical timestamps.
         """
-        open_positions = self.ledger.list_positions(account_id=self.account_id)
+        open_positions = self.ledger.list_positions_sync(account_id=self.account_id)
         if not open_positions:
             logger.info("[PaperTradingEngine] No open positions to reconcile.")
             return []
@@ -997,7 +1083,7 @@ class PaperTradingEngine:
             key = f"{exchange}:{symbol}"
 
             # Retrieve profile or reconstruct default params from metadata
-            profile = self.registry.get_profile(exchange, symbol)
+            profile = self.registry.get_profile_sync(exchange, symbol)
             timeframe = profile.timeframe if profile else "5m"
             if profile:
                 params = profile.get_strategy_params()
@@ -1018,7 +1104,7 @@ class PaperTradingEngine:
 
                     try:
                         opened_at = pd.to_datetime(
-                            pos.opened_at or pos.timestamp, utc=True
+                            pos.entry_time or pos.last_bar_time, utc=True
                         )
                     except Exception:
                         opened_at = None
@@ -1036,7 +1122,7 @@ class PaperTradingEngine:
                     else:
                         reconcile_limit = 300
 
-                    df_candles = DataLoader.load_candles(
+                    df_candles = DataLoader.load_candles_sync(
                         exchange=exchange,
                         symbol=symbol,
                         timeframe=timeframe,
@@ -1062,6 +1148,16 @@ class PaperTradingEngine:
                         df_candles["timestamp"], utc=True
                     )
 
+            # Ensure indicators and point-in-time regime are computed for trailing stop replay
+            try:
+                strategy = self._get_strategy(params)
+                df_signals = strategy.generate_signals(df_candles)
+            except Exception as e:
+                logger.debug(
+                    f"[PaperTradingEngine] Indicator generation failed during reconcile: {e}"
+                )
+                df_signals = df_candles
+
             # l7v.3: Use last_bar_time (durable market checkpoint) not wall-clock updated_time.
             # Falls back to entry_time if no bar has been processed yet.
             checkpoint_str = pos.last_bar_time or pos.entry_time
@@ -1069,7 +1165,7 @@ class PaperTradingEngine:
                 try:
                     checkpoint_dt = pd.to_datetime(checkpoint_str, utc=True)
                     # Strictly AFTER the checkpoint — don't replay the last processed bar
-                    missed_candles = df_candles[df_candles["timestamp"] > checkpoint_dt]
+                    missed_candles = df_signals[df_signals["timestamp"] > checkpoint_dt]
                     if missed_candles.empty:
                         # No new bars since checkpoint — nothing to reconcile
                         logger.info(
@@ -1077,9 +1173,9 @@ class PaperTradingEngine:
                         )
                         continue
                 except Exception:
-                    missed_candles = df_candles.tail(10)
+                    missed_candles = df_signals.tail(10)
             else:
-                missed_candles = df_candles.tail(10)
+                missed_candles = df_signals.tail(10)
 
             position_closed = False
             last_checked_bar_time = ""
@@ -1173,7 +1269,7 @@ class PaperTradingEngine:
                         )
                     realized_pnl_pct = (realized_pnl / (pos.cost_basis or 1.0)) * 100.0
 
-                    self.ledger.record_close_position(
+                    self.ledger.record_close_position_sync(
                         account_id=self.account_id,
                         pos=pos,
                         exit_price=exit_price,
@@ -1216,8 +1312,8 @@ class PaperTradingEngine:
                         exit_reason=exit_reason,
                         params=params.to_dict(),
                     )
-                    self.ledger.record_completed_trade(trade_record)
-                    self.ledger.close_position(
+                    self.ledger.record_completed_trade_sync(trade_record)
+                    self.ledger.close_position_sync(
                         exchange, symbol, account_id=self.account_id
                     )
 
@@ -1236,6 +1332,47 @@ class PaperTradingEngine:
                     position_closed = True
                     break
 
+                # Trailing stop replay across missed bar
+                if pos.side == "LONG":
+                    cur_unrealized_pnl = (close_price - pos.entry_price) * pos.quantity
+                else:
+                    cur_unrealized_pnl = (pos.entry_price - close_price) * pos.quantity
+                cur_unrealized_pct = (
+                    cur_unrealized_pnl / (pos.cost_basis or 1.0)
+                ) * 100.0
+
+                if pos.stop_loss is not None and cur_unrealized_pct >= 0:
+                    bar_atr = (
+                        float(row["atr"])
+                        if "atr" in row and pd.notna(row["atr"])
+                        else 0.0
+                    )
+                    bar_regime = (
+                        str(row["regime"])
+                        if "regime" in row and pd.notna(row["regime"])
+                        else "trending"
+                    )
+                    if bar_regime == "insufficient_data":
+                        bar_regime = "trending"
+
+                    if bar_atr > 0:
+                        rm = self._get_risk_manager(params)
+                        side_int = 1 if pos.side == "LONG" else -1
+                        pos_entry_atr = (
+                            pos.metadata.get("entry_atr")
+                            if isinstance(pos.metadata, dict)
+                            else None
+                        )
+                        pos.stop_loss = rm.update_trailing_stop(
+                            side=side_int,
+                            current_price=close_price,
+                            current_stop=pos.stop_loss,
+                            atr=bar_atr,
+                            regime=bar_regime,
+                            entry_price=pos.entry_price,
+                            entry_atr=pos_entry_atr,
+                        )
+
             if not position_closed and len(missed_candles) > 0:
                 latest_close = float(missed_candles.iloc[-1]["close"])
                 if pos.side == "LONG":
@@ -1249,7 +1386,7 @@ class PaperTradingEngine:
                 pos.unrealized_pnl_pct = round(unrealized_pnl_pct, 2)
                 # l7v.3: store the last bar's market time as the durable checkpoint
                 pos.last_bar_time = last_checked_bar_time or None
-                self.ledger.save_position(pos)
+                self.ledger.save_position_sync(pos)
 
                 rec_item = {
                     "exchange": exchange,
@@ -1284,15 +1421,29 @@ class PaperTradingEngine:
             )
 
         def _poll_loop():
+            thread_name = threading.current_thread().name
             logger.info(
-                f"[PaperTradingEngine] Started live polling runner (interval={interval_seconds}s)"
+                f"[PaperTradingEngine] Started live polling runner (interval={interval_seconds}s) on thread {thread_name}"
             )
             consecutive_errors = 0
             circuit_open = False
             CIRCUIT_PAUSE_S = 60  # seconds to wait when circuit-breaker trips
+            last_health_log = time.time()
+            HEALTH_LOG_INTERVAL = 30  # seconds
             while not self._stop_event.is_set():
                 try:
-                    self.step_all_active_profiles()
+                    # Offload CPU-heavy polling work to thread pool to avoid
+                    # blocking the main event loop (which must stay responsive
+                    # for API requests and WebSocket messages).
+                    # Create a new event loop for this thread to run the async function.
+                    loop = asyncio.new_event_loop()
+                    try:
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(
+                            asyncio.to_thread(self.step_all_active_profiles)
+                        )
+                    finally:
+                        loop.close()
                     consecutive_errors = 0
                     if circuit_open:
                         circuit_open = False
@@ -1314,8 +1465,27 @@ class PaperTradingEngine:
                         )
                         self._stop_event.wait(CIRCUIT_PAUSE_S)
                         continue
+                except BaseException as e:
+                    # Catch BaseException (KeyboardInterrupt, SystemExit, GeneratorExit)
+                    # to prevent silent thread death. Log and re-raise so the thread
+                    # exits cleanly and _running is corrected.
+                    logger.critical(
+                        f"[PaperTradingEngine] Polling thread {thread_name} received {type(e).__name__}: {e}"
+                    )
+                    self._running = False
+                    raise
+                # Periodic health log so we can confirm thread is alive in prod logs
+                now = time.time()
+                if now - last_health_log >= HEALTH_LOG_INTERVAL:
+                    logger.debug(
+                        f"[PaperTradingEngine] Polling heartbeat — running={self._running}, "
+                        f"consecutive_errors={consecutive_errors}, circuit_open={circuit_open}"
+                    )
+                    last_health_log = now
                 self._stop_event.wait(interval_seconds)
-            logger.info("[PaperTradingEngine] Polling runner stopped.")
+            logger.info(
+                f"[PaperTradingEngine] Polling runner stopped on thread {thread_name}."
+            )
 
         self._poll_thread = threading.Thread(
             target=_poll_loop, name="PaperTradingRunner", daemon=True
@@ -1339,12 +1509,12 @@ class PaperTradingEngine:
         self._poll_thread = None
         return True
 
-    def get_status(self) -> dict[str, Any]:
-        """Get live runner status and summary."""
-        profiles = self.registry.list_profiles(active_only=True)
-        positions = self.ledger.list_positions(account_id=self.account_id)
-        balance = self.ledger.get_balance(self.account_id)
-        stats = self.ledger.get_statistics()
+    async def get_status(self) -> dict[str, Any]:
+        """Get live runner status and summary (async, safe from main event loop)."""
+        profiles = await self.registry.list_profiles(active_only=True)
+        positions = await self.ledger.list_positions(account_id=self.account_id)
+        balance = await self.ledger.get_balance(account_id=self.account_id)
+        stats = await self.ledger.get_statistics()
 
         unrealized_total = sum(p.unrealized_pnl for p in positions)
         positions_market_value = sum(p.cost_basis + p.unrealized_pnl for p in positions)
@@ -1370,10 +1540,10 @@ class PaperTradingEngine:
 
     def get_balance_snapshot(self) -> dict[str, Any]:
         """Get current paper trading balance snapshot for portfolio aggregation."""
-        self.registry.list_profiles(active_only=True)
-        positions = self.ledger.list_positions(account_id=self.account_id)
-        balance = self.ledger.get_balance(self.account_id)
-        self.ledger.get_statistics()
+        self.registry.list_profiles_sync(active_only=True)
+        positions = self.ledger.list_positions_sync(account_id=self.account_id)
+        balance = self.ledger.get_balance_sync(self.account_id)
+        self.ledger.get_statistics_sync()
 
         unrealized_total = sum(p.unrealized_pnl for p in positions)
         positions_market_value = sum(p.cost_basis + p.unrealized_pnl for p in positions)
@@ -1435,7 +1605,9 @@ class PaperTradingEngine:
         take_profit: float | None = None,
     ) -> dict[str, Any]:
         """Dynamically update Stop-Loss and/or Take-Profit price levels on an open position."""
-        pos = self.ledger.get_position(exchange, symbol, account_id=self.account_id)
+        pos = self.ledger.get_position_sync(
+            exchange, symbol, account_id=self.account_id
+        )
         if not pos:
             raise ValueError(f"No open position found for {exchange}:{symbol}")
 
@@ -1444,8 +1616,28 @@ class PaperTradingEngine:
         if take_profit is not None:
             pos.take_profit = round(take_profit, 4) if take_profit > 0 else None
 
-        self.ledger.save_position(pos)
+        self.ledger.save_position_sync(pos)
         return pos.to_dict()
+
+    def reset_state(self, account_id: str = "default") -> None:
+        """Reset in-memory engine evaluations, position locks, and polling metrics for an account."""
+        with self._lock, self._locks_mutex:
+            with self._eval_lock:
+                self._last_evaluations.clear()
+            self._position_locks.clear()
+            self._last_poll_time = None
+            self._consecutive_errors = 0
+            self._last_poll_metrics = {
+                "active_profiles": 0,
+                "cached_candle_hits": 0,
+                "cached_signal_hits": 0,
+                "provider_fetches": 0,
+                "indicator_computations": 0,
+                "duration_seconds": 0.0,
+            }
+        logger.info(
+            f"[PaperTradingEngine] In-memory engine state reset for account '{account_id}'."
+        )
 
 
 # Global paper trading engine singleton

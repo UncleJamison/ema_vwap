@@ -4,7 +4,7 @@ Extracted from src/app.py (ema_vwap-tq41). Shared state is read through
 `src.app` at call time so monkeypatched tests keep working.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -87,7 +87,7 @@ def get_regime_current() -> dict[str, Any]:
     """
 
     try:
-        df = DataLoader.load_candles(
+        df = DataLoader.load_candles_sync(
             exchange="kucoin",
             symbol="BTC/USD",
             timeframe="1h",
@@ -103,7 +103,7 @@ def get_regime_current() -> dict[str, Any]:
     return {
         "status": "success",
         "regime": regime,
-        "last_computed": datetime.now(timezone.utc).isoformat(),
+        "last_computed": datetime.now(UTC).isoformat(),
         "regime_map": dict(REGIME_MAP),
     }
 
@@ -114,12 +114,7 @@ async def get_sensitive_settings(request: Request) -> dict[str, Any]:
     Allows unauthenticated access for bootstrap (first page load).
     The key is already protected by network access to the dashboard.
     """
-    from src.logger import logger
-
-    logger.info(
-        f"[DEBUG] get_sensitive_settings called, headers: {dict(request.headers)}"
-    )
-    settings = _st()._settings_mgr.get_all_sensitive()
+    settings = await _st()._settings_mgr.aget_all_sensitive()
     return {"status": "success", "settings": settings}
 
 
@@ -128,8 +123,67 @@ async def update_sensitive_settings(payload: dict[str, Any]) -> dict[str, Any]:
     """Update sensitive settings (API keys, secrets)."""
     if not payload:
         raise HTTPException(status_code=400, detail="Empty settings payload provided.")
-    updated = _st()._settings_mgr.update_sensitive(payload)
+    updated = await _st()._settings_mgr.aupdate_sensitive(payload)
     return {
         "status": "success",
         "message": f"Successfully updated {updated} sensitive setting(s).",
     }
+
+
+# ============================================================
+# Canonical Symbol Mapping Endpoints
+# ============================================================
+
+
+@router.get("/api/settings/canonical_symbols")
+@router.get("/api/settings/canonical-symbols")
+async def get_canonical_symbols() -> dict[str, Any]:
+    """Get the canonical symbol mapping (exchange-specific symbols per canonical symbol)."""
+    mapping = await _st()._settings_mgr.aget_canonical_symbol_mapping()
+    return {"status": "success", "mapping": mapping}
+
+
+@router.put("/api/settings/canonical_symbols", dependencies=[Depends(get_api_key)])
+@router.put("/api/settings/canonical-symbols", dependencies=[Depends(get_api_key)])
+async def update_canonical_symbols(
+    mapping: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Update the canonical symbol mapping."""
+    if not mapping:
+        raise HTTPException(status_code=400, detail="Empty mapping payload provided.")
+    await _st()._settings_mgr.aset_canonical_symbol_mapping(mapping)
+    return {
+        "status": "success",
+        "message": "Canonical symbol mapping updated successfully.",
+    }
+
+
+@router.post(
+    "/api/settings/canonical_symbols/resolve", dependencies=[Depends(get_api_key)]
+)
+@router.post(
+    "/api/settings/canonical-symbols/resolve", dependencies=[Depends(get_api_key)]
+)
+async def resolve_canonical_symbols(payload: dict[str, Any]) -> dict[str, Any]:
+    """Resolve canonical symbols to exchange-specific symbols."""
+    canonical_list = payload.get("canonical_symbols", [])
+    live_mode = payload.get("live_mode", False)
+
+    if not canonical_list:
+        # Resolve all
+        resolved = await _st()._settings_mgr.aresolve_all_canonical(live_mode=live_mode)
+        return {
+            "status": "success",
+            "resolved": {
+                k: {"exchange": v[0], "symbol": v[1]} for k, v in resolved.items()
+            },
+        }
+
+    resolved = {}
+    for canonical in canonical_list:
+        exchange, symbol = await _st()._settings_mgr.aresolve_exchange_symbol(
+            canonical, live_mode
+        )
+        resolved[canonical] = {"exchange": exchange, "symbol": symbol}
+
+    return {"status": "success", "resolved": resolved}

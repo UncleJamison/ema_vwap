@@ -47,6 +47,7 @@ class Trade:
     pnl_pct: float = 0.0
     fee: float = 0.0
     duration_bars: int = 0
+    entry_atr: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -213,6 +214,46 @@ class BacktestEngine:
                 trades=[],
             )
 
+        # Multi-timeframe (Option A - Phase 4): fetch 1m candles for regime classification
+        # 1m data is cached after first fetch (user confirmed acceptable overhead)
+        # This connects lower-timeframe regime detection to higher-timeframe trading
+        # Note: BacktestEngine uses self.params, not self.config
+        params_has_regime = hasattr(self, "params") and hasattr(
+            self.params, "current_regime"
+        )
+        regime_aware_active = hasattr(self, "params") and getattr(
+            getattr(self, "params", None), "regime_aware_params", False
+        )
+        multi_tf_active = params_has_regime and getattr(
+            getattr(self, "params", None), "use_multi_timeframe_regime", True
+        )
+        # Fetch 1m data for regime classification if multi-timeframe mode is active
+        if multi_tf_active:
+            from src.data_loader import fetch_1m_for_regime_classify
+            from src.sync_bridge import run_async
+
+            # Fetch 1m candles (cached after first fetch)
+            df_1m = run_async(
+                fetch_1m_for_regime_classify(
+                    exchange=getattr(self.params, "exchange", "kucoin"),
+                    symbol=getattr(self.params, "symbol", ""),
+                    days=90,
+                ),
+                timeout=300.0,
+            )
+            # Pass 1m df to strategy for regime classification
+            if df_1m is not None and not df_1m.empty:
+                self.strategy.params._regime_df_1m = df_1m
+                # Also pass to backtester params for downstream use
+                self.params._regime_df_1m = df_1m
+            else:
+                print(
+                    "[Backtester] Warning: 1m fetch returned empty, falling back to 5m regime"
+                )
+        elif regime_aware_active and params_has_regime:
+            # Regime-aware but not multi-timeframe — use existing logic
+            pass
+
         # Pre-extract fast NumPy arrays for orders of magnitude faster execution
         timestamps = df_signals["timestamp"].astype(str).to_numpy()
         opens = df_signals["open"].to_numpy(dtype=float)
@@ -224,6 +265,11 @@ class BacktestEngine:
         signals[1:] = source_signals[:-1]
         vwaps = df_signals["vwap"].to_numpy(dtype=float)
         atrs = df_signals["atr"].to_numpy(dtype=float)
+        regimes = (
+            df_signals["regime"].to_numpy(dtype=object)
+            if "regime" in df_signals.columns
+            else np.array(["trending"] * n_bars, dtype=object)
+        )
 
         is_stock = getattr(self.params, "asset_type", "crypto") == "stock"
         enforce_margin_calls = getattr(self.params, "enforce_margin_calls", False)
@@ -314,17 +360,21 @@ class BacktestEngine:
                             can_enter = False
 
                 if can_enter:
+
                     if side == 1:
                         entry_price = open_p * (1.0 + slippage)
                     else:
                         entry_price = open_p * (1.0 - slippage)
 
+                    # Use signal bar regime (i-1) for entry calculations, matching signal_vwap/signal_atr
+                    signal_regime = regimes[i - 1] if i > 0 else "trending"
                     stop_loss, take_profit = (
                         self.risk_manager.calculate_stop_and_target(
                             entry_price=entry_price,
                             side=side,
                             vwap=signal_vwap,
                             atr=signal_atr,
+                            regime=signal_regime,
                         )
                     )
 
@@ -332,16 +382,35 @@ class BacktestEngine:
                         equity=equity,
                         entry_price=entry_price,
                         stop_loss_price=stop_loss,
+                        regime=signal_regime,
                     )
 
                     entry_price = dynamic_round_price(entry_price)
                     units = dynamic_round_units(units)
                     val_usd = units * entry_price
 
-                    max_position_value = equity * 3.0
+                    # Use max_position_pct from params (default 80%). For crypto spot trading (long_only),
+                    # cap at 100% since it's a cash account with no margin.
+                    max_position_pct = self.params.max_position_pct
+                    if (
+                        self.params.asset_type == "crypto"
+                        and self.params.trade_direction == "long_only"
+                    ):
+                        max_position_pct = min(max_position_pct, 100.0)
+                    max_position_value = equity * (max_position_pct / 100.0)
+
                     if is_stock and enforce_margin_calls:
                         bp_ratio = long_bp_ratio if side == 1 else short_bp_ratio
-                        max_position_value = min(max_position_value, equity * bp_ratio)
+                        max_position_value = equity * bp_ratio
+
+                    # Scale down position to fit portfolio cap (match paper engine behavior)
+                    if not (is_stock and enforce_margin_calls):
+                        if (
+                            units > 0
+                            and val_usd > max_position_value > 0
+                        ):
+                            units = max_position_value / entry_price
+                            val_usd = units * entry_price
 
                     if units > 0 and val_usd <= max_position_value:
                         trade_counter += 1
@@ -364,6 +433,7 @@ class BacktestEngine:
                             stop_loss=dynamic_round_price(stop_loss),
                             take_profit=dynamic_round_price(take_profit),
                             fee=entry_fee,
+                            entry_atr=signal_atr,
                         )
 
             # Evaluate stop/target levels after the bar-open fill; stop wins if both touch.
@@ -452,6 +522,9 @@ class BacktestEngine:
                         current_price=close,
                         current_stop=active_trade.stop_loss,
                         atr=atr,
+                        regime=regimes[i],
+                        entry_price=active_trade.entry_price,
+                        entry_atr=active_trade.entry_atr,
                     )
 
             # Record mark-to-market equity

@@ -37,7 +37,7 @@ def test_all_single_metrics_canonical_definition():
         assert m in TARGET_METRICS
 
 
-def test_batch_optimize_all_metrics_multi_timeframe_rejected():
+def test_batch_optimize_all_metrics_multi_timeframe_rejected(auth_headers):
     """Verify HTTP 400 is raised if target_metric is 'all_metrics' with >1 timeframe."""
     client = TestClient(app)
     payload = {
@@ -47,14 +47,16 @@ def test_batch_optimize_all_metrics_multi_timeframe_rejected():
         "target_metric": "all_metrics",
         "n_trials": 10,
     }
-    resp = client.post("/api/batch_optimize", json=payload)
+    resp = client.post("/api/batch_optimize", json=payload, headers=auth_headers)
     assert resp.status_code == 400
     assert (
         "all_metrics target only supports a single timeframe" in resp.json()["detail"]
     )
 
 
-def test_batch_optimize_all_combinations_single_timeframe_accepted(monkeypatch):
+def test_batch_optimize_all_combinations_single_timeframe_accepted(
+    monkeypatch, auth_headers
+):
     """Verify HTTP 200 starts background task for all 10 single metrics."""
     client = TestClient(app)
     mock_add_task = MagicMock()
@@ -70,7 +72,7 @@ def test_batch_optimize_all_combinations_single_timeframe_accepted(monkeypatch):
     # Patch BackgroundTasks.add_task to inspect generated configs without running long trials
     monkeypatch.setattr("starlette.background.BackgroundTasks.add_task", mock_add_task)
 
-    resp = client.post("/api/batch_optimize", json=payload)
+    resp = client.post("/api/batch_optimize", json=payload, headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "started"
@@ -159,25 +161,35 @@ def test_run_all_metrics_batch_task_cancellation(monkeypatch):
     assert state["error"] == "Batch sweep cancelled"
 
 
-def test_batch_optimizer_run_offset_and_label_prefix(monkeypatch):
+@pytest.mark.asyncio
+async def test_batch_optimizer_run_offset_and_label_prefix(monkeypatch):
     """Verify BatchOptimizer.run respects combo_label_prefix and done_offset."""
-    monkeypatch.setattr(
-        BatchOptimizer,
-        "_run_single_optuna",
-        lambda self, sym, tf, **kwargs: None,
-    )
+
+    async def _noop_optuna(self, sym, tf, **kwargs):
+        return None
+
+    monkeypatch.setattr(BatchOptimizer, "_run_single_optuna", _noop_optuna)
     fake_db = SimpleNamespace(
         save_batch_result=lambda **kwargs: None,
         load_batch_results=lambda **kwargs: [],
     )
     monkeypatch.setattr(batch_module, "db", fake_db)
 
+    async def _fake_save_pg(**kwargs):
+        return None
+
+    async def _fake_load_pg(**kwargs):
+        return []
+
+    monkeypatch.setattr(batch_module, "save_batch_result_pg", _fake_save_pg)
+    monkeypatch.setattr(batch_module, "load_batch_results_pg", _fake_load_pg)
+
     cfg = BatchOptimizerConfig(
         symbols=["BTC/USD"], timeframes=["5m"], target_metric="sortino_ratio"
     )
     opt = BatchOptimizer(cfg)
 
-    opt.run(
+    await opt.run(
         reset_state=False,
         done_offset=5,
         total_override=10,
@@ -223,7 +235,7 @@ def test_all_curated_multi_pairs_canonical_definition():
         assert pair[1] in allowed_pool
 
 
-def test_batch_optimize_all_combinations_multi_timeframe_rejected():
+def test_batch_optimize_all_combinations_multi_timeframe_rejected(auth_headers):
     """Verify HTTP 400 is raised if target_metric is 'all_combinations' with >1 timeframe."""
     client = TestClient(app)
     payload = {
@@ -235,7 +247,7 @@ def test_batch_optimize_all_combinations_multi_timeframe_rejected():
         "multi_objective_metrics": ["all_combinations"],
         "n_trials": 10,
     }
-    resp = client.post("/api/batch_optimize", json=payload)
+    resp = client.post("/api/batch_optimize", json=payload, headers=auth_headers)
     assert resp.status_code == 400
 
 
@@ -281,7 +293,7 @@ def test_run_all_combinations_batch_task_lifecycle(monkeypatch):
     assert state["current_combo"] == "Complete"
 
 
-def test_batch_optimize_all_combinations_target_metric_keys(monkeypatch):
+def test_batch_optimize_all_combinations_target_metric_keys(monkeypatch, auth_headers):
     """Verify all_combinations config generation produces compound target_metric keys matching pair."""
     from src.batch_optimizer import ALL_CURATED_MULTI_PAIRS
 
@@ -298,7 +310,7 @@ def test_batch_optimize_all_combinations_target_metric_keys(monkeypatch):
 
     monkeypatch.setattr("starlette.background.BackgroundTasks.add_task", mock_add_task)
 
-    resp = client.post("/api/batch_optimize", json=payload)
+    resp = client.post("/api/batch_optimize", json=payload, headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "started"
@@ -316,3 +328,43 @@ def test_batch_optimize_all_combinations_target_metric_keys(monkeypatch):
         assert c.target_metric == f"{pair[0]}|{pair[1]}"
         assert c.enable_multi_objective is True
         assert c.multi_objective_metrics == pair
+
+
+@pytest.mark.asyncio
+async def test_batch_optimizer_single_optuna_pipe_separated_metric(monkeypatch):
+    """Verify _run_single_optuna parses compound pipe target_metric into OptunaConfig without error."""
+    from unittest.mock import AsyncMock
+
+    import numpy as np
+    import pandas as pd
+
+    dates = pd.date_range("2024-01-01", periods=600, freq="5min", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "open": np.linspace(100, 110, 600),
+            "high": np.linspace(101, 111, 600),
+            "low": np.linspace(99, 109, 600),
+            "close": np.linspace(100, 110, 600),
+            "volume": [1000.0] * 600,
+        }
+    )
+
+    cfg = BatchOptimizerConfig(
+        symbols=["BTC/USD"],
+        timeframes=["5m"],
+        target_metric="sharpe_ratio|max_drawdown_pct",
+        n_trials=2,
+    )
+    opt = BatchOptimizer(cfg)
+
+    monkeypatch.setattr(
+        "src.data_loader.DataLoader.load_candles", AsyncMock(return_value=df)
+    )
+    monkeypatch.setattr(
+        "src.batch_optimizer.save_batch_result_pg", AsyncMock(return_value=None)
+    )
+
+    result = await opt._run_single_optuna("BTC/USD", "5m")
+    assert result.get("status") != "error"
+    assert "best_params" in result

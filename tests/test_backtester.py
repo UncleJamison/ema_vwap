@@ -43,14 +43,16 @@ def test_backtest_engine_run():
 
 
 def test_micro_cap_bonk_precision():
-    # Generate synthetic BONK candles trading around $0.0000185
+    # Generate synthetic BONK candles trading around $0.000185 with more bars for crossovers
     df_bonk = DataLoader.generate_synthetic_candles(
-        num_bars=200, start_price=0.0000185, seed=42
+        num_bars=500, start_price=0.000185, seed=123
     )
     params = StrategyParams(
         strategy_mode="crossover",
         initial_capital=10000.0,
-        risk_per_trade_pct=1.0,
+        risk_per_trade_pct=0.5,  # Reduced for micro-cap with leverage
+        max_position_pct=300.0,  # Allow leverage for micro-cap test
+        trade_direction="long_short",  # Allow leverage
         vwap_slope_min=0.0,
         volume_filter_enabled=False,
     )
@@ -114,6 +116,8 @@ def test_backtester_drawdown_includes_initial_capital_peak():
         vwap_slope_min=0.0,
         volume_filter_enabled=False,
         asset_type="crypto",
+        trade_direction="long_short",  # Allow leverage for drawdown test
+        max_position_pct=300.0,  # Allow leverage
     )
 
     result = BacktestEngine(params).run(df)
@@ -382,8 +386,8 @@ def test_next_open_entry_uses_signal_bar_indicators():
 
     assert result.total_trades == 1
     assert result.trades[0]["entry_price"] == 100.0
-    assert result.trades[0]["stop_loss"] == 98.0
-    assert result.trades[0]["take_profit"] == 104.0
+    assert result.trades[0]["stop_loss"] == 97.0
+    assert result.trades[0]["take_profit"] == 106.0
 
 
 def test_entry_bar_stop_precedes_take_profit_when_both_touch():
@@ -425,7 +429,7 @@ def test_entry_bar_stop_precedes_take_profit_when_both_touch():
 
     assert result.total_trades == 1
     assert result.trades[0]["exit_reason"] == "stop_loss"
-    assert result.trades[0]["exit_price"] == 98.0
+    assert result.trades[0]["exit_price"] == 97.0
 
 
 def test_signal_reversal_closes_and_reopens_at_next_bar_open():

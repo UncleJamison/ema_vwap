@@ -7,15 +7,27 @@ Tests for Audit Log Routes (src/routes/audit.py):
 """
 
 import json
-from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.audit.logger import AuditEvent, AuditEventType, AuditLogger
 from src.auth.dependencies import require_audit_read
+from src.routes.audit import get_audit_logger
 from src.routes.audit import router as audit_router
+
+
+def _run(coro, timeout: float = 15.0):
+    """Run a coroutine on the shared main loop (same path as sync_bridge)."""
+    import asyncio
+
+    from src.sync_bridge import get_main_loop
+
+    ml = get_main_loop()
+    assert ml is not None, "pg_container must set the main loop"
+    return asyncio.run_coroutine_threadsafe(coro, ml).result(timeout=timeout)
 
 
 class TestAuditRoutesList:
@@ -23,7 +35,7 @@ class TestAuditRoutesList:
 
     def test_list_audit_logs_empty(self, client, mock_audit_logger):
         """Should return empty list when no logs exist."""
-        mock_audit_logger.query = Mock(return_value=[])
+        mock_audit_logger.query = AsyncMock(return_value=[])
 
         response = client.get("/api/audit")
 
@@ -53,7 +65,7 @@ class TestAuditRoutesList:
                 "error_message": None,
             }
         ]
-        mock_audit_logger.query = Mock(return_value=mock_logs)
+        mock_audit_logger.query = AsyncMock(return_value=mock_logs)
 
         response = client.get("/api/audit")
 
@@ -66,7 +78,7 @@ class TestAuditRoutesList:
 
     def test_list_audit_logs_with_user_filter(self, client, mock_audit_logger):
         """Should filter by user_id."""
-        mock_audit_logger.query = Mock(return_value=[])
+        mock_audit_logger.query = AsyncMock(return_value=[])
 
         response = client.get("/api/audit?user_id=user_1")
 
@@ -77,7 +89,7 @@ class TestAuditRoutesList:
 
     def test_list_audit_logs_with_event_type_filter(self, client, mock_audit_logger):
         """Should filter by event_type."""
-        mock_audit_logger.query = Mock(return_value=[])
+        mock_audit_logger.query = AsyncMock(return_value=[])
 
         response = client.get("/api/audit?event_type=auth.login")
 
@@ -87,7 +99,7 @@ class TestAuditRoutesList:
 
     def test_list_audit_logs_with_time_filters(self, client, mock_audit_logger):
         """Should filter by start_time and end_time."""
-        mock_audit_logger.query = Mock(return_value=[])
+        mock_audit_logger.query = AsyncMock(return_value=[])
 
         start = "2024-01-01T00:00:00"
         end = "2024-01-02T00:00:00"
@@ -100,7 +112,7 @@ class TestAuditRoutesList:
 
     def test_list_audit_logs_with_pagination(self, client, mock_audit_logger):
         """Should respect limit and offset parameters."""
-        mock_audit_logger.query = Mock(return_value=[])
+        mock_audit_logger.query = AsyncMock(return_value=[])
 
         response = client.get("/api/audit?limit=50&offset=25")
 
@@ -169,7 +181,7 @@ class TestAuditRoutesEventTypes:
         # Check some known event types
         assert "auth.login" in data["event_types"]
         assert "strategy.created" in data["event_types"]
-        assert "paper.trade_executed" in data["event_types"]
+        assert "paper_trade.opened" in data["event_types"]
 
 
 class TestAuditRoutesStats:
@@ -187,24 +199,39 @@ class TestAuditRoutesStats:
 
 
 class TestAuditLoggerCore:
-    """Tests for AuditLogger core functionality."""
+    """Tests for AuditLogger core functionality (async, PG-backed)."""
 
     @pytest.fixture
-    def audit_logger(self, tmp_path):
-        """Create AuditLogger with temporary database."""
-        db_path = tmp_path / "test_audit.db"
-        from src.database import CandleDatabase
+    def audit_logger(self, pg_container):
+        """Create AuditLogger with a clean audit_log table (per-test isolation)."""
+        import asyncio as _asyncio
 
-        db = CandleDatabase(db_path=str(db_path))
-        return AuditLogger(db=db)
+        from src.sync_bridge import get_main_loop
+
+        ml = get_main_loop()
+
+        async def _cleanup():
+            from src.pg_connection_manager import get_pg_manager
+
+            pool = get_pg_manager().get_pool("system")
+            async with pool.acquire() as conn:
+                try:
+                    await conn.execute("TRUNCATE audit_log")
+                except Exception as e:
+                    print(f"[audit-test] TRUNCATE skipped (table lazy-created): {e}")
+
+        _asyncio.run_coroutine_threadsafe(_cleanup(), ml).result(timeout=10)
+        return AuditLogger()
 
     def test_log_basic_event(self, audit_logger):
         """Should log basic audit event."""
-        event = audit_logger.log(
-            event_type=AuditEventType.LOGIN,
-            user_id="user_1",
-            username="testuser",
-            action="login",
+        event = _run(
+            audit_logger.log(
+                event_type=AuditEventType.LOGIN,
+                user_id="user_1",
+                username="testuser",
+                action="login",
+            )
         )
 
         assert event.event_type == AuditEventType.LOGIN
@@ -214,97 +241,103 @@ class TestAuditLoggerCore:
         assert event.success is True
 
         # Verify it was persisted
-        logs = audit_logger.query(limit=1)
+        logs = _run(audit_logger.query(limit=1))
         assert len(logs) == 1
         assert logs[0]["event_id"] == event.event_id
 
     def test_log_event_with_details(self, audit_logger):
         """Should log event with details dict."""
         details = {"key": "value", "count": 42}
-        event = audit_logger.log(
-            event_type=AuditEventType.STRATEGY_CREATED,
-            user_id="user_1",
-            details=details,
+        event = _run(
+            audit_logger.log(
+                event_type=AuditEventType.STRATEGY_CREATED,
+                user_id="user_1",
+                details=details,
+            )
         )
 
         assert event.details == details
 
-        logs = audit_logger.query(limit=1)
+        logs = _run(audit_logger.query(limit=1))
         assert logs[0]["details"] == details
 
     def test_log_failed_event(self, audit_logger):
         """Should log failed event with error message."""
-        event = audit_logger.log(
-            event_type=AuditEventType.LOGIN_FAILED,
-            user_id="user_1",
-            success=False,
-            error_message="Invalid password",
+        event = _run(
+            audit_logger.log(
+                event_type=AuditEventType.LOGIN_FAILED,
+                user_id="user_1",
+                success=False,
+                error_message="Invalid password",
+            )
         )
 
         assert event.success is False
         assert event.error_message == "Invalid password"
 
-        logs = audit_logger.query(limit=1)
+        logs = _run(audit_logger.query(limit=1))
         assert logs[0]["success"] is False
         assert logs[0]["error_message"] == "Invalid password"
 
     def test_log_with_resource(self, audit_logger):
         """Should log event with resource info."""
-        event = audit_logger.log(
-            event_type=AuditEventType.STRATEGY_DEPLOYED,
-            user_id="user_1",
-            resource_id="strat_123",
-            resource_type="strategy",
-            action="deployed",
+        event = _run(
+            audit_logger.log(
+                event_type=AuditEventType.STRATEGY_DEPLOYED,
+                user_id="user_1",
+                resource_id="strat_123",
+                resource_type="strategy",
+                action="deployed",
+            )
         )
 
         assert event.resource_id == "strat_123"
         assert event.resource_type == "strategy"
 
-        logs = audit_logger.query(limit=1)
+        logs = _run(audit_logger.query(limit=1))
         assert logs[0]["resource_id"] == "strat_123"
         assert logs[0]["resource_type"] == "strategy"
 
     def test_query_filters_by_user_id(self, audit_logger):
         """Should filter query by user_id."""
-        audit_logger.log(AuditEventType.LOGIN, user_id="user_1")
-        audit_logger.log(AuditEventType.LOGIN, user_id="user_2")
+        _run(audit_logger.log(AuditEventType.LOGIN, user_id="user_1"))
+        _run(audit_logger.log(AuditEventType.LOGIN, user_id="user_2"))
 
-        logs = audit_logger.query(user_id="user_1")
+        logs = _run(audit_logger.query(user_id="user_1"))
         assert len(logs) == 1
         assert logs[0]["user_id"] == "user_1"
 
     def test_query_filters_by_event_type(self, audit_logger):
         """Should filter query by event_type."""
-        audit_logger.log(AuditEventType.LOGIN)
-        audit_logger.log(AuditEventType.LOGOUT)
+        _run(audit_logger.log(AuditEventType.LOGIN))
+        _run(audit_logger.log(AuditEventType.LOGOUT))
 
-        logs = audit_logger.query(event_type=AuditEventType.LOGIN)
+        logs = _run(audit_logger.query(event_type=AuditEventType.LOGIN))
         assert len(logs) == 1
         assert logs[0]["event_type"] == "auth.login"
 
     def test_query_filters_by_time_range(self, audit_logger):
         """Should filter query by time range."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         past = now - timedelta(hours=2)
         future = now + timedelta(hours=2)
 
-        audit_logger.log(AuditEventType.LOGIN)  # Now
+        _run(audit_logger.log(AuditEventType.LOGIN))  # Now
 
         # Query with future start time should return empty
-        logs = audit_logger.query(start_time=future)
+        logs = _run(audit_logger.query(start_time=future))
         assert len(logs) == 0
 
         # Query with past start time should return the log
-        logs = audit_logger.query(start_time=past)
+        logs = _run(audit_logger.query(start_time=past))
         assert len(logs) == 1
 
     def test_query_respects_limit_and_offset(self, audit_logger):
         """Should respect limit and offset in query."""
         for i in range(5):
-            audit_logger.log(AuditEventType.LOGIN, username=f"user_{i}")
+            _run(audit_logger.log(AuditEventType.LOGIN, username=f"user_{i}"))
 
-        logs = audit_logger.query(limit=2, offset=1)
+        logs = _run(audit_logger.query(limit=2, offset=1))
         assert len(logs) == 2
         # Should be ordered by timestamp DESC
         assert logs[0]["username"] == "user_3"  # 4th created (0-indexed: 3)
@@ -312,34 +345,59 @@ class TestAuditLoggerCore:
 
     def test_query_returns_empty_for_no_matches(self, audit_logger):
         """Should return empty list for no matches."""
-        audit_logger.log(AuditEventType.LOGIN, user_id="user_1")
+        _run(audit_logger.log(AuditEventType.LOGIN, user_id="user_1"))
 
-        logs = audit_logger.query(user_id="nonexistent")
+        logs = _run(audit_logger.query(user_id="nonexistent"))
         assert logs == []
 
 
 class TestAuditLoggerHelpers:
     """Tests for AuditLogger helper methods."""
 
+    @pytest.fixture
+    def audit_logger(self, pg_container):
+        import asyncio as _asyncio
+
+        from src.sync_bridge import get_main_loop
+
+        ml = get_main_loop()
+
+        async def _cleanup():
+            from src.pg_connection_manager import get_pg_manager
+
+            pool = get_pg_manager().get_pool("system")
+            async with pool.acquire() as conn:
+                try:
+                    await conn.execute("TRUNCATE audit_log")
+                except Exception as e:
+                    print(f"[audit-test] TRUNCATE skipped (table lazy-created): {e}")
+
+        _asyncio.run_coroutine_threadsafe(_cleanup(), ml).result(timeout=10)
+        return AuditLogger()
+
     def test_log_login(self, audit_logger):
         """Should log login attempt."""
-        event = audit_logger.log_login(
-            user_id="user_1",
-            username="testuser",
-            ip="192.168.1.1",
-            success=True,
+        event = _run(
+            audit_logger.log_login(
+                user_id="user_1",
+                username="testuser",
+                ip="192.168.1.1",
+                success=True,
+            )
         )
 
         assert event.event_type == AuditEventType.LOGIN
         assert event.action == "login"
         assert event.success is True
 
-        event = audit_logger.log_login(
-            user_id="user_1",
-            username="testuser",
-            ip="192.168.1.1",
-            success=False,
-            error="Invalid password",
+        event = _run(
+            audit_logger.log_login(
+                user_id="user_1",
+                username="testuser",
+                ip="192.168.1.1",
+                success=False,
+                error="Invalid password",
+            )
         )
 
         assert event.event_type == AuditEventType.LOGIN_FAILED
@@ -348,11 +406,13 @@ class TestAuditLoggerHelpers:
 
     def test_log_api_key_created(self, audit_logger):
         """Should log API key creation."""
-        event = audit_logger.log_api_key_created(
-            user_id="user_1",
-            username="testuser",
-            key_name="my-key",
-            key_prefix="ema_abc",
+        event = _run(
+            audit_logger.log_api_key_created(
+                user_id="user_1",
+                username="testuser",
+                key_name="my-key",
+                key_prefix="ema_abc",
+            )
         )
 
         assert event.event_type == AuditEventType.API_KEY_CREATED
@@ -363,12 +423,14 @@ class TestAuditLoggerHelpers:
 
     def test_log_strategy_change(self, audit_logger):
         """Should log strategy change."""
-        event = audit_logger.log_strategy_change(
-            user_id="user_1",
-            username="testuser",
-            event_type=AuditEventType.STRATEGY_DEPLOYED,
-            strategy_id="strat_123",
-            details={"mode": "paper"},
+        event = _run(
+            audit_logger.log_strategy_change(
+                user_id="user_1",
+                username="testuser",
+                event_type=AuditEventType.STRATEGY_DEPLOYED,
+                strategy_id="strat_123",
+                details={"mode": "paper"},
+            )
         )
 
         assert event.event_type == AuditEventType.STRATEGY_DEPLOYED
@@ -380,7 +442,7 @@ class TestAuditLoggerHelpers:
     def test_log_paper_trade(self, audit_logger):
         """Should log paper trade."""
         trade_data = {"symbol": "BTC/USD", "side": "buy", "qty": 0.1}
-        event = audit_logger.log_paper_trade("user_1", "testuser", trade_data)
+        event = _run(audit_logger.log_paper_trade("user_1", "testuser", trade_data))
 
         assert event.event_type == AuditEventType.PAPER_TRADE_EXECUTED
         assert event.resource_type == "paper_trade"
@@ -389,7 +451,7 @@ class TestAuditLoggerHelpers:
     def test_log_order_execution(self, audit_logger):
         """Should log order execution."""
         order_data = {"order_id": "ord_123", "symbol": "ETH/USD", "side": "sell"}
-        event = audit_logger.log_order_execution("user_1", "testuser", order_data)
+        event = _run(audit_logger.log_order_execution("user_1", "testuser", order_data))
 
         assert event.event_type == AuditEventType.ORDER_EXECUTED
         assert event.resource_type == "order"
@@ -403,7 +465,7 @@ class TestAuditEventDataclass:
         """Should convert to dict with all fields."""
         event = AuditEvent(
             event_id="evt_123",
-            timestamp=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC),
             event_type=AuditEventType.LOGIN,
             user_id="user_1",
             username="testuser",
@@ -450,7 +512,7 @@ class TestAuditEventType:
         """Should have expected categories."""
         auth_events = [e for e in AuditEventType if e.value.startswith("auth.")]
         strategy_events = [e for e in AuditEventType if e.value.startswith("strategy.")]
-        paper_events = [e for e in AuditEventType if e.value.startswith("paper.")]
+        paper_events = [e for e in AuditEventType if e.value.startswith("paper")]
 
         assert len(auth_events) >= 5
         assert len(strategy_events) >= 5
@@ -481,7 +543,7 @@ class TestAuditRoutesIntegration:
             }
             for i in range(3)
         ]
-        mock_audit_logger.query = Mock(return_value=mock_logs)
+        mock_audit_logger.query = AsyncMock(return_value=mock_logs)
 
         # Query logs
         response = client.get("/api/audit")
@@ -500,21 +562,13 @@ class TestAuditRoutesIntegration:
 
 
 # Fixtures
-@pytest.fixture
-def audit_logger(tmp_path):
-    """Create AuditLogger with temporary database."""
-    db_path = tmp_path / "test_audit.db"
-    from src.database import CandleDatabase
-
-    db = CandleDatabase(db_path=str(db_path))
-    return AuditLogger(db=db)
 
 
 @pytest.fixture
 def mock_audit_logger():
-    """Create a mock audit logger."""
+    """Create a mock audit logger with async query method."""
     mock_logger = Mock(spec=AuditLogger)
-    mock_logger.query = Mock(return_value=[])
+    mock_logger.query = AsyncMock(return_value=[])
     return mock_logger
 
 
@@ -522,8 +576,6 @@ def mock_audit_logger():
 def client(mock_audit_logger):
     """Create test client with audit router and auth override."""
     from fastapi import FastAPI
-
-    from src.routes.audit import get_audit_logger
 
     app = FastAPI()
     app.include_router(audit_router)
